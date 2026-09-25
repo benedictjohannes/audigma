@@ -1,4 +1,4 @@
-# audampler — Product, Architecture, and Delivery Plan (v2.0)
+# audampler — Product, Architecture, and Delivery Plan (v2.1)
 
 **Status:** proposed implementation plan; no implementation exists yet. Numerical quality targets below are engineering goals, not measured results. Configuration examples define the intended interface and become executable acceptance fixtures as it is implemented.
 
@@ -71,10 +71,10 @@ Applications → PipeWire PCM mixing/graph rate → audampler virtual sink
 Player / file / explicitly negotiated stream → audampler → exclusive DAC path
 ```
 
-- Select a source-family target only when the actual input rate is known.
+- Select a source-family target only when the actual input rate is known. On a PipeWire virtual sink this requires the graph to permit rate switching (`default.clock.allowed-rates` covering both families plus multi-rate `EnumFormat` without a rate lock); a graph pinned to a single rate (commonly 48000) silently resamples upstream and defeats music mode — see `doctor` check in §7.
 - Preserve input samples up to the selected DSP stages; report any upstream conversions that can be observed.
 - Support gapless continuation across compatible tracks, optional keep-open silence, and rate-change hysteresis.
-- Dedicated native DSD/explicit DoP input can later bypass DSP when output is compatible. A mixed desktop PCM sink is not a DSD passthrough input.
+- Dedicated native DSD/explicit DoP input can later bypass DSP when output is compatible. A mixed desktop PCM sink is not a DSD passthrough input. Scope: v1.0 provides bit-exact passthrough only on compatible file/ALSA inputs via the typed passthrough path (§3.3); the full DSD-input matrix with remodulation options (§6.1) follows later.
 
 **C. Offline/pipe conversion — reproducibility first**
 
@@ -110,9 +110,9 @@ decode/unpack
 ```
 
 - `StreamSpec` carries sample domain, exact rate, channel positions, and format/layout; use distinct types for PCM sample rates, DSD bit rates, and transport frame rates.
-- `prepare(spec, config, capabilities)` resolves rates, coefficients, buffers, latency, and backend parameters off the real-time thread.
+- `prepare(spec, config, capabilities)` resolves rates, coefficients, buffers, latency, and backend parameters off the real-time thread. The planner factors adaptive ratios per §4.2 (`R_asrc × R_rational × 2^K`) and reports the resolved per-stage chain in `config explain`.
 - `process(input, output)` reports consumed/produced counts without allocating. Rational SRC must support variable counts and arbitrary caller block sizes.
-- `drain()`/end-of-stream policy distinguishes filter tail from program duration. Reset, seek, discontinuity, and rate changes are explicit events.
+- `drain()`/end-of-stream policy distinguishes filter tail from program duration. Reset, seek, discontinuity, and rate changes are explicit events. Distinguish planned PCM-domain fades (pre-SRC gain ramps that take `filter_group_delay` to reach the modulator — pipeline must clear before switching) from emergency overload faults (which bypass the filter tail and swap idle at the modulator boundary per §4.5.3).
 - Retain resampler history, modulator states, packing residue, and dither RNG state across ordinary block boundaries.
 - DSD passthrough is a separate typed path with representation changes only; it cannot accidentally enter PCM processing.
 - Keep block sizes bounded. Stream final interpolation tiles into the modulator instead of materializing seconds of MHz-rate floating-point audio.
@@ -128,12 +128,12 @@ decode/unpack
 
 ### 4.2 Resampling and interpolation
 
-1. Implement a rational polyphase windowed-sinc SRC for ratios such as 44.1↔48 kHz and arbitrary input rates. Use a continuously adjustable fractional-phase path for clock drift.
-2. Use multistage 2× interpolation, including sparse half-band FIRs where their symmetry and transition requirements fit. A minimum-phase transformation generally loses linear-phase symmetry and half-band sparsity; budget its actual cost.
+1. Implement a rational polyphase windowed-sinc SRC for ratios such as 44.1↔48 kHz and arbitrary input rates. Use a continuously adjustable fractional-phase path for clock drift. When `clock.mode = "adaptive-input"`, factor the total ratio as `R_total(t) = R_asrc(t) × R_rational × 2^K`: the continuously variable fractional-phase stage always executes at a low baseband/intermediate rate (1× or 2× input rate, e.g. 88.2/96 kHz) *prior* to the fixed 2× half-band cascade. Even when the nominal ratio is an exact power of two (e.g. 44.1 kHz → DSD256 at 256×, or 48 kHz → DSD256/48 at 256×), the actual ratio is `2^8 × (1 ± δ_ppm)`; the planner must never schedule fixed half-band stages alone with no stage left to absorb drift, and must never run variable interpolation at the final MHz rate.
+2. Use multistage 2× interpolation, including sparse half-band FIRs where their symmetry and transition requirements fit. These stages are fixed-coefficient synchronous stages. A minimum-phase transformation generally loses linear-phase symmetry and half-band sparsity; budget its actual cost.
 3. The planner may first reduce an unnecessarily high PCM rate when the chosen target bandwidth permits it, using verified anti-alias filtering.
 4. Generate coefficients in `f64` or higher-precision design tooling. Store generation parameters, normalization, checksum, and measured response.
 5. Use `f64` coefficients/accumulation for the reference and initial high-quality engine. Add mixed-precision or `f32` kernels only after measuring coefficient quantization, rounding, near-zero behavior, and complete-cascade performance.
-6. Use stable Rust and runtime-dispatched scalar/SIMD kernels (for example `std::arch` or a vetted SIMD crate). Do not assume portable `std::simd`/`core::simd` is stable on the selected MSRV. Record FMA and denormal behavior.
+6. Use stable Rust and runtime-dispatched scalar/SIMD kernels (for example `std::arch` or a vetted SIMD crate). Do not assume portable `std::simd`/`core::simd` is stable on the selected MSRV. Record FMA and denormal behavior. Inside the 1-bit DSM loop the quantizer feedback is strictly `{-1.0, +1.0}` (never `0.0`), so integrator states stay excited and rarely approach subnormals; subnormal risk concentrates in upstream PCM conditioning / FIR / IIR stages fed digital zero. Set hardware FTZ/DAZ per DSP-worker thread entry during `prepare`/`run` (x86 MXCSR / ARM FPCR) to eliminate tail latency spikes across all stages.
 
 **Filter controls:**
 
@@ -180,8 +180,8 @@ Presets may select among profiles; they must not independently override topology
 
 - Use `preamp_db` as a signed gain: negative attenuates. Keep user volume, loudness normalization, and profile headroom separately visible.
 - Required total attenuation is based on measured reconstructed peaks and the profile's operating limit. If a predicted peak is `P dBFS`, the allowed peak is `L dBFS`, and margin is `M dB`, require `gain_db ≤ L - M - P`.
-- `headroom = profile` applies the profile's documented baseline attenuation. It is not a proof that arbitrary material cannot overload.
-- Meter the final PCM signal entering the modulator. Initial live overload policy is fault/mute/recover; optional lookahead limiting is explicitly enabled and reported. Offline two-pass peak analysis can select a fixed gain without dynamic limiting.
+- `headroom = profile` applies the profile's documented baseline attenuation. It is not a proof that arbitrary material cannot overload. Each profile manifest must publish its baseline in dB so `config explain` shows the numeric total (`preamp_db` + volume + headroom).
+- Meter the final PCM signal entering the modulator. Initial live overload policy is fault/mute/recover; optional lookahead limiting is explicitly enabled and reported. Offline two-pass peak analysis can select a fixed gain without dynamic limiting: because the SRC + interpolation cascade is linear and time-invariant, scaling the pre-SRC input by gain `G` scales the modulator-input peak by exactly `G` (given an identical SRC/DSP chain and no intermediate clipping), so Pass 1 runs only the PCM interpolation cascade or true-peak estimator and skips the sequential 1-bit DSM loop and bit packing.
 - PCM integer-output dither is separate from DSM dither. Apply TPDF at the final integer quantizer when reducing precision; do not dither floating-point output or packed DSD as PCM. Noise-shaped PCM quantization is a later, rate-qualified feature, not “linear-phase dither.”
 - Define DSM dither relative to the quantizer step (`2` for a ±1 quantizer), with peak/RMS conventions. Select the injection point through analysis and measurement; there is no unconditional noise-free dither amplitude.
 - Nonfinite input/state triggers an immediate fault. State limits are detectors and last-resort containment, not routine clipping in a supposedly linear loop. A profile fails qualification if protection is needed inside its declared operating envelope.
@@ -190,9 +190,9 @@ Presets may select among profiles; they must not independently override topology
 
 **Never multiply or crossfade packed DSD/DoP samples, and never use all-zero DSD bytes as audible silence.** All-zero bits represent a full-polarity density, not zero signal.
 
-1. For planned gain/rate/profile changes, fade PCM before modulation, allow pipeline delay to clear, and emit a verified DSD idle stream while the DAC remains in DSD mode.
+1. For planned gain/rate/profile changes, fade PCM before modulation (pre-SRC ramp), allow pipeline delay (`filter_group_delay`) to clear, and emit a verified DSD idle stream while the DAC remains in DSD mode.
 2. Use a tested zero-input modulator stream or qualified balanced idle sequence; verify its spectrum, bit ordering, channel synchronization, and boundary behavior.
-3. For an unexpected overload, replace unsafe output with the idle stream; reset/reprime the loop through a tested recovery sequence and resume with a PCM-domain fade. Do not promise zero transient from every emergency boundary.
+3. For an unexpected overload, replace unsafe output with the idle stream directly at the modulator boundary (bypassing filter-tail latency); reset/reprime the loop through a tested recovery sequence and resume with a PCM-domain fade. Do not promise zero transient from every emergency boundary.
 4. Preserve DoP marker alternation while sending idle data. During format/rate renegotiation, coordinate backend drain/stop/reopen/prefill and a device-specific settling interval.
 5. DSD passthrough cannot have a software gain ramp while staying bit-exact. Use device mute if available or a documented stop/idle transition; changing gain requires remodulation.
 6. PCM pipelines with compatible formats can crossfade after latency alignment. DSD profile changes use mute/reprime rather than blending bitstreams.
@@ -212,7 +212,7 @@ For conventional 44.1 kHz-family DSD:
 | DSD256 | 11,289,600 | 705,600 | 352,800 | 1,411,200 |
 | DSD512 | 22,579,200 | 1,411,200 | 705,600 | 2,822,400 |
 
-- Standard stereo DoP carries 16 DSD bits per channel per PCM frame; alternate `0x05`/`0xFA` markers in the upper byte of the 24-bit payload, synchronized across channels. Explicitly handle 24-in-32 alignment and signed container representation.
+- Standard stereo DoP carries 16 DSD bits per channel per PCM frame; alternate `0x05`/`0xFA` markers in the upper byte of the 24-bit payload, synchronized across channels. Explicitly handle 24-in-32 alignment and signed container representation. USB Audio Class 2.0 DACs expose DoP over three ALSA container variants that must each have distinct golden pack/unpack vectors: `s32le` MSB-justified (24-bit DoP frame shifted left by 8, `0x05_HI_LO_00`), `s24le` LSB-justified in a 32-bit word (`0x00_05_HI_LO`), and `s24_3le` packed 24-bit (3 bytes/sample). Probe which variant each device accepts; do not assume one covers the others.
 - ALSA native DSD variants include U8/U16/U32 and supported byte orders. For `w` payload bits per sample container, the ALSA frame rate is `f_bit / w`. Probe actual format/rate/channel combinations, not independent maxima.
 - SPA `audio/dsd` expresses rate in bytes per second per channel, with separate bit order and signed byte-interleave fields [1]. Convert at the API boundary; never substitute the bit clock directly.
 - 48 kHz-family DSD rates are `48,000 * multiplier`; show this explicitly (for example `DSD256/48 = 12.288 MHz`). Do not infer support from conventional DSD256 support.
@@ -237,7 +237,7 @@ For DSD output, prohibit unverified fallback to a generic PCM sink, Bluetooth de
 A ring buffer does not solve long-term clock mismatch. PipeWire input and a directly opened DAC may use independent clocks; ALSA loopback and a physical DAC may also drift.
 
 - Make the hardware output clock the timing reference for the bridge.
-- Track timestamps and buffer occupancy; apply a bounded, slowly varying ratio correction in the PCM SRC stage before modulation.
+- Track timestamps and buffer occupancy; apply a bounded, slowly varying ratio correction in the low-rate PCM ASRC stage before modulation and before the fixed half-band cascade (see §4.2). Never place the variable-ratio stage at the final MHz rate.
 - Configure a maximum correction range in ppm; expose measured correction and queue fill. Fault/recover when the estimate or occupancy leaves valid limits.
 - Avoid sample dropping/duplication as normal drift control. Never resample the completed DSD bitstream.
 - In a verified single-clock native PipeWire path, let PipeWire provide pacing and avoid a second adaptive controller.
@@ -288,6 +288,22 @@ A ring buffer does not solve long-term clock mismatch. PipeWire input and a dire
 - Device records and measurement caches live under XDG state/cache paths; configuration under `$XDG_CONFIG_HOME/audampler/config.toml` (default `~/.config/audampler/config.toml`).
 
 The following are standalone proposed examples. `profile = "auto-verified"` is a resolver policy: select an installed qualified profile for the exact target rate or fail with an explanation. It is not an unmeasured coefficient set.
+
+**Rules vs. `rate_policy`:** `[[rules]]` (ordered first-match) selects a complete preset; after resolution `[target]` holds one explicit rate. `rate_policy = "source-family"` plus `pcm_rate_44100_hz` / `pcm_rate_48000_hz` is shorthand resolved through the same rule/family map, not an orthogonal mechanism — `config explain` must show the matched rule and the final explicit rate. Example shape (Ticket #4 turns this into fixtures):
+
+```toml
+schema_version = 1
+
+[[rules]]
+when_input_rate_family = "44100"   # 44.1k, 88.2k, 176.4k, ...
+apply_preset = "music-reference"
+set_target = { format = "pcm", pcm_rate_hz = 705600 }
+
+[[rules]]
+when_input_rate_family = "48000"   # 48k, 96k, 192k, ...
+apply_preset = "music-reference"
+set_target = { format = "pcm", pcm_rate_hz = 768000 }
+```
 
 ### 6.3 Shared desktop PCM sink (`desktop-pcm.toml`)
 
@@ -373,7 +389,7 @@ on_device_loss = "wait"
 fallback = "none"
 ```
 
-This deliberately converts a 48 kHz desktop graph to a fixed conventional DSD256 rate when necessary. Buffer/period values are requests, rounded to supported hardware values and reported. The DAC must be released by PipeWire before direct ALSA access.
+This deliberately converts a 48 kHz desktop graph to a fixed conventional DSD256 rate when necessary (a 235.2× cross-family rational ratio, not family-preserving; prefer fixed-per-family targets when the graph rate is known). Buffer/period values are requests, rounded to supported hardware values and reported. The DAC must be released by PipeWire before direct ALSA access.
 
 ### 6.5 MPD/ALSA loopback to high-rate PCM (`mpd-pcm.toml`)
 
@@ -452,7 +468,10 @@ profile = "auto-verified"
 seed = 12345
 tail_policy = "trim-to-duration"
 write_report = true
+dsf_pad_mode = "spec-zero"  # "spec-zero" (default) | "dsd-silence" (see §8.3)
 ```
+
+`peak_analysis = "two-pass"` runs Pass 1 on the PCM interpolation cascade only (skipping DSM/packing per §4.4) to compute the fixed gain, then Pass 2 runs the full chain.
 
 `trim-to-duration` compensates declared pipeline delay and uses a documented output-count rounding rule; `preserve-tail` records the extended duration. Album-continuous conversion maintains state across tracks and splits output at exact rational boundaries.
 
@@ -524,7 +543,7 @@ audampler doctor [--json]
 
 - `run` stays in the foreground; ship a `systemd --user` unit rather than self-daemonizing. Startup order and reconnect logic account for PipeWire/WirePlumber availability.
 - `benchmark` accepts a file or generated stimuli, excludes decoder/disk time from a separately reported DSP-only measurement, and also reports end-to-end throughput.
-- `doctor` reports permissions, busy devices, routing loops, mismatched rates, unverified DoP, missing profiles, and CPU margin with actionable remedies.
+- `doctor` reports permissions, busy devices, routing loops, mismatched rates, unverified DoP, missing profiles, and CPU margin with actionable remedies. It inspects PipeWire `clock.allowed-rates` and upstream link resample state and warns when `mode = "music"` or `rate_policy = "source-family"` is configured on a graph locked to a single clock rate.
 - Use a local Unix-domain control socket under `$XDG_RUNTIME_DIR/audampler/`; CLI/TUI/web share the same versioned request/status model.
 - Report input and graph rates, output bit/sample/transport rates, profile hashes, gain components, measured peaks, latency breakdown, queue occupancy, clock ppm, XRuns, recoveries, and stage timing.
 - Expose requested versus actual output path. “Bit-exact” applies only to a verified passthrough path, not to converted audio.
@@ -538,7 +557,7 @@ audampler doctor [--json]
 - Start with one fixed DSP worker and a backend output thread when clock domains require decoupling. Benchmark before adding per-channel workers; no general-purpose work-stealing pool in the real-time path.
 - Preallocate SPSC queues and scratch storage. Define backpressure/overflow behavior, channel synchronization, and generation tags so old-format blocks cannot reach a newly configured device.
 - Acquire supported real-time scheduling through normal user-session facilities (PipeWire/RTKit where applicable); keep an observable fallback if unavailable. Make memory locking and CPU affinity optional measured optimizations.
-- Prime code/data and buffers before activation; account for page faults, denormals, CPU frequency changes, and thermal throttling in hardware benchmarks.
+- Prime code/data and buffers before activation; account for page faults, denormals (per-thread FTZ/DAZ set on DSP-worker entry per §4.2), CPU frequency changes, and thermal throttling in hardware benchmarks.
 - Share immutable prepared plans; acknowledge swaps at block boundaries and reclaim old buffers on the control thread.
 
 ### 8.2 Proposed workspace
@@ -571,7 +590,7 @@ Candidate dependencies: `clap`, `serde`/`toml`, `rtrb`, ALSA/PipeWire bindings, 
 
 ### 8.3 File/transport correctness
 
-- DSF: little-endian chunk fields, declared bit order (`1` = LSB-first, `8` = MSB-first per specification), channel blocks, exact per-channel bit count, padding, file size, and metadata offset [4]. Padding beyond the declared sample count is never played as audio.
+- DSF: little-endian chunk fields, declared bit order (`1` = LSB-first, `8` = MSB-first per specification), channel blocks, exact per-channel bit count, padding, file size, and metadata offset [4]. Padding beyond the declared sample count is never played as audio. Note the spec/hardware quirk: Sony DSF v1.01 §4 mandates `0x00` fill for unused trailing bytes of the final 4096-byte block per channel, but `0x00` is full-negative DC in DSD, so naive players that ignore `sample_count` and feed the full final block (~11.6 ms at DSD64) emit an end-of-track pop. On read, strictly truncate to `sample_count` bits. On write, keep `sample_count` exact and offer `dsf_pad_mode = "spec-zero" | "dsd-silence"`: `"spec-zero"` (default, spec-compliant `0x00` fill) versus `"dsd-silence"` (fill trailing bytes with `0x69` / zero-input modulator idle pattern for buggy players, documented as spec-deviating).
 - Initially support WAV PCM and FLAC decoding; validate lengths, channel layouts, clipping/nonfinite input, and truncated files. Preserve supported metadata without claiming arbitrary tag round-trips.
 - Implement independently checked pack/unpack vectors for each ALSA DSD format, DSF, and DoP; round-trip tests alone can hide matching bugs.
 - DoP input detection is enabled only on an explicitly exact integer input path. Require sustained marker alternation across all channels and handle loss as a discontinuity; do not scan arbitrary mixed float audio and relabel it as DSD.
@@ -701,7 +720,7 @@ Prioritize DSD passthrough/remodulation, optional PCM DSP, additional verified D
 
 ### First implementation tickets, in order
 
-1. **ADR-001: units and representations.** Define PCM/DSD/transport rate types, normalized amplitude mapping, channel layout, and packing reference vectors.
+1. **ADR-001: units and representations.** Define PCM/DSD/transport rate types, normalized amplitude mapping, channel layout, and packing reference vectors — including distinct golden vectors for DoP `s32le`/`s24le`/`s24_3le` container alignments.
 2. **ADR-002: PipeWire/ALSA feasibility.** Name test DAC/CPU and Linux/PipeWire/WirePlumber versions; prove exact output paths and record capability evidence.
 3. **ADR-003: clock ownership.** Diagram desktop bridge pacing, timestamps, queue feedback, and the location of adaptive SRC; simulate drift before live DSD.
 4. **Schema v1.** Turn this document's TOML examples into fixtures, implement tagged types and validation, and document defaults/precedence.
