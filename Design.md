@@ -1,14 +1,14 @@
-# audampler — Technical Specification & Architecture (v2.2)
+# audigma — Technical Specification & Architecture (v2.2)
 
-`audampler` is an open-source Rust audio engine, CLI, and Linux audio service for high-precision PCM resampling and PCM-to-1-bit Delta-Sigma Modulation (DSD). Inspired by foobar2000's `foo_dsd_processor`, it integrates with PipeWire and ALSA so Linux desktop applications and dedicated music players (such as MPD) can output high-rate PCM (back into PipeWire or directly to ALSA) or 1-bit DSD (Native or DoP via exclusive ALSA) without manual device switching.
+`audigma` is an open-source Rust audio engine, CLI, and Linux audio service for high-precision PCM resampling and PCM-to-1-bit Delta-Sigma Modulation (DSD). Inspired by foobar2000's `foo_dsd_processor`, it integrates with PipeWire and ALSA so Linux desktop applications and dedicated music players (such as MPD) can output high-rate PCM (back into PipeWire or directly to ALSA) or 1-bit DSD (Native or DoP via exclusive ALSA) without manual device switching.
 
 ---
 
 ## 1. Architectural Decisions & Core Invariants
 
-In `audampler`, architectural decisions are enforced directly by the Rust type system and pipeline boundaries:
+In `audigma`, architectural decisions are enforced directly by the Rust type system and pipeline boundaries:
 
-1. **Strongly Typed Rate Domains (`audampler-dsp`):**
+1. **Strongly Typed Rate Domains (`audigma-dsp`):**
    - Never pass raw `u32` integers for rates across module boundaries.
    - Use distinct types: `PcmRateHz` (e.g., `44_100`), `DsdBitRateHz` (e.g., `11_289_600` for DSD256), and `TransportFrameRateHz` (e.g., `176_400` for DoP64 frames or `88_200` for ALSA `DSD_U32` frames).
    - **SPA DSD API Boundary:** PipeWire's SPA `audio/dsd` format expresses rate in **bytes per second per channel** ($f_{\text{bit}} / 8$, e.g., `1_411_200` for DSD256), with separate bit-order and signed byte-interleave fields [1]. Always convert via an explicit method on `DsdBitRateHz` at the SPA boundary; never pass the bit clock directly.
@@ -18,23 +18,23 @@ In `audampler`, architectural decisions are enforced directly by the Rust type s
    - All volume adjustments, `preamp_db` attenuation, headroom scaling, channel mixing, and fade ramps must occur in floating-point PCM **before** the 1-bit modulator.
    - Once modulated into 1-bit DSD or packed into DoP frames, samples must never pass through PCM gain, crossfaders, limiters, or sample-rate converters.
 
-3. **DSD Silence is Never `0x00` (`audampler-dsp` / `audampler-format`):**
+3. **DSD Silence is Never `0x00` (`audigma-dsp` / `audigma-format`):**
    - In 1-bit DSD, all-zero bytes (`0x00`) represent full-scale negative DC, which causes loud analog pops on start/stop.
    - Planned transitions (stop, mute, rate change) must ramp PCM to zero before modulation, wait for `filter_group_delay` to drain, and then emit a balanced DSD idle pattern (`0x69` / verified zero-input modulator bitstream) while keeping DoP `0x05`/`0xFA` markers alternating.
 
-4. **Output Backend Separation: PipeWire PCM vs. Exclusive ALSA (`audampler-io` / `audampler-engine`):**
+4. **Output Backend Separation: PipeWire PCM vs. Exclusive ALSA (`audigma-io` / `audigma-engine`):**
    - **High-Rate PCM Output (`[target] format = "pcm"`)** can either return directly into the **PipeWire graph** (`[output] backend = "pipewire"`, keeping the DAC managed by PipeWire under a single shared clock) or drive an **exclusive ALSA endpoint** (`[output] backend = "alsa"`, e.g., `705.6/768 kHz` `s32le` with TPDF dither for NOS modes).
    - **DSD Output (`[target] format = "dsd"`)** always drives an **exclusive ALSA endpoint** (`[output] backend = "alsa"`, `transport = "native" | "dop"`). Normal PipeWire PCM links cannot carry DoP safely because software volume or resampling corrupts the `0x05`/`0xFA` marker bits.
-   - **D-Bus Device Reservation (`org.freedesktop.ReserveDevice1`):** To avoid `Device or resource busy` lockouts when taking exclusive control of an ALSA DAC without requiring permanent configuration changes, `audampler-io` acquires the DAC dynamically via the standard D-Bus device reservation protocol (`[output] reserve_device = true`, enabled by default). WirePlumber automatically suspends its ALSA PCM monitor while `audampler` runs, and restores normal desktop routing when `audampler` stops. For headless setups without desktop sound servers, `reserve_device = false` can be configured.
+   - **D-Bus Device Reservation (`org.freedesktop.ReserveDevice1`):** To avoid `Device or resource busy` lockouts when taking exclusive control of an ALSA DAC without requiring permanent configuration changes, `audigma-io` acquires the DAC dynamically via the standard D-Bus device reservation protocol (`[output] reserve_device = true`, enabled by default). WirePlumber automatically suspends its ALSA PCM monitor while `audigma` runs, and restores normal desktop routing when `audigma` stops. For headless setups without desktop sound servers, `reserve_device = false` can be configured.
 
-5. **Clock Domains & Low-Rate Baseband ASRC (`audampler-dsp` / `audampler-engine`):**
+5. **Clock Domains & Low-Rate Baseband ASRC (`audigma-dsp` / `audigma-engine`):**
    - **Shared Clock (`clock.mode = "shared-graph"`):** When both `[input]` and `[output]` use `backend = "pipewire"`, both sides are paced by the same PipeWire graph clock; no asynchronous drift controller is needed.
    - **Independent Clocks (`clock.mode = "adaptive-input"`):** When bridging a software input clock (PipeWire sink or ALSA Loopback) to a physical ALSA hardware DAC (`[output] backend = "alsa"`), the hardware DAC is the master clock. Clock drift is absorbed by factoring the total conversion ratio as:
      $$R_{\text{total}}(t) = R_{\text{asrc}}(t) \times R_{\text{rational}} \times 2^K$$
    - The continuously variable fractional-phase stage ($R_{\text{asrc}}(t)$) **always executes at the low baseband/intermediate PCM rate ($1\times$ or $2\times$)** *before* the fixed-coefficient $2\times$ half-band FIR cascade—never at the final MHz DSD bit rate, and never by dropping/duplicating DSD bits.
    - **ASRC Drift Bounds & Recovery:** The drift loop operates within a bounded correction range (e.g. `max_correction_ppm = 500`). When measured drift or queue fill exceeds safety thresholds, the engine invokes a controlled fault/recovery sequence rather than silently dropping or duplicating samples.
 
-6. **DSD Passthrough Invariant (`audampler-engine` / `audampler-dsp`):**
+6. **DSD Passthrough Invariant (`audigma-engine` / `audigma-dsp`):**
    - Bit-exact DSD passthrough is a dedicated, typed signal path with zero intermediate float conversions.
    - DSD passthrough is only valid across shared-clock or backpressured links where input and output rates match. It **cannot** reconcile independent live clock domains (which require PCM ASRC) without losing bit-exactness.
    - Any volume change, EQ, or sample-rate conversion on an incoming DSD stream requires explicit remodulation ($\text{DSD} \to \text{PCM} \to \text{DSM}$), which must be reported as a lossy conversion path.
@@ -47,14 +47,14 @@ The Cargo workspace is organized as a strictly layered 8-crate DAG with zero cir
  
 ```text
 crates/
-  audampler-dsp/          # Pure math: rate types, DspConfiguration, presets.rs, FIR/ASRC, 5th-order CRFB DSM, dither, FTZ/DAZ (zero OS I/O)
-  audampler-format/       # Containers (WAV/FLAC/DSF) & exact bit-packers (DSD_U32_BE, DoP s32le/s24le/s24_3le)
-  audampler-settings/     # TOML config Schema v1 (`Settings`), [[rules]] resolver, config check & explain
-  audampler-engine/       # Pure Rust pipeline planner, SPSC queues, ASRC drift controller & I/O traits (zero C FFI)
-  audampler-io/           # Feature-gated concrete backends: ALSA, PipeWire, D-Bus ReserveDevice1, file/stdio & prober
-  audampler-configurator/ # Interactive TUI & one-shot Web setup wizard (uses settings + engine/io prober & benchmark)
-  audampler-doctor/       # Host OS diagnosis, ALSA/PipeWire lock inspection & interactive remediation (--fix)
-  audampler-cli/          # Binary crate (`audampler`): CLI subcommands, Unix control socket, foreground runner
+  audigma-dsp/          # Pure math: rate types, DspConfiguration, presets.rs, FIR/ASRC, 5th-order CRFB DSM, dither, FTZ/DAZ (zero OS I/O)
+  audigma-format/       # Containers (WAV/FLAC/DSF) & exact bit-packers (DSD_U32_BE, DoP s32le/s24le/s24_3le)
+  audigma-settings/     # TOML config Schema v1 (`Settings`), [[rules]] resolver, config check & explain
+  audigma-engine/       # Pure Rust pipeline planner, SPSC queues, ASRC drift controller & I/O traits (zero C FFI)
+  audigma-io/           # Feature-gated concrete backends: ALSA, PipeWire, D-Bus ReserveDevice1, file/stdio & prober
+  audigma-configurator/ # Interactive TUI & one-shot Web setup wizard (uses settings + engine/io prober & benchmark)
+  audigma-doctor/       # Host OS diagnosis, ALSA/PipeWire lock inspection & interactive remediation (--fix)
+  audigma-cli/          # Binary crate (`audigma`): CLI subcommands, Unix control socket, foreground runner
 tools/
   design/                 # Offline scripts to synthesize FIR & Schreier NTF coefficient tables
   measure/                # Coherent FFT & Welch spectral analysis harness
@@ -65,14 +65,14 @@ examples/                 # Ready-to-use TOML configs, MPD snippets, and WirePlu
 ```
  
 ### Layer Responsibilities
-- **`audampler-dsp`**: Pure numerical processing (`no_std`-friendly core logic, zero OS/file/network I/O). Implements domain rate/format types (`PcmRateHz`, `DsdBitRateHz`, `TransportFrameRateHz`), `DspConfiguration`, built-in verified filter and modulator coefficient tables (`presets.rs`: `PRESET_BALANCED`, `PRESET_REFERENCE`, `PRESET_LOW_LATENCY`), polyphase & half-band FIR interpolation, state-space / CRFB delta-sigma modulators, TPDF dither, overload guards, and thread-level hardware subnormal flushing (FTZ/DAZ). Portable across any operating system.
-- **`audampler-format`**: Audio container decoding/encoding (`WAV`, `FLAC`, Sony `DSF`) and hardware frame bit-packers (`DSD_U32_BE`, `DoP` across `s32le`/`s24le`/`s24_3le`). Zero OS dependencies.
-- **`audampler-settings`**: The `Schema v1` TOML configuration structs (`Settings`), `[[rules]]` evaluation engine, `config check` validation, and `config explain` resolution (mapping user settings and preset names like `"reference"` into concrete `audampler-dsp::DspConfiguration` and transport parameters). Zero OS dependencies.
-- **`audampler-engine`**: Pure Rust orchestration connecting `dsp`, `format`, and `settings` into prepared pipelines (`prepare`, `process`, `drain`), lock-free real-time SPSC queues (`rtrb`), generation tags, the PI-controlled ASRC drift loop, lifecycle state machine, and abstract `AudioInput`/`AudioOutput` backend traits. Zero C-FFI or OS audio library dependencies, allowing instant unit testing with mock clocks/streams on any host.
-- **`audampler-io`**: Feature-gated concrete implementations of the `audampler-engine` I/O traits (`alsa`, `pipewire`, `file`, `stdio`, plus future platform backends like `coreaudio` or `asio`). Houses ALSA hardware capability probing, PipeWire virtual sink (`audampler_sink`) registration, and dynamic D-Bus device reservation (`org.freedesktop.ReserveDevice1`).
-- **`audampler-configurator`**: Isolates UI/terminal (`ratatui`/`crossterm`) and optional localhost one-shot Web wizard dependencies so they never bloat the core DSP or engine crates. Calls into `audampler-settings`, `audampler-engine`, and `audampler-io` to probe DACs, benchmark presets, and write `config.toml`.
-- **`audampler-doctor`**: Isolates host OS-level diagnostic and repair logic behind a platform abstraction trait (`DiagnosticProvider`). On Linux, inspects PipeWire graph clock configuration (`clock.allowed-rates`), probes ALSA device locks (`/dev/snd/pcm*`), handles interactive `--fix` (calling `wpctl set-profile <id> 0`, terminating conflicting processes with optional `sudo` escalation, or generating persistent WirePlumber drop-ins). Keeps OS-specific plumbing completely segregated from the cross-platform core and configurator.
-- **`audampler-cli`**: The `audampler` executable entry point, CLI subcommand router (`clap`), Unix-domain control socket server/client (`$XDG_RUNTIME_DIR/audampler/`), and foreground service runner.
+- **`audigma-dsp`**: Pure numerical processing (`no_std`-friendly core logic, zero OS/file/network I/O). Implements domain rate/format types (`PcmRateHz`, `DsdBitRateHz`, `TransportFrameRateHz`), `DspConfiguration`, built-in verified filter and modulator coefficient tables (`presets.rs`: `PRESET_BALANCED`, `PRESET_REFERENCE`, `PRESET_LOW_LATENCY`), polyphase & half-band FIR interpolation, state-space / CRFB delta-sigma modulators, TPDF dither, overload guards, and thread-level hardware subnormal flushing (FTZ/DAZ). Portable across any operating system.
+- **`audigma-format`**: Audio container decoding/encoding (`WAV`, `FLAC`, Sony `DSF`) and hardware frame bit-packers (`DSD_U32_BE`, `DoP` across `s32le`/`s24le`/`s24_3le`). Zero OS dependencies.
+- **`audigma-settings`**: The `Schema v1` TOML configuration structs (`Settings`), `[[rules]]` evaluation engine, `config check` validation, and `config explain` resolution (mapping user settings and preset names like `"reference"` into concrete `audigma-dsp::DspConfiguration` and transport parameters). Zero OS dependencies.
+- **`audigma-engine`**: Pure Rust orchestration connecting `dsp`, `format`, and `settings` into prepared pipelines (`prepare`, `process`, `drain`), lock-free real-time SPSC queues (`rtrb`), generation tags, the PI-controlled ASRC drift loop, lifecycle state machine, and abstract `AudioInput`/`AudioOutput` backend traits. Zero C-FFI or OS audio library dependencies, allowing instant unit testing with mock clocks/streams on any host.
+- **`audigma-io`**: Feature-gated concrete implementations of the `audigma-engine` I/O traits (`alsa`, `pipewire`, `file`, `stdio`, plus future platform backends like `coreaudio` or `asio`). Houses ALSA hardware capability probing, PipeWire virtual sink (`audigma_sink`) registration, and dynamic D-Bus device reservation (`org.freedesktop.ReserveDevice1`).
+- **`audigma-configurator`**: Isolates UI/terminal (`ratatui`/`crossterm`) and optional localhost one-shot Web wizard dependencies so they never bloat the core DSP or engine crates. Calls into `audigma-settings`, `audigma-engine`, and `audigma-io` to probe DACs, benchmark presets, and write `config.toml`.
+- **`audigma-doctor`**: Isolates host OS-level diagnostic and repair logic behind a platform abstraction trait (`DiagnosticProvider`). On Linux, inspects PipeWire graph clock configuration (`clock.allowed-rates`), probes ALSA device locks (`/dev/snd/pcm*`), handles interactive `--fix` (calling `wpctl set-profile <id> 0`, terminating conflicting processes with optional `sudo` escalation, or generating persistent WirePlumber drop-ins). Keeps OS-specific plumbing completely segregated from the cross-platform core and configurator.
+- **`audigma-cli`**: The `audigma` executable entry point, CLI subcommand router (`clap`), Unix-domain control socket server/client (`$XDG_RUNTIME_DIR/audigma/`), and foreground service runner.
 
 ---
 
@@ -80,11 +80,11 @@ examples/                 # Ready-to-use TOML configs, MPD snippets, and WirePlu
 
 ### 3.1 Two Execution Modes
 
-1. **Live Streaming Daemon (`audampler run`):**
-   - Bridges a live `[input]` (`pipewire` virtual sink `audampler_sink` or `alsa` capture/loopback) through the prepared real-time DSP pipeline to a live `[output]` (`pipewire` node or exclusive `alsa` hardware device).
+1. **Live Streaming Daemon (`audigma run`):**
+   - Bridges a live `[input]` (`pipewire` virtual sink `audigma_sink` or `alsa` capture/loopback) through the prepared real-time DSP pipeline to a live `[output]` (`pipewire` node or exclusive `alsa` hardware device).
    - Allows both desktop applications (browsers, YouTube Music) and dedicated players (MPD) to play through the same pipeline without `Device or resource busy` lockouts.
 
-2. **Offline File / Stream Converter (`audampler convert`):**
+2. **Offline File / Stream Converter (`audigma convert`):**
    - Reads a file (`WAV`/`FLAC`) or `stdin` (`raw`), runs synchronous DSP without hardware clock tracking, and writes `.dsf`, high-rate `.wav`, or raw DoP/PCM to `stdout`.
    - Supports deterministic seeding, two-pass true-peak headroom analysis, and exact sample-count duration trimming.
 
@@ -100,15 +100,15 @@ Rather than an artificial "desktop vs. music mode" switch on the input, output r
 2. **`rate_policy = "source-family"` (Family-Preserving Policy):**
    - Dynamically switches the output rate between its `44.1 kHz`-family target (e.g., `705.6 kHz` / `DSD256-44.1`) and `48 kHz`-family target (e.g., `768 kHz` / `DSD256-48`) whenever the input stream changes rate family.
    - Avoids cross-family rational SRC so upsampling uses pure $2^K$ half-band FIR stages (plus low-rate ASRC drift tracking when driving an independent ALSA clock).
-   - When used with a PipeWire virtual sink input, `audampler doctor` inspects PipeWire's `default.clock.allowed-rates` and warns if the PipeWire graph is pinned to a single rate (such as `48000`) that would prevent dynamic input rates.
+   - When used with a PipeWire virtual sink input, `audigma doctor` inspects PipeWire's `default.clock.allowed-rates` and warns if the PipeWire graph is pinned to a single rate (such as `48000`) that would prevent dynamic input rates.
 
 ### 3.3 Three Supported Live Output Paths
 
 | Live Output Path | `[output]` Config | `[target]` Config | Clock Domain & Device Ownership |
 |---|---|---|---|
 | **1. PipeWire High-Rate PCM Upsampler** | `backend = "pipewire"`<br>`target_node = "alsa_output..."` | `format = "pcm"`<br>`sample_format = "f32"` | **`shared-graph` clock** (no ASRC drift loop needed); PipeWire retains ownership of the DAC. |
-| **2. Direct Exclusive ALSA PCM (NOS / High-Rate)** | `backend = "alsa"`<br>`device = "hw:CARD=K17,DEV=0"` | `format = "pcm"`<br>`sample_format = "s32le"` + `dither = "tpdf"` | **`adaptive-input` ASRC** referenced to DAC master clock; `audampler` owns the ALSA DAC exclusively. |
-| **3. Direct Exclusive ALSA DSD (Native / DoP)** | `backend = "alsa"`<br>`device = "hw:CARD=K17,DEV=0"`<br>`transport = "native" \| "dop"` | `format = "dsd"`<br>`dsd_bit_rate_hz = 11289600` | **`adaptive-input` ASRC** referenced to DAC master clock; `audampler` owns the ALSA DAC exclusively. |
+| **2. Direct Exclusive ALSA PCM (NOS / High-Rate)** | `backend = "alsa"`<br>`device = "hw:CARD=K17,DEV=0"` | `format = "pcm"`<br>`sample_format = "s32le"` + `dither = "tpdf"` | **`adaptive-input` ASRC** referenced to DAC master clock; `audigma` owns the ALSA DAC exclusively. |
+| **3. Direct Exclusive ALSA DSD (Native / DoP)** | `backend = "alsa"`<br>`device = "hw:CARD=K17,DEV=0"`<br>`transport = "native" \| "dop"` | `format = "dsd"`<br>`dsd_bit_rate_hz = 11289600` | **`adaptive-input` ASRC** referenced to DAC master clock; `audigma` owns the ALSA DAC exclusively. |
 
 ### 3.4 Prepared Pipeline Stages
 
@@ -192,25 +192,25 @@ The engine state machine runs through:
 
 *(For 48 kHz-family DSD, multiply `48,000` by `64/128/256/512`; e.g., `DSD256/48 = 12,288,000 Hz`).*
 
-### 5.2 Exact Bit-Packing Formats (`audampler-format`)
+### 5.2 Exact Bit-Packing Formats (`audigma-format`)
 
 1. **ALSA Native `DSD_U32_BE` / `DSD_U32_LE`:**
    - Packs 32 consecutive 1-bit DSD samples per channel into each 32-bit ALSA container word (`f_frame = f_bit / 32`), MSB-first bit ordering (`bitrev=0` unless device quirks specify LSB-first).
 2. **DoP (DSD over PCM v1.1) — Three ALSA Container Alignments:**
    - Carries 16 DSD bits (2 bytes: `HI`, `LO`, oldest bit in MSB) per channel per PCM frame, with an 8-bit marker alternating `0x05` and `0xFA` on consecutive frames (synchronized across stereo channels).
-   - Because USB Audio Class 2.0 DACs expose different 24/32-bit integer formats over ALSA, `audampler-format` implements and tests all three alignments:
+   - Because USB Audio Class 2.0 DACs expose different 24/32-bit integer formats over ALSA, `audigma-format` implements and tests all three alignments:
      - **`s32le` (32-bit container, MSB-justified):** 24-bit DoP word shifted left by 8 (`0xMM_HI_LO_00`, written little-endian as `[0x00, LO, HI, MM]`).
      - **`s24le` (32-bit container, LSB-justified):** 24-bit DoP word in the lower 24 bits (`0x00_MM_HI_LO`, written little-endian as `[LO, HI, MM, 0x00]`).
      - **`s24_3le` (Packed 24-bit container, 3 bytes/sample):** Written little-endian as `[LO, HI, MM]`.
 3. **Sony DSF Container (`.dsf`):**
    - Little-endian `DSD `, `fmt `, and `data` chunks; interleaves channels in fixed **4096-byte blocks per channel** (`L[4096], R[4096]`), with declared bit ordering (`1` = LSB-first per Sony DSF v1.01, `8` = MSB-first) and exact per-channel `sample_count` in bits.
-   - **Final Block Padding (`dsf_pad_mode`):** Sony DSF v1.01 §4 specifies `0x00` fill for unused trailing bytes in the final 4096-byte block. However, naive players that ignore `sample_count` play those trailing `0x00` bytes as full-negative DC (~11.6 ms pop at DSD64). `audampler` supports:
+   - **Final Block Padding (`dsf_pad_mode`):** Sony DSF v1.01 §4 specifies `0x00` fill for unused trailing bytes in the final 4096-byte block. However, naive players that ignore `sample_count` play those trailing `0x00` bytes as full-negative DC (~11.6 ms pop at DSD64). `audigma` supports:
      - `dsf_pad_mode = "spec-zero"` (default: standard `0x00` padding with exact `sample_count`).
      - `dsf_pad_mode = "dsd-silence"` (fills trailing pad bytes with `0x69` balanced DSD silence to prevent end-of-track pops on broken players).
 
 ### 5.3 Stdio Streaming & Container Seekability Constraints
 - **Raw Streams (`container = "raw"`):** Require complete format declarations (`sample_format`, `rate_hz`, `channels` on input; `transport`, `sample_format` on output). `stdout` must carry audio payload bytes only; all logs and diagnostics go strictly to `stderr`.
-- **Header-Finalized Containers (`dsf` / `wav`):** Writing valid `.dsf` or `.wav` headers requires either a **seekable output file** (to patch chunk sizes and `sample_count` at EOF) or a known-length strategy. `audampler convert -o -` must explicitly reject unsupported non-seekable `stdout` combinations (such as streaming `container = "dsf"` to a pipe) rather than emitting corrupt headers.
+- **Header-Finalized Containers (`dsf` / `wav`):** Writing valid `.dsf` or `.wav` headers requires either a **seekable output file** (to patch chunk sizes and `sample_count` at EOF) or a known-length strategy. `audigma convert -o -` must explicitly reject unsupported non-seekable `stdout` combinations (such as streaming `container = "dsf"` to a pipe) rather than emitting corrupt headers.
 - **Pipe Resilience:** Handle pipe backpressure, partial frame reads/writes, clean `EOF` draining, and `EPIPE` (broken pipe) gracefully without panicking.
 - **Album-Continuous Processing:** When converting multi-track albums, state (filter ring buffers, modulator integrators, dither state) must be preserved across track boundaries, splitting output files at exact rational sample boundaries to guarantee click-free gapless playback.
 
@@ -218,7 +218,7 @@ The engine state machine runs through:
 
 ## 6. Configuration Schema (`Schema v1`) & Presets
 
-Configuration lives at `$XDG_CONFIG_HOME/audampler/config.toml` (default `~/.config/audampler/config.toml`). Unknown keys or invalid cross-field combinations are rejected by `audampler config check`.
+Configuration lives at `$XDG_CONFIG_HOME/audigma/config.toml` (default `~/.config/audigma/config.toml`). Unknown keys or invalid cross-field combinations are rejected by `audigma config check`.
 
 ### 6.1 Rule-Based Selection (`[[rules]]`) vs. `rate_policy`
 `[[rules]]` evaluates in first-match order based on observed input rate/format and resolves into an explicit preset and target configuration. `rate_policy = "source-family"` is convenient shorthand that lowers into the same rule resolver:
@@ -245,7 +245,7 @@ schema_version = 1
 
 [input]
 backend = "pipewire"
-node_name = "audampler_sink"
+node_name = "audigma_sink"
 channels = 2
 
 [output]
@@ -282,7 +282,7 @@ schema_version = 1
 
 [input]
 backend = "pipewire"
-node_name = "audampler_sink"
+node_name = "audigma_sink"
 channels = 2
 
 [output]
@@ -437,30 +437,30 @@ order = 5
 ## 7. CLI, Configurator & Service Interface
 
 ```text
-audampler run [-c CONFIG]
-audampler stop
-audampler convert -i INPUT -o OUTPUT [-c CONFIG]
-audampler benchmark [-i INPUT] [-c CONFIG] [--json]
-audampler probe [--backend alsa|pipewire] [--json]
-audampler configure [--tui|--web] [--out PATH]
-audampler config check [-c CONFIG]
-audampler config explain [-c CONFIG] [--input-rate HZ] [--json]
-audampler presets list
-audampler presets show NAME
-audampler status [--watch] [--json]
-audampler set volume DB
-audampler set preset NAME
-audampler reload
-audampler doctor [--fix] [--json]
+audigma run [-c CONFIG]
+audigma stop
+audigma convert -i INPUT -o OUTPUT [-c CONFIG]
+audigma benchmark [-i INPUT] [-c CONFIG] [--json]
+audigma probe [--backend alsa|pipewire] [--json]
+audigma configure [--tui|--web] [--out PATH]
+audigma config check [-c CONFIG]
+audigma config explain [-c CONFIG] [--input-rate HZ] [--json]
+audigma presets list
+audigma presets show NAME
+audigma status [--watch] [--json]
+audigma set volume DB
+audigma set preset NAME
+audigma reload
+audigma doctor [--fix] [--json]
 ```
 
-- **`audampler run` & `audampler stop`:** `run` executes the live audio pipeline in the foreground (intended for `systemd --user` service or direct terminal invocation). `audampler stop` connects to the local control socket and requests an orderly shutdown: ramping PCM gain to zero, draining filter group delays, emitting the balanced DSD idle sequence, releasing the D-Bus `ReserveDevice1` device lock so PipeWire/WirePlumber immediately reclaims the DAC, and terminating the daemon.
-- **`audampler configure` (`audampler-configurator`):** Interactive TUI (`--tui`, default) or temporary localhost Web wizard (`--web`, bound to `127.0.0.1:<port>` with a one-time session token that exits cleanly on save). Walks the user through selecting an output path (PipeWire PCM upsampler vs. Exclusive ALSA PCM/DSD), choosing a rate policy (`fixed` vs. `source-family`), running a quick CPU benchmark, previewing headroom/latency, and writing `config.toml` + optional WirePlumber/systemd user snippets.
-- **`audampler doctor [--fix]` (`audampler-doctor`):** Inspects the host OS audio stack and diagnoses runtime issues:
+- **`audigma run` & `audigma stop`:** `run` executes the live audio pipeline in the foreground (intended for `systemd --user` service or direct terminal invocation). `audigma stop` connects to the local control socket and requests an orderly shutdown: ramping PCM gain to zero, draining filter group delays, emitting the balanced DSD idle sequence, releasing the D-Bus `ReserveDevice1` device lock so PipeWire/WirePlumber immediately reclaims the DAC, and terminating the daemon.
+- **`audigma configure` (`audigma-configurator`):** Interactive TUI (`--tui`, default) or temporary localhost Web wizard (`--web`, bound to `127.0.0.1:<port>` with a one-time session token that exits cleanly on save). Walks the user through selecting an output path (PipeWire PCM upsampler vs. Exclusive ALSA PCM/DSD), choosing a rate policy (`fixed` vs. `source-family`), running a quick CPU benchmark, previewing headroom/latency, and writing `config.toml` + optional WirePlumber/systemd user snippets.
+- **`audigma doctor [--fix]` (`audigma-doctor`):** Inspects the host OS audio stack and diagnoses runtime issues:
   1. *ALSA Device Lockouts:* Inspects `/dev/snd/pcmC*D*p` file descriptor holders. If held by WirePlumber/PipeWire, `--fix` can dynamically invoke `wpctl set-profile <id> 0` or offer to write a permanent WirePlumber drop-in rule in `~/.config/wireplumber/`. If held by a foreign user or daemon (such as MPD), `--fix` interactively prompts the user before terminating the process, escalating to `sudo` if permissions are insufficient, or printing the exact command required.
   2. *PipeWire Multi-Rate Configuration:* Checks `default.clock.allowed-rates` in PipeWire when `rate_policy = "source-family"` is active on a PipeWire virtual sink, warning and offering to install the required multi-rate configuration drop-in if the graph is pinned to a single rate (e.g. `48000`).
   3. *Real-Time Scheduling Limits:* Verifies `RLIMIT_RTPRIO` / RTKit availability for real-time DSP threads.
-- **Control Socket & Telemetry Protocol (`audampler status`):** Operates over a local Unix domain socket at `$XDG_RUNTIME_DIR/audampler/control.sock`. Runtime telemetry exported via `status [--watch] [--json]` exposes:
+- **Control Socket & Telemetry Protocol (`audigma status`):** Operates over a local Unix domain socket at `$XDG_RUNTIME_DIR/audigma/control.sock`. Runtime telemetry exported via `status [--watch] [--json]` exposes:
   - Input negotiated format/rate and PipeWire graph rate.
   - Output bit/sample/transport rate and active physical device/endpoint.
   - Active preset, profile hash, and applied gain breakdown (`preamp_db`, user volume, profile headroom).
@@ -473,7 +473,7 @@ audampler doctor [--fix] [--json]
 
 ## 8. Spectral Verification & Quality Targets (`tools/measure/`)
 
-Every filter preset and modulator order in `audampler-dsp` (`presets.rs`) is verified via automated tests in `tools/measure/`:
+Every filter preset and modulator order in `audigma-dsp` (`presets.rs`) is verified via automated tests in `tools/measure/`:
 
 1. **Coherent FFT & Welch Protocol:**
    - Map 1-bit DSD output to `{-1.0, +1.0}`.
