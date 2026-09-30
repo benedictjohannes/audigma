@@ -228,12 +228,12 @@ schema_version = 1
 
 [[rules]]
 when_input_rate_family = "44100"   # 44.1k, 88.2k, 176.4k, 352.8k
-apply_preset = "music-reference"
+apply_preset = "reference"
 set_target = { format = "dsd", dsd_bit_rate_hz = 11289600 }
 
 [[rules]]
 when_input_rate_family = "48000"   # 48k, 96k, 192k, 384k
-apply_preset = "music-reference"
+apply_preset = "reference"
 set_target = { format = "pcm", pcm_rate_hz = 768000 }
 ```
 
