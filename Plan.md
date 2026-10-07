@@ -54,7 +54,7 @@ examples/                 # Ready-to-use TOML configs, MPD snippets, and WirePlu
 
 ## 3. Phased Breakdown
 
-### Phase 0: Workspace Scaffolding, Domain Types, Bit-Packing & Schema v1
+### Phase 0: Workspace Scaffolding, Domain Types, Bit-Packing & Schema v1 [Completed]
 **Maps to:** `Design.md §1`, `§2`, `§5.1–§5.3`, and `§6`.
 
 - **Goal:** Initialize the Cargo workspace (`audigma-dsp`, `audigma-format`, `audigma-settings`), implement strongly typed domain units (`PcmRateHz`, `DsdBitRateHz`, `TransportFrameRateHz`, plus explicit `to_spa_dsd_byte_rate()` $= f_{\text{bit}} / 8$ conversion and $\text{OSR} = f_{\text{bit}} / (2 \cdot B)$ calculation), define `DspConfiguration` and `presets.rs` (`PRESET_BALANCED`, `PRESET_REFERENCE`, `PRESET_LOW_LATENCY`) in `audigma-dsp`, build verified bit/byte packers (`audigma-format`) for `DSD_U32_BE`, DSF blocks, and the three ALSA DoP containers (`s32le`, `s24le`, `s24_3le`), and implement `Schema v1` config parsing (`Settings`) in `audigma-settings`.
@@ -64,7 +64,7 @@ examples/                 # Ready-to-use TOML configs, MPD snippets, and WirePlu
   3. In `audigma-format`, implement exact bit-packing and unpacking with independent golden vector unit tests for:
      - ALSA Native `DSD_U32_BE` (`f_frame = f_bit / 32`, MSB-first byte/bit order matching K17 `bitrev=0`).
      - Stereo DoP (`0x05`/`0xFA` marker alternation) across all three ALSA containers: `s32le` (MSB-justified `<< 8`), `s24le` (LSB-justified in 32-bit), and `s24_3le` (packed 3-byte) (`Design.md §5.2`).
-     - Sony DSF 4096-byte per-channel blocks with both `dsf_pad_mode = "spec-zero"` and `"dsd-silence"` (`0x69` idle fill) (`Design.md §5.2`).
+     - Sony DSF 4096-byte per-channel blocks (`bits_per_sample = 1` LSB-first default per Sony DSF v1.01, plus MSB-first option) with both `dsf_pad_mode = "spec-zero"` and `"dsd-silence"` (`0x69` idle fill) (`Design.md §5.2`).
   4. In `audigma-settings`, implement `Schema v1` TOML parsing (`Settings`), preset resolution (mapping `"reference"` $\to$ `&audigma_dsp::presets::PRESET_REFERENCE`), and validation against the reference config fixtures in `Design.md §6.1–§6.2`.
   5. Record discovered hardware profiles for `FiiO K17` and `JadeAudio JA11` in `docs/hardware/`.
 - **`[User-Led]` Actions:**
@@ -80,7 +80,7 @@ examples/                 # Ready-to-use TOML configs, MPD snippets, and WirePlu
 
 - **Goal:** Build the reproducible filter/NTF coefficient generator (`tools/design/`), embed verified coefficients in `audigma-dsp` (`presets.rs`), implement the pure-Rust `f64` multistage interpolation cascade and 5th-order CRFB Delta-Sigma Modulator in `audigma-dsp`, and verify spectral performance with an offline measurement harness (`tools/measure/`).
 - **Scope & Tasks:**
-  1. Create synthesis/verification tooling in `tools/design/` using the exact baseband oversampling ratio $\text{OSR} = f_{\text{bit}} / (2 \cdot B)$ (`282.24` for DSD256) to export static `f64` coefficients, maximum stable input limit $L\text{ dBFS}$, and baseline headroom metadata into `audigma-dsp` (`presets.rs`):
+  1. Create Python (`scipy`/`numpy`) synthesis/verification tooling in `tools/design/` using the exact baseband oversampling ratio $\text{OSR} = f_{\text{bit}} / (2 \cdot B)$ (`282.24` for DSD256) as an independent cross-language mathematical oracle to export static `f64` coefficients, maximum stable input limit $L\text{ dBFS}$, and baseline headroom metadata into `audigma-dsp` (`presets.rs`):
      - Half-band $2\times$ FIR cascade coefficients (`balanced` ≥ 120 dB rejection, `reference` ≥ 140 dB rejection) and polyphase rational SRC coefficients (`Design.md §4.2`).
      - 5th-order CRFB modulator coefficients for DSD64, DSD128, and DSD256 (`Design.md §4.3`).
   2. In `audigma-dsp`, implement:
@@ -209,14 +209,22 @@ examples/                 # Ready-to-use TOML configs, MPD snippets, and WirePlu
 
 # Handoff Brief
 
-- **Current Phase:** Phase 0 (Workspace Scaffolding, Domain Types, Bit-Packing & Schema v1)
-- **What was done:**
-  - Overhauled `Design.md` into a clear, readable OSS Technical Specification, baking architectural decisions directly into the design and eliminating enterprise bloat and separate ADR bureaucracy.
-  - Established the 8-crate workspace architecture (`audigma-dsp`, `audigma-format`, `audigma-settings`, `audigma-engine`, `audigma-io`, `audigma-configurator`, `audigma-doctor`, `audigma-cli`), placing `DspConfiguration` and static preset/coefficient tables (`presets.rs`) directly in `audigma-dsp`, and dedicating `audigma-settings` to the `Schema v1` TOML configuration (`Settings`) and `[[rules]]` resolution.
-  - Added D-Bus device reservation (`org.freedesktop.ReserveDevice1`), `audigma stop`, and `audigma doctor [--fix]` specification.
-  - Updated `Plan.md` across Phases 0–6 to match the 8-crate DAG and streamlined `Design.md`.
+- **Current Phase:** Phase 1 (Reference DSP Harness, Filter Tables & 5th-Order DSM Loop)
+- **What was done (Phase 0 Completed):**
+  - Initialized the Cargo workspace with `crates/audigma-dsp`, `crates/audigma-format`, and `crates/audigma-settings`.
+  - Implemented strongly typed audio rate domains (`PcmRateHz`, `DsdBitRateHz`, `TransportFrameRateHz`), explicit SPA DSD byte-rate conversion (`to_spa_dsd_byte_rate()` $= f_{\text{bit}} / 8$), DoP & `DSD_U32` frame-rate conversions, baseband $\text{OSR} = f_{\text{bit}} / (2 \cdot B)$ (`282.24` for DSD256), `DspConfiguration`, headroom math, and `presets.rs` (`PRESET_BALANCED`, `PRESET_REFERENCE`, `PRESET_LOW_LATENCY`) in `audigma-dsp`.
+  - Implemented verified bit/byte packers and unpackers in `audigma-format` for ALSA Native `DSD_U32_BE` (`bitrev=0`), stereo DoP (`0x05`/`0xFA` continuous marker alternation across `s32le`, `s24le`, and `s24_3le`), and Sony DSF v1.01 4096-byte per-channel blocks (`bits_per_sample = 1` LSB-first default + MSB-first option; `spec-zero` and `dsd-silence` `0x69` padding).
+  - Implemented `Schema v1` TOML parsing (`Settings`), `[[rules]]` first-match evaluation, strict preset resolution (`"balanced" | "reference" | "low-latency"`), and architectural invariant validation in `audigma-settings` (updated `Design.md §6.1` to use strict `"reference"`).
+  - Recorded reference DAC hardware profiles in `docs/hardware/fiio-k17.md` and `docs/hardware/jadeaudio-ja11.md`.
+  - Verified `cargo test --workspace` (20/20 tests passing), `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo fmt --check`.
 - **What is next:**
-  - Start **Phase 0**: initialize the Cargo workspace (`audigma-dsp`, `audigma-format`, `audigma-settings`), implement domain rate/format types and `presets.rs` in `audigma-dsp`, pass golden bit-packing unit tests (`DSD_U32_BE`, DoP `s32le`/`s24le`/`s24_3le`, DSF blocks), implement `Schema v1` TOML parsing (`Settings`) in `audigma-settings`, and record `FiiO K17` / `JadeAudio JA11` profiles in `docs/hardware/`.
+  - Start **Phase 1**: build the Python (`scipy`/`numpy`) offline filter & 5th-order CRFB NTF synthesis scripts in `tools/design/`, export static `f64` coefficient tables into `crates/audigma-dsp/src/presets.rs`, implement hardware FTZ/DAZ, the multistage $2\times$ FIR & polyphase SRC interpolator, and the 5th-order CRFB modulator in `audigma-dsp`, and build the spectral verification harness in `tools/measure/` generating `docs/measurements/`.
 - **Artifacts:**
+  - `Cargo.toml`
+  - `crates/audigma-dsp/`
+  - `crates/audigma-format/`
+  - `crates/audigma-settings/`
+  - `docs/hardware/fiio-k17.md`
+  - `docs/hardware/jadeaudio-ja11.md`
   - `Design.md`
   - `Plan.md`

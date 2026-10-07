@@ -1,0 +1,13 @@
+[package]
+name = "audigma-format"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Audio container formats (DSF/WAV) and exact hardware bit-packers (DSD_U32_BE, DoP s32le/s24le/s24_3le) for audigma"
+
+[dependencies]
+audigma-dsp = { path = "../audigma-dsp" }
+serde = { workspace = true }
+thiserror = { workspace = true }

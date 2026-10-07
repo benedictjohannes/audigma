@@ -1,0 +1,12 @@
+[package]
+name = "audigma-dsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Core DSP types, rate domains, filter/modulator presets, and PCM/DSD signal processing for audigma"
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
