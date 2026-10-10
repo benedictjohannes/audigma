@@ -209,22 +209,24 @@ examples/                 # Ready-to-use TOML configs, MPD snippets, and WirePlu
 
 # Handoff Brief
 
-- **Current Phase:** Phase 1 (Reference DSP Harness, Filter Tables & 5th-Order DSM Loop)
-- **What was done (Phase 0 Completed):**
-  - Initialized the Cargo workspace with `crates/audigma-dsp`, `crates/audigma-format`, and `crates/audigma-settings`.
-  - Implemented strongly typed audio rate domains (`PcmRateHz`, `DsdBitRateHz`, `TransportFrameRateHz`), explicit SPA DSD byte-rate conversion (`to_spa_dsd_byte_rate()` $= f_{\text{bit}} / 8$), DoP & `DSD_U32` frame-rate conversions, baseband $\text{OSR} = f_{\text{bit}} / (2 \cdot B)$ (`282.24` for DSD256), `DspConfiguration`, headroom math, and `presets.rs` (`PRESET_BALANCED`, `PRESET_REFERENCE`, `PRESET_LOW_LATENCY`) in `audigma-dsp`.
-  - Implemented verified bit/byte packers and unpackers in `audigma-format` for ALSA Native `DSD_U32_BE` (`bitrev=0`), stereo DoP (`0x05`/`0xFA` continuous marker alternation across `s32le`, `s24le`, and `s24_3le`), and Sony DSF v1.01 4096-byte per-channel blocks (`bits_per_sample = 1` LSB-first default + MSB-first option; `spec-zero` and `dsd-silence` `0x69` padding).
-  - Implemented `Schema v1` TOML parsing (`Settings`), `[[rules]]` first-match evaluation, strict preset resolution (`"balanced" | "reference" | "low-latency"`), and architectural invariant validation in `audigma-settings` (updated `Design.md §6.1` to use strict `"reference"`).
-  - Recorded reference DAC hardware profiles in `docs/hardware/fiio-k17.md` and `docs/hardware/jadeaudio-ja11.md`.
-  - Verified `cargo test --workspace` (20/20 tests passing), `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo fmt --check`.
-- **What is next:**
-  - Start **Phase 1**: build the Python (`scipy`/`numpy`) offline filter & 5th-order CRFB NTF synthesis scripts in `tools/design/`, export static `f64` coefficient tables into `crates/audigma-dsp/src/presets.rs`, implement hardware FTZ/DAZ, the multistage $2\times$ FIR & polyphase SRC interpolator, and the 5th-order CRFB modulator in `audigma-dsp`, and build the spectral verification harness in `tools/measure/` generating `docs/measurements/`.
+- **Current Phase:** Phase 1 (Reference DSP Harness, Filter Tables & 5th-Order DSM Loop) — Step 1 Completed (Python Tooling & Static Tables)
+- **What was done (Step 1 Completed in this session):**
+  - Built Python synthesis and mathematical oracles under `tools/design/` using `uv` (`tools/design/design_halfband.py`, `tools/design/design_src.py`, `tools/design/design_crfb.py`, `tools/design/export_tables.py`).
+  - Synthesized half-band $2\times$ FIR filters meeting all `Design.md §4.2` targets: Stage 0 (steep transition) for `balanced` (175 taps, 124.8 dB rejection, $\le 0.000005$ dB ripple), `reference` (199 taps, 141.4 dB rejection, $\le 0.000001$ dB ripple), and `low-latency` (139 taps, 100.3 dB rejection); and Stage 1+ (relaxed transition, 23–31 taps, > 110–145 dB rejection).
+  - Synthesized Kaiser polyphase rational SRC (160 phases $\times$ 48 taps, > 123.5 dB rejection) for 44.1k $\leftrightarrow$ 48k conversions and 256-phase fractional ASRC drift tracking.
+  - Implemented 5th-order CRFB Delta-Sigma Modulator NTF synthesis with exact baseband $\text{OSR} = f_{\text{bit}} / (2 \cdot B)$ ($B = 20\text{ kHz}$), optimal unit-circle zeros, dual pole placement for $H_\infty \approx 1.40$, calibrated unity DC STF feed-in $b_1$, and verified maximum stable input limit $L \approx -3.5\text{ dBFS}$ with in-band SNR $> 100–117\text{ dB}$.
+  - Exported static `f64` Rust arrays and accessors to `crates/audigma-dsp/src/tables.rs` with embedded unit tests.
+  - Wrote comprehensive progress and resumption documentation in `Phase1.Progress.md`.
+  - Verified `cargo test --workspace` (23/23 tests passing), `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo fmt --check`.
+- **What is next (Next Session: Phase 1 Steps 2 & 3):**
+  - **Step 2:** Implement pure-Rust DSP primitives in `crates/audigma-dsp/` (`ftz.rs` hardware FTZ/DAZ helper, `fir.rs` staged $2\times$ half-band interpolator and polyphase SRC, `modulator.rs` 5th-order CRFB loop with TPDF dither, state overflow guard, and `0x69` DSD idle recovery).
+  - **Step 3:** Implement spectral verification harness in `tools/measure/` and generate report in `docs/measurements/report.md`.
 - **Artifacts:**
-  - `Cargo.toml`
-  - `crates/audigma-dsp/`
-  - `crates/audigma-format/`
-  - `crates/audigma-settings/`
-  - `docs/hardware/fiio-k17.md`
-  - `docs/hardware/jadeaudio-ja11.md`
-  - `Design.md`
+  - `tools/design/design_halfband.py`
+  - `tools/design/design_src.py`
+  - `tools/design/design_crfb.py`
+  - `tools/design/export_tables.py`
+  - `crates/audigma-dsp/src/tables.rs`
+  - `Phase1.Progress.md`
   - `Plan.md`
+  - `Design.md`

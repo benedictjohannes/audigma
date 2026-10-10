@@ -6,6 +6,11 @@
 pub mod config;
 pub mod presets;
 pub mod rates;
+pub mod tables;
+
+pub use tables::{
+    CrfbCoefficients, get_crfb_coefficients, get_halfband_stage0_taps, get_halfband_stage1_taps,
+};
 
 pub use config::{
     Apodization, DitherType, DspConfiguration, FilterPhase, FilterPreset, OverloadPolicy,
