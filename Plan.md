@@ -75,7 +75,7 @@ examples/                 # Ready-to-use TOML configs, MPD snippets, and WirePlu
 
 ---
 
-### Phase 1: Reference DSP Harness, Filter Tables & 5th-Order DSM Loop
+### Phase 1: Reference DSP Harness, Filter Tables & 5th-Order DSM Loop [Completed]
 **Maps to:** `Design.md §4.1–§4.5` and `§8`.
 
 - **Goal:** Build the reproducible filter/NTF coefficient generator (`tools/design/`), embed verified coefficients in `audigma-dsp` (`presets.rs`), implement the pure-Rust `f64` multistage interpolation cascade and 5th-order CRFB Delta-Sigma Modulator in `audigma-dsp`, and verify spectral performance with an offline measurement harness (`tools/measure/`).
@@ -209,26 +209,39 @@ examples/                 # Ready-to-use TOML configs, MPD snippets, and WirePlu
 
 # Handoff Brief
 
-- **Current Phase:** Phase 1 (Reference DSP Harness, Filter Tables & 5th-Order DSM Loop) — Steps 1 & 2 Completed
-- **What was done (Step 2 Completed in this session):**
-  - Updated `tools/design/export_tables.py` to export `SRC_ASRC_256_PHASES` (256 phases $\times$ 48 taps) with `#[rustfmt::skip]` annotations; regenerated `crates/audigma-dsp/src/tables.rs`.
-  - Implemented `crates/audigma-dsp/src/ftz.rs`: thread-level hardware FTZ/DAZ via `stmxcsr`/`ldmxcsr` inline assembly on `x86_64` and `FPCR` on `aarch64` (`ScopedFtzDaz`), preventing CPU microcode latency traps on digital silence.
-  - Implemented `crates/audigma-dsp/src/fir.rs`:
-    - `HalfBandStage`: zero-allocation 2x linear-phase upsampler exploiting even center-tap delay identity and odd-tap symmetry ($h[-k] = h[k]$), using double-buffer circular history.
-    - `HalfBandCascade`: staged $2^K$ interpolation chain (up to 256x for DSD256) using bounded tile streaming with preallocated ping-pong scratch buffers to guarantee CPU L1 cache locality and zero heap allocations.
-    - `PolyphaseResampler`: 48 taps/phase Kaiser-windowed sinc polyphase filter bank for rational cross-family conversion (160 phases) and continuous fractional ASRC clock drift tracking (256 phases).
-  - Implemented `crates/audigma-dsp/src/modulator.rs`:
-    - `CrfbModulator`: pure-Rust 5th-order Lossless Discrete Integrator (LDI) difference equations matching the verified Python design oracle.
-    - `TpdfDither`: zero-allocation Xorshift64* triangular dither generator.
-    - Modulator state bounding with `OverloadPolicy::MuteRecover` (substituting balanced DSD idle `0x69` / `0x6969_6969` and resetting integrators) and `OverloadPolicy::Error`.
-    - Packing into raw bits, MSB-first chronological DSD bytes (`process_tile_bytes`), and Native ALSA 32-bit words (`process_tile_u32`).
-  - Updated `crates/audigma-dsp/src/lib.rs` exporting all new modules and public types.
-  - Verified `cargo test --workspace` (32/32 tests passing), `cargo clippy --workspace --all-targets -- -D warnings` (clean), and `cargo fmt --check` (clean).
-  - Updated `Phase1.Progress.md`.
-- **What is next (Step 3: Spectral Measurement Harness & Reporting):**
-  - **Step 3:** Implement spectral verification harness in `tools/measure/` and generate report in `docs/measurements/report.md` per `Design.md §8`.
+- **Current Phase:** Phase 1 (Reference DSP Harness, Filter Tables & 5th-Order DSM Loop) — [Completed]
+- **Next Phase:** Phase 2 (Offline Audio Converter: `audigma convert` & `benchmark`)
+- **What was done (Step 3 Completed in this session, concluding Phase 1):**
+  - Implemented `crates/audigma-dsp/examples/measure_harness.rs`:
+    - Release-optimized test and benchmark harness with `ScopedFtzDaz` (hardware FTZ/DAZ).
+    - Supports `direct-sine`, `cascade-sine`, `silence`, `dc`, `multitone`, `overload`, and `benchmark` modes.
+    - Continuous periodic phase alignment during warmup eliminates boundary impulse transients.
+  - Implemented `crates/audigma-dsp/tests/spectral_verification.rs`:
+    - Automated integration tests integrated into `cargo test --workspace` covering silence stability, DC bias, overload recovery, and cascade across presets.
+  - Implemented `tools/measure/measure_spectral.py`:
+    - Coherent FFT ($N = 1,048,576$) and spectral band verification protocol per `Design.md §8`.
+    - Automated test execution across direct modulators (all 6 rates) and end-to-end cascades (`balanced`, `reference`, `low-latency`).
+    - Evaluated audio-band SNR, SINAD, THD, ultrasonic noise bands (20–100 kHz and 100 kHz–Nyquist), stability envelope, and host CPU throughput/budget.
+  - Generated and validated `docs/measurements/report.md`:
+    - Host CPU sustained throughput reaches **3.34x to 13.26x real-time** (exceeding the $\ge 2\times$ target).
+    - Real-time p99.9 block latency stays under **8.2% to 57.2% of the audio-block budget** (well under the $\le 70\%$ ceiling).
+    - Modulator stability proven: silence $0\text{s}/1\text{s}$ ratio is **0.5000** exactly, DC (+0.5) is **0.7500** exactly, multitone states bounded $< 0.81$, and overload recovery is instantaneous with zero runaway.
+    - End-to-end spectral fidelity: **101.1 to 111.7 dB SNR** (DSD64), **101.5 to 110.8 dB SNR** (DSD128), and **137.8 to 139.6 dB SNR** (DSD256), with THD down to $-159.5\text{ dB}$.
+  - Verified 100% clean toolchain health:
+    - `cargo test --workspace`: 36/36 tests passing cleanly.
+    - `cargo clippy --workspace --all-targets -- -D warnings`: 0 errors, 0 warnings.
+    - `cargo fmt --check`: 100% formatted.
+    - `uv run --with numpy --with scipy python tools/measure/measure_spectral.py`: 100% clean execution.
+  - Updated `Phase1.Progress.md` and marked Phase 1 as `[Completed]`.
+- **What is next (Phase 2: Offline Audio Converter):**
+  - Introduce `audigma-engine` (pure-Rust pipeline & abstract I/O traits) and `audigma-io` (file & stdio stream drivers).
+  - Implement `audigma-cli` with subcommands: `audigma convert`, `audigma benchmark`, `audigma presets`, and `audigma config`.
+  - Validate `.dsf` and `.wav` conversions via `ffprobe` and streaming tests.
 - **Artifacts:**
-  - `tools/design/export_tables.py`
+  - `tools/measure/measure_spectral.py`
+  - `crates/audigma-dsp/examples/measure_harness.rs`
+  - `crates/audigma-dsp/tests/spectral_verification.rs`
+  - `docs/measurements/report.md`
   - `crates/audigma-dsp/src/tables.rs`
   - `crates/audigma-dsp/src/ftz.rs`
   - `crates/audigma-dsp/src/fir.rs`

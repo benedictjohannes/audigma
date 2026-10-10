@@ -4,3 +4,4 @@
 *.wav
 .DS_Store
 **__pycache__
+**/.tmp_data/
