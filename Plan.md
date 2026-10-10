@@ -209,24 +209,31 @@ examples/                 # Ready-to-use TOML configs, MPD snippets, and WirePlu
 
 # Handoff Brief
 
-- **Current Phase:** Phase 1 (Reference DSP Harness, Filter Tables & 5th-Order DSM Loop) — Step 1 Completed (Python Tooling & Static Tables)
-- **What was done (Step 1 Completed in this session):**
-  - Built Python synthesis and mathematical oracles under `tools/design/` using `uv` (`tools/design/design_halfband.py`, `tools/design/design_src.py`, `tools/design/design_crfb.py`, `tools/design/export_tables.py`).
-  - Synthesized half-band $2\times$ FIR filters meeting all `Design.md §4.2` targets: Stage 0 (steep transition) for `balanced` (175 taps, 124.8 dB rejection, $\le 0.000005$ dB ripple), `reference` (199 taps, 141.4 dB rejection, $\le 0.000001$ dB ripple), and `low-latency` (139 taps, 100.3 dB rejection); and Stage 1+ (relaxed transition, 23–31 taps, > 110–145 dB rejection).
-  - Synthesized Kaiser polyphase rational SRC (160 phases $\times$ 48 taps, > 123.5 dB rejection) for 44.1k $\leftrightarrow$ 48k conversions and 256-phase fractional ASRC drift tracking.
-  - Implemented 5th-order CRFB Delta-Sigma Modulator NTF synthesis with exact baseband $\text{OSR} = f_{\text{bit}} / (2 \cdot B)$ ($B = 20\text{ kHz}$), optimal unit-circle zeros, dual pole placement for $H_\infty \approx 1.40$, calibrated unity DC STF feed-in $b_1$, and verified maximum stable input limit $L \approx -3.5\text{ dBFS}$ with in-band SNR $> 100–117\text{ dB}$.
-  - Exported static `f64` Rust arrays and accessors to `crates/audigma-dsp/src/tables.rs` with embedded unit tests.
-  - Wrote comprehensive progress and resumption documentation in `Phase1.Progress.md`.
-  - Verified `cargo test --workspace` (23/23 tests passing), `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo fmt --check`.
-- **What is next (Next Session: Phase 1 Steps 2 & 3):**
-  - **Step 2:** Implement pure-Rust DSP primitives in `crates/audigma-dsp/` (`ftz.rs` hardware FTZ/DAZ helper, `fir.rs` staged $2\times$ half-band interpolator and polyphase SRC, `modulator.rs` 5th-order CRFB loop with TPDF dither, state overflow guard, and `0x69` DSD idle recovery).
-  - **Step 3:** Implement spectral verification harness in `tools/measure/` and generate report in `docs/measurements/report.md`.
+- **Current Phase:** Phase 1 (Reference DSP Harness, Filter Tables & 5th-Order DSM Loop) — Steps 1 & 2 Completed
+- **What was done (Step 2 Completed in this session):**
+  - Updated `tools/design/export_tables.py` to export `SRC_ASRC_256_PHASES` (256 phases $\times$ 48 taps) with `#[rustfmt::skip]` annotations; regenerated `crates/audigma-dsp/src/tables.rs`.
+  - Implemented `crates/audigma-dsp/src/ftz.rs`: thread-level hardware FTZ/DAZ via `stmxcsr`/`ldmxcsr` inline assembly on `x86_64` and `FPCR` on `aarch64` (`ScopedFtzDaz`), preventing CPU microcode latency traps on digital silence.
+  - Implemented `crates/audigma-dsp/src/fir.rs`:
+    - `HalfBandStage`: zero-allocation 2x linear-phase upsampler exploiting even center-tap delay identity and odd-tap symmetry ($h[-k] = h[k]$), using double-buffer circular history.
+    - `HalfBandCascade`: staged $2^K$ interpolation chain (up to 256x for DSD256) using bounded tile streaming with preallocated ping-pong scratch buffers to guarantee CPU L1 cache locality and zero heap allocations.
+    - `PolyphaseResampler`: 48 taps/phase Kaiser-windowed sinc polyphase filter bank for rational cross-family conversion (160 phases) and continuous fractional ASRC clock drift tracking (256 phases).
+  - Implemented `crates/audigma-dsp/src/modulator.rs`:
+    - `CrfbModulator`: pure-Rust 5th-order Lossless Discrete Integrator (LDI) difference equations matching the verified Python design oracle.
+    - `TpdfDither`: zero-allocation Xorshift64* triangular dither generator.
+    - Modulator state bounding with `OverloadPolicy::MuteRecover` (substituting balanced DSD idle `0x69` / `0x6969_6969` and resetting integrators) and `OverloadPolicy::Error`.
+    - Packing into raw bits, MSB-first chronological DSD bytes (`process_tile_bytes`), and Native ALSA 32-bit words (`process_tile_u32`).
+  - Updated `crates/audigma-dsp/src/lib.rs` exporting all new modules and public types.
+  - Verified `cargo test --workspace` (32/32 tests passing), `cargo clippy --workspace --all-targets -- -D warnings` (clean), and `cargo fmt --check` (clean).
+  - Updated `Phase1.Progress.md`.
+- **What is next (Step 3: Spectral Measurement Harness & Reporting):**
+  - **Step 3:** Implement spectral verification harness in `tools/measure/` and generate report in `docs/measurements/report.md` per `Design.md §8`.
 - **Artifacts:**
-  - `tools/design/design_halfband.py`
-  - `tools/design/design_src.py`
-  - `tools/design/design_crfb.py`
   - `tools/design/export_tables.py`
   - `crates/audigma-dsp/src/tables.rs`
+  - `crates/audigma-dsp/src/ftz.rs`
+  - `crates/audigma-dsp/src/fir.rs`
+  - `crates/audigma-dsp/src/modulator.rs`
+  - `crates/audigma-dsp/src/lib.rs`
   - `Phase1.Progress.md`
   - `Plan.md`
   - `Design.md`

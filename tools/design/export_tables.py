@@ -130,6 +130,17 @@ def generate_tables_rs(halfband, src_rational, src_asrc, crfb_rates):
         code.append("    ],")
     code.append("];\n")
 
+    # Export Polyphase ASRC table (256 phases for continuous drift tracking)
+    num_asrc = src_asrc["num_phases"]
+    taps_asrc = src_asrc["taps_per_phase"]
+    code.append(f"/// Polyphase ASRC table for continuous clock drift tracking ({num_asrc} phases, {taps_asrc} taps/phase, rejection >= {src_asrc['sb_rejection_db']:.1f} dB).")
+    code.append(f"pub static SRC_ASRC_256_PHASES: [[f64; {taps_asrc}]; {num_asrc}] = [")
+    for phase in src_asrc["table"]:
+        code.append("    [")
+        code.append(format_f64_array(phase, indent=8))
+        code.append("    ],")
+    code.append("];\n")
+
     code.append("""#[cfg(test)]
 mod tests {
     use super::*;
@@ -185,6 +196,19 @@ mod tests {
             assert!(
                 (sum - 1.0).abs() < 1e-6,
                 "Phase {idx} sum = {sum} deviates from 1.0"
+            );
+        }
+    }
+
+    #[test]
+    fn test_src_asrc_table_properties() {
+        assert_eq!(SRC_ASRC_256_PHASES.len(), 256);
+        assert_eq!(SRC_ASRC_256_PHASES[0].len(), 48);
+        for (idx, phase) in SRC_ASRC_256_PHASES.iter().enumerate() {
+            let sum: f64 = phase.iter().sum();
+            assert!(
+                (sum - 1.0).abs() < 1e-6,
+                "ASRC Phase {idx} sum = {sum} deviates from 1.0"
             );
         }
     }
