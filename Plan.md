@@ -50,6 +50,13 @@ docs/
 examples/                 # Ready-to-use TOML configs, MPD snippets, and WirePlumber rules
 ```
 
+### Reference Repositories (`references/`)
+
+Cloned local reference repositories kept in [`references/`](references/) (ignored in `.gitignore`) for direct code and architectural reference across sessions:
+- [`references/pipewire-rs/`](references/pipewire-rs/): Official Rust bindings for PipeWire and libspa (`libspa`, `libspa-sys`, `pipewire`, `pipewire-sys`). Serves as the canonical reference for SPA POD builders/parsers, `SPA_PARAM_Props`, format negotiation, dicts, and stream listeners.
+- [`references/alsa-rs/`](references/alsa-rs/): Rust bindings for the Linux ALSA library (`alsa::mixer`, `alsa::pcm`, `alsa::ctl`, `alsa::device_name`). Reference for Phase 5 UAC2 hardware mixer enumeration, `SimpleElement`, `SelemId`, and analog volume attenuation.
+- [`references/MPD/`](references/MPD/): Music Player Daemon source code (C++). Battle-tested reference for ALSA hardware volume mixer control (`src/mixer/plugins/AlsaMixerPlugin.cxx`), PipeWire integration (`src/mixer/plugins/PipeWireMixerPlugin.cxx`), and DSD/DoP playback logic (`src/output/plugins/AlsaOutputPlugin.cxx`).
+
 ---
 
 ## 3. Phased Breakdown
@@ -191,13 +198,28 @@ examples/                 # Ready-to-use TOML configs, MPD snippets, and WirePlu
 
 ---
 
-### Phase 5: Interactive Configurator (`audigma-configurator`) & WirePlumber Templates
+### Phase 5: Dynamic Multi-Rate, Multi-Channel Threading, Volume Strategy, Resilience & DSD Ingestion Engine
+**Maps to:** `Design.md §1.1–§1.6`, `§3.2–§3.4`, `§4.3–§4.5`.
+
+- **Goal:** Transform `audigma` into an agile, multi-channel, multi-rate Linux audio daemon and high-fidelity DSD processor:
+  1. **Step 5.1:** Specification formalization in `Design.md` & configuration schema expansion in `audigma-settings` (explicit `channel_positions`, `rate_mode`, `volume_control`, `device_wait_ms`, `keep_audio_sink_ms`, `allow_dsd`, and symbolic `dsd_rate`).
+  2. **Step 5.2:** Output device resilience, event-driven hotplug & sink lifecycle in `audigma-engine`, `audigma-io`, and `audigma-cli` (event-driven inotify `/dev/snd` watcher, ALSA `ENODEV` disconnect handling, `WaitingForDevice` state, bit-bucket silent draining, and PipeWire graph sink visibility).
+  3. **Step 5.3:** Persistent real-time channel worker pool in `audigma-engine` (1 dedicated RT worker thread per channel, lock-free barrier, zero-copy shared memory, accelerating offline conversion and enabling multi-channel/low-power live playback).
+  4. **Step 5.4:** Dynamic multi-rate PipeWire negotiation and dynamic channel mapping in `audigma-io` (SPA `Choice::Enum` POD, `audio.allowed-rates`, dynamic `channel_positions` mapping, and seamless rate renegotiation).
+  5. **Step 5.5:** Unified volume control strategy (`software` vs. `hardware` UAC2 mixer bridge vs. `none` line-out, plus PipeWire `SPA_PARAM_Props` desktop slider interception).
+  6. **Step 5.6:** DSD input ingestion & bounded decimation remodulation engine (PipeWire SPA `audio/dsd`, DoP unwrapper, DSF decoder, staged $2\times$ FIR decimation, and rate selection formula).
+- **Execution Structure:** Phase 5 is executed sequentially in 6 distinct sessions (Steps 5.1 through 5.6).
+- **STOP:** Follow the STOP protocol at the conclusion of each sub-step.
+
+---
+
+### Phase 6: Interactive Configurator (`audigma-configurator`) & WirePlumber Templates
 **Maps to:** `Design.md §2`, `§6.1`, and `§7`.
 
 - **Goal:** Implement `audigma-configurator` to provide an interactive TUI (`audigma configure --tui`) and optional one-shot localhost Web wizard (`audigma configure --web`), complete rule-based selection (`[[rules]]`), and ship the `systemd --user` service and WirePlumber templates.
 - **Scope & Tasks:**
   1. In `audigma-configurator`, implement `audigma configure --tui` (and optional `--web` on `127.0.0.1:<random_port>` with session token that terminates on save, per `Design.md §7`):
-      - Guided flow: select Output Path (`PipeWire High-Rate PCM` vs. `Exclusive ALSA PCM` vs. `Exclusive ALSA DSD`) $\to$ probe DAC capabilities (`audigma-io`) $\to$ choose Rate Policy (`fixed` zero-relock vs. `source-family`) $\to$ run quick CPU benchmark (`audigma-engine`) $\to$ preview headroom/latency (`audigma-settings` / `audigma-dsp`) $\to$ write `~/.config/audigma/config.toml`.
+      - Guided flow: select Output Path (`PipeWire High-Rate PCM` vs. `Exclusive ALSA PCM` vs. `Exclusive ALSA DSD`) $\to$ probe DAC capabilities (`audigma-io`) $\to$ choose Rate Policy (`fixed` zero-relock vs. `source-family`) $\to$ choose Volume Policy (`software` vs. `hardware` vs. `none`) $\to$ run quick CPU benchmark (`audigma-engine`) $\to$ preview headroom/latency (`audigma-settings` / `audigma-dsp`) $\to$ write `~/.config/audigma/config.toml`.
   2. Complete full `[[rules]]` evaluation and `audigma config explain` output (`Design.md §6.1`).
   3. Package the `systemd --user` unit file, WirePlumber templates, shell completions, and manpage (`examples/`).
 - **`[User-Led]` Actions:**
@@ -209,7 +231,7 @@ examples/                 # Ready-to-use TOML configs, MPD snippets, and WirePlu
 
 ---
 
-### Phase 6: Host Audio Doctor (`audigma-doctor`), Interactive Remediation (`--fix`) & Polish
+### Phase 7: Host Audio Doctor (`audigma-doctor`), Interactive Remediation (`--fix`) & Polish
 **Maps to:** `Design.md §2` and `§7`.
 
 - **Goal:** Implement the dedicated `audigma-doctor` crate to inspect the host audio environment, verify PipeWire multi-rate setup and real-time scheduling limits, diagnose ALSA device lockouts, and provide interactive remediation (`audigma doctor --fix`), keeping platform-specific OS plumbing cleanly isolated.
@@ -236,7 +258,7 @@ examples/                 # Ready-to-use TOML configs, MPD snippets, and WirePlu
 # Handoff Brief
 
 - **Current Phase:** Phase 4 (PipeWire Virtual Sink, Shared-Graph PCM, D-Bus Device Reservation & Adaptive Clock Bridge) — [Completed]
-- **Next Phase:** Phase 5 (Interactive Configurator `audigma-configurator` & WirePlumber Templates)
+- **Next Phase:** Phase 5 (Volume Control Strategy, PipeWire Sink Props & Hardware UAC2 Mixer Bridge)
 - **What was done in this session:**
   - **PipeWire Format Negotiation Resolution:**
     - Diagnosed that `build_format_pod` was passing `id: 1` instead of `libspa::param::ParamType::EnumFormat.as_raw()` (3), causing PipeWire to reject the format enumeration and fall back to single-port generic DSP format (`F32P`).
@@ -253,9 +275,10 @@ examples/                 # Ready-to-use TOML configs, MPD snippets, and WirePlu
     - `cargo test --workspace` passed 100% (all unit and integration tests across all crates).
     - `cargo clippy --workspace --all-targets -- -D warnings` passed with 0 warnings.
     - `cargo fmt --check` passed cleanly.
-- **Action Items for Next Session:**
-  1. Initiate Phase 5: Scaffold `audigma-configurator` crate with interactive TUI (`ratatui` / `crossterm`) and one-shot Web wizard.
-  2. Implement guided configuration workflow, full `[[rules]]` evaluation, and `audigma config explain`.
-  3. Package systemd user services, WirePlumber configuration templates, shell completions, and manpages.
+- **Action Items for Next Session (Phase 5 — Step 5.1):**
+  1. Update `Design.md` to canonically formalize multi-channel topology (`channel_positions`), output device resilience (`device_wait_ms`, `keep_audio_sink_ms`), persistent real-time worker pool, dynamic multi-rate PipeWire negotiation, unified volume control (`software`/`hardware`/`none`), and DSD decimation remodulation.
+  2. Implement configuration schema additions in `crates/audigma-settings/src/lib.rs` per `Phase5.Plan.md` Step 5.1.
+  3. Write comprehensive unit tests in `audigma-settings` for new schema fields and cross-field validation rules.
+
 
 
