@@ -102,10 +102,13 @@ impl HalfBandStage {
 
             // Odd branch: convolve symmetric odd taps
             // Midpoint is between window[k - 1] and window[k]
+            let pre_ptr = &window[k - 1] as *const f64;
+            let post_ptr = &window[k] as *const f64;
             let mut odd_acc = 0.0;
             for (i, &tap) in self.taps.iter().enumerate() {
-                let s_pre = window[k - 1 - i];
-                let s_post = window[k + i];
+                // Safety: i < k, so pre_ptr.sub(i) >= window[0] and post_ptr.add(i) <= window[2k - 1]
+                let s_pre = unsafe { *pre_ptr.sub(i) };
+                let s_post = unsafe { *post_ptr.add(i) };
                 odd_acc += tap * (s_pre + s_post);
             }
             // Scale by 2.0 to restore unity DC gain for zero-stuffed interpolation

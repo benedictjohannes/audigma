@@ -1,0 +1,19 @@
+[package]
+name = "audigma-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Pure-Rust audio pipeline planner, offline converter, and abstract I/O traits for audigma"
+
+[dependencies]
+audigma-dsp = { path = "../audigma-dsp" }
+audigma-format = { path = "../audigma-format" }
+audigma-settings = { path = "../audigma-settings" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+hound = { workspace = true }
+

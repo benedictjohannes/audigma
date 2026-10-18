@@ -1,0 +1,25 @@
+[package]
+name = "audigma-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Audigma command-line interface, foreground runner, and control client"
+
+[[bin]]
+name = "audigma"
+path = "src/main.rs"
+
+[dependencies]
+audigma-dsp = { path = "../audigma-dsp" }
+audigma-format = { path = "../audigma-format" }
+audigma-settings = { path = "../audigma-settings" }
+audigma-engine = { path = "../audigma-engine" }
+audigma-io = { path = "../audigma-io" }
+clap = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+hound = { workspace = true }

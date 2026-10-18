@@ -11,3 +11,6 @@ description = "Audio container formats (DSF/WAV) and exact hardware bit-packers 
 audigma-dsp = { path = "../audigma-dsp" }
 serde = { workspace = true }
 thiserror = { workspace = true }
+symphonia = { workspace = true }
+hound = { workspace = true }
+flacenc = { workspace = true }

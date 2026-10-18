@@ -1,7 +1,7 @@
 # audigma — Phase 1 Spectral Verification & DSP Quality Report
 
 > **Authoritative Specification:** Generated per `Design.md §8` and `Plan.md Phase 1 Step 3`.  
-> **Execution Timestamp:** `2026-10-10 23:48:16Z`  
+> **Execution Timestamp:** `2026-10-14 03:22:02Z`  
 > **Test Harness:** Rust release binary `measure_harness` (`crates/audigma-dsp/examples/measure_harness.rs`) analyzed via `tools/measure/measure_spectral.py`.  
 > **Coherent FFT Length:** \(N = 1,048,576\) samples (\(2^{20}\)) with hardware FTZ/DAZ active.
 
@@ -112,12 +112,12 @@ Benchmark parameters: 2,000 blocks of 64 baseband frames (1.451 ms audio duratio
 
 | Target Rate | Preset | Audio Block Time (\(\mu\text{s}\)) | Avg Latency (\(\mu\text{s}\)) | p99.9 Latency (\(\mu\text{s}\)) | p99.9 Budget Used | Throughput (\(\times\) Real-Time) | Goal (\(\ge 2\times, \le 70\%\)) |
 |---|---|---:|---:|---:|---:|---:|:---:|
-| `DSD64` | `Balanced` | 1451.2 | 109.5 | 140.3 | **9.7%** | **13.24\times** | **PASS** |
-| `DSD64` | `Reference` | 1451.2 | 111.8 | 119.6 | **8.2%** | **12.97\times** | **PASS** |
-| `DSD128` | `Balanced` | 1451.2 | 217.1 | 237.4 | **16.4%** | **6.68\times** | **PASS** |
-| `DSD128` | `Reference` | 1451.2 | 225.8 | 593.2 | **40.9%** | **6.43\times** | **PASS** |
-| `DSD256` | `Balanced` | 1451.2 | 434.3 | 606.6 | **41.8%** | **3.34\times** | **PASS** |
-| `DSD256` | `Reference` | 1451.2 | 444.9 | 830.7 | **57.2%** | **3.26\times** | **PASS** |
+| `DSD64` | `Balanced` | 1451.2 | 108.8 | 135.9 | **9.4%** | **13.34\times** | **PASS** |
+| `DSD64` | `Reference` | 1451.2 | 111.9 | 170.6 | **11.8%** | **12.96\times** | **PASS** |
+| `DSD128` | `Balanced` | 1451.2 | 216.7 | 254.7 | **17.6%** | **6.69\times** | **PASS** |
+| `DSD128` | `Reference` | 1451.2 | 222.0 | 269.9 | **18.6%** | **6.54\times** | **PASS** |
+| `DSD256` | `Balanced` | 1451.2 | 439.6 | 567.7 | **39.1%** | **3.30\times** | **PASS** |
+| `DSD256` | `Reference` | 1451.2 | 442.3 | 537.8 | **37.1%** | **3.28\times** | **PASS** |
 
 ---
 

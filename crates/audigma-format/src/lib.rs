@@ -3,10 +3,16 @@
 //!
 //! Zero OS audio library dependencies.
 
+pub mod decoder;
 pub mod dop;
 pub mod dsd_u32;
 pub mod dsf;
+pub mod dsf_writer;
+pub mod flac_writer;
+pub mod topology;
+pub mod wav_writer;
 
+pub use decoder::{AudioDecoder, AudioStreamInfo};
 pub use dop::{
     DOP_MARKER_EVEN, DOP_MARKER_ODD, DSD_BYTES_PER_DOP_FRAME, DopContainerFormat, DopPacker,
     unpack_stereo_dop_frames,
@@ -19,10 +25,14 @@ pub use dsf::{
     DSF_BLOCK_SIZE_PER_CHANNEL, DSF_HEADER_TOTAL_BYTES, DsfBitOrder, DsfHeader, DsfPadMode,
     pack_stereo_dsf_blocks, pack_stereo_dsf_file, parse_stereo_dsf_file,
 };
+pub use dsf_writer::DsfFileWriter;
+pub use flac_writer::FlacEncoder;
+pub use topology::downmix_interleaved_to_stereo;
+pub use wav_writer::PcmWavWriter;
 
 use thiserror::Error;
 
-/// Errors produced during audio container or hardware frame packing/unpacking.
+/// Errors produced during audio container or hardware frame packing/unpacking/decoding/encoding.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum FormatError {
     #[error("left ({left} bytes) and right ({right} bytes) DSD channel lengths do not match")]
@@ -51,4 +61,22 @@ pub enum FormatError {
 
     #[error("invalid Sony DSF v1.01 header: {0}")]
     InvalidDsfHeader(&'static str),
+
+    #[error("decoder error: {0}")]
+    DecoderError(String),
+
+    #[error("encoder error: {0}")]
+    EncoderError(String),
+
+    #[error("I/O error: {0}")]
+    IoError(String),
+
+    #[error("unsupported sample format: {0:?}")]
+    UnsupportedSampleFormat(audigma_dsp::SampleFormat),
+}
+
+impl From<std::io::Error> for FormatError {
+    fn from(err: std::io::Error) -> Self {
+        Self::IoError(err.to_string())
+    }
 }

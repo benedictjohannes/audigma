@@ -96,28 +96,50 @@ examples/                 # Ready-to-use TOML configs, MPD snippets, and WirePlu
 
 ---
 
-### Phase 2: Offline Audio Converter (`audigma convert` & `benchmark`)
-**Maps to:** `Design.md §3.1`, `§4.4`, `§5.3`, `§6.2.D–E`, and `§7`.
+### Phase 2: Offline Audio Converter (`audigma convert` & `benchmark`) [Completed]
+**Maps to:** `Design.md §3.1`, `§4.4`, `§5.2–§5.3`, `§6.2.D–E`, and `§7`.
 
-- **Goal:** Deliver the first playable vertical slice: introduce `audigma-engine` (pure Rust pipeline & I/O traits), `audigma-io` (file & stdio stream drivers), and `audigma-cli` to convert WAV/FLAC files (and raw stdio streams) into `.dsf`, raw DoP, or high-rate PCM `.wav`, complete with two-pass true-peak analysis, non-seekable `stdout` validation, and deterministic seeding.
-- **Scope & Tasks:**
-  1. Implement WAV/FLAC decoding (`symphonia` / `hound`), WAV/DSF file writers, and `stdio` raw stream drivers in `audigma-format` and `audigma-io` (`Design.md §5.2–§5.3`):
-     - Reject unsupported non-seekable `stdout` combinations (`container = "dsf"` or unknown-length `wav` to `-`) before processing; handle pipe backpressure, partial frames, EOF, and `EPIPE` cleanly (`Design.md §5.3`).
-  2. Implement the prepared offline pipeline and abstract `AudioInput`/`AudioOutput` traits in `audigma-engine`:
-     - `peak_analysis = "two-pass"` (Pass 1 runs the LTI PCM interpolation cascade only, skipping the 1-bit DSM loop and bit packing to measure peak $P\text{ dBFS}$; Pass 2 applies $\text{gain\_db} = \min(\text{configured\_gain\_db},\; L - M - P)$ per `Design.md §4.4` and runs the full chain).
-     - `tail_policy = "trim-to-duration" | "preserve-tail"` and `dsf_pad_mode = "spec-zero" | "dsd-silence"`.
-  3. Implement `audigma-cli` subcommands (`Design.md §7`):
-     - `audigma convert -i INPUT -o OUTPUT [-c CONFIG]` (supporting file and `-` stdio).
-     - `audigma benchmark [-i INPUT] [-c CONFIG] [--json]` (reporting DSP-only vs. end-to-end throughput and p99.9 block time budget).
-     - `audigma presets list` & `audigma presets show NAME`.
-     - `audigma config check` & `audigma config explain`.
-- **`[User-Led]` Actions:**
-  - Convert a real music track (e.g. WAV/FLAC) to `.dsf` (DSD128 or DSD256) using `audigma convert`.
-  - Play the generated `.dsf` file via `mpd` or `pw-dsdplay` to the **FiiO K17** (when available) and/or test a raw DoP conversion on the **JadeAudio JA11** (when connected), confirming clean playback, no end-of-track pop, and proper DAC indicator state.
+- **Goal:** Deliver the first playable vertical slice: introduce `audigma-engine` (pure Rust pipeline & I/O traits), `audigma-io` (file & stdio stream drivers), and `audigma-cli` to convert WAV/FLAC files (and raw stdio streams) into `.dsf`, high-rate PCM `.wav`, lossless `.flac`, or raw DoP, complete with two-pass true-peak analysis, channel topology adaptation, non-seekable `stdout` validation, and deterministic seeding.
+- **Scope & Three-Step Breakdown:**
+  - **Step 1: Container Decoders/Encoders & Schema Updates (`audigma-format`, `audigma-settings`):**
+    - In `audigma-settings`, add `OutputContainer::Flac` (`container = "flac"`) and define offline configuration resolution rules (auto-inferring target format and container from output extension `.dsf`, `.wav`, or `.flac`, with fallback to built-in offline reference defaults).
+    - In `audigma-format`, implement pure-Rust audio decoding for WAV and FLAC via `symphonia` with input channel topology handling:
+      - Mono (1 channel) $\to$ duplicate to stereo ($L = C, R = C$) with unity gain.
+      - Stereo (2 channels) $\to$ passthrough ($L = L, R = R$).
+      - Multi-channel ($> 2$ channels) $\to$ ITU-R BS.775 stereo fold-down downmixing in floating-point PCM before any gain or resampling stages.
+    - In `audigma-format`, implement container writers:
+      - High-rate PCM `.wav` writer via `hound` (supporting 16, 24, 32-bit int and 32-bit float up to 768 kHz).
+      - Lossless `.flac` encoder via `flacenc` (pure Rust, supporting 16 and 24-bit PCM up to 384 kHz).
+      - Sony `.dsf` file writer utilizing `audigma-format::dsf` with seekable chunk header size and sample count finalization and selectable `DsfPadMode` (`spec-zero` vs. `dsd-silence`).
+    - Add roundtrip golden-vector unit tests for all container formats.
+  - **Step 2: Pure-Rust Engine & Prepared Offline Pipeline (`audigma-engine`):**
+    - Define abstract `AudioInput` and `AudioOutput` stream traits (pure Rust, zero C-FFI / zero OS audio library dependencies).
+    - Implement the offline pipeline runner chaining:
+      - PCM input decoding and channel conditioning.
+      - Gain staging (preamp, profile headroom, user volume).
+      - Multistage linear/minimum-phase FIR interpolation cascade ($2^K$) and polyphase rational SRC (if rate family conversion is required).
+      - `peak_analysis = "two-pass"`: Pass 1 evaluates only the LTI PCM interpolation cascade to measure true inter-sample peak $P\text{ dBFS}$ and solves $\text{gain\_db} = \min(\text{configured\_gain\_db},\; L - M - P)$ per `Design.md §4.4`; Pass 2 executes the complete pipeline with calibrated gain.
+      - Output quantizer/modulator: 5th-order CRFB DSM for DSD or TPDF dither for integer PCM.
+      - Transport bit packing and container egress.
+    - Implement tail policies (`tail_policy = "trim-to-duration" | "preserve-tail"`).
+    - Comprehensive in-memory pipeline tests verifying bit-exactness, gain scaling, and tail truncation.
+  - **Step 3: Concrete File/Stdio I/O, CLI Commands & Quality Proof (`audigma-io`, `audigma-cli`):**
+    - In `audigma-io`, implement concrete `AudioInput`/`AudioOutput` drivers for files and stdio streams:
+      - Strictly reject non-seekable `stdout` combinations (`container = "dsf"` or streaming `wav` to `-`) before processing (`Design.md §5.3`).
+      - Handle pipe backpressure, partial frames, EOF, and `EPIPE` without panicking.
+    - In `audigma-cli`, implement subcommands:
+      - `audigma convert -i INPUT -o OUTPUT [-c CONFIG]` (with output extension container inference and offline defaults).
+      - `audigma benchmark [-i INPUT] [-c CONFIG] [--json]` (using a deterministic 10-second synthetic stereo test signal when `-i` is omitted, reporting DSP-only vs. end-to-end throughput and p99.9 block time budget).
+      - `audigma presets list` & `audigma presets show NAME`.
+      - `audigma config check` & `audigma config explain`.
+- **`[User-Led]` Actions (Hardware Collaboration Required):**
+  - Convert a real music track (e.g. WAV/FLAC) to `.dsf` (DSD128 or DSD256), `.wav`, or `.flac` using `audigma convert`.
+  - Only when directed by the user, test playback of generated `.dsf` on the **FiiO K17** and/or raw DoP conversion on the **JadeAudio JA11**, confirming clean playback, zero DC pops, and proper DAC indicator status.
 - **Success Criteria & Proof:**
-  - Independent validation of generated `.dsf` and `.wav` files via `ffprobe` + unit/integration tests (including non-seekable stdout rejection tests).
+  - Independent validation of generated `.dsf`, `.wav`, and `.flac` files via `ffprobe` and unit/integration tests (including non-seekable stdout rejection tests).
   - `audigma benchmark` reports $\ge 2\times$ real-time DSP throughput and p99.9 worker execution time $\le 70\%$ of audio-block duration on the host CPU.
-  - `[User-Led]` listening test confirms clean DSD playback on whichever hardware DAC is currently connected.
+  - `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo fmt --check` pass 100% cleanly.
+  - `[User-Led]` listening test confirms clean DSD playback on whichever hardware DAC is confirmed available.
 - **STOP:** Update `# Handoff Brief` and terminate session.
 
 ---
@@ -209,44 +231,41 @@ examples/                 # Ready-to-use TOML configs, MPD snippets, and WirePlu
 
 # Handoff Brief
 
-- **Current Phase:** Phase 1 (Reference DSP Harness, Filter Tables & 5th-Order DSM Loop) — [Completed]
-- **Next Phase:** Phase 2 (Offline Audio Converter: `audigma convert` & `benchmark`)
-- **What was done (Step 3 Completed in this session, concluding Phase 1):**
-  - Implemented `crates/audigma-dsp/examples/measure_harness.rs`:
-    - Release-optimized test and benchmark harness with `ScopedFtzDaz` (hardware FTZ/DAZ).
-    - Supports `direct-sine`, `cascade-sine`, `silence`, `dc`, `multitone`, `overload`, and `benchmark` modes.
-    - Continuous periodic phase alignment during warmup eliminates boundary impulse transients.
-  - Implemented `crates/audigma-dsp/tests/spectral_verification.rs`:
-    - Automated integration tests integrated into `cargo test --workspace` covering silence stability, DC bias, overload recovery, and cascade across presets.
-  - Implemented `tools/measure/measure_spectral.py`:
-    - Coherent FFT ($N = 1,048,576$) and spectral band verification protocol per `Design.md §8`.
-    - Automated test execution across direct modulators (all 6 rates) and end-to-end cascades (`balanced`, `reference`, `low-latency`).
-    - Evaluated audio-band SNR, SINAD, THD, ultrasonic noise bands (20–100 kHz and 100 kHz–Nyquist), stability envelope, and host CPU throughput/budget.
-  - Generated and validated `docs/measurements/report.md`:
-    - Host CPU sustained throughput reaches **3.34x to 13.26x real-time** (exceeding the $\ge 2\times$ target).
-    - Real-time p99.9 block latency stays under **8.2% to 57.2% of the audio-block budget** (well under the $\le 70\%$ ceiling).
-    - Modulator stability proven: silence $0\text{s}/1\text{s}$ ratio is **0.5000** exactly, DC (+0.5) is **0.7500** exactly, multitone states bounded $< 0.81$, and overload recovery is instantaneous with zero runaway.
-    - End-to-end spectral fidelity: **101.1 to 111.7 dB SNR** (DSD64), **101.5 to 110.8 dB SNR** (DSD128), and **137.8 to 139.6 dB SNR** (DSD256), with THD down to $-159.5\text{ dB}$.
+- **Current Phase:** Phase 2 (Offline Audio Converter: `audigma convert` & `benchmark`) — [Completed]
+- **Next Phase:** Phase 3 (Direct ALSA Hardware Egress: Native DSD & DoP Probe/Playback)
+- **What was done (Step 3 Completed in this session, concluding Phase 2):**
+  - Introduced `crates/audigma-io`:
+    - Implemented `FileAudioInput` and `FileAudioOutput` with file descriptor error wrapping and seekability.
+    - Implemented `StdioAudioInput` and `StdioAudioOutput` handling raw PCM formats, pipe backpressure, clean EOF, and `EPIPE` recovery.
+    - Integration tests in `tests/io_drivers.rs`.
+  - Introduced `crates/audigma-cli` binary crate (`audigma`):
+    - Subcommands implemented:
+      - `audigma convert -i INPUT -o OUTPUT [-c CONFIG] [--json]` (with automatic container extension inference for `.dsf`, `.wav`, `.flac`, and raw stdio).
+      - `audigma benchmark [-i INPUT] [-c CONFIG] [--json]` (using deterministic 10s synthetic stereo test signal, verifying $\ge 2\times$ worker throughput and p99.9 latency $\le 70\%$).
+      - `audigma presets list` and `audigma presets show NAME`.
+      - `audigma config check` and `audigma config explain`.
+    - Integration tests in `tests/cli_convert.rs` proving rejection of non-seekable stdout for DSF, config checking, explain JSON, and roundtrip conversion of WAV to `.dsf` and `.flac` with verification via `ffprobe`.
+  - Optimized half-band FIR inner convolution loop (`HalfBandStage::process_tile`) with raw pointer offsets, eliminating slice bounds check overhead.
   - Verified 100% clean toolchain health:
-    - `cargo test --workspace`: 36/36 tests passing cleanly.
+    - `cargo test --workspace`: 59/59 unit and integration tests passing cleanly.
     - `cargo clippy --workspace --all-targets -- -D warnings`: 0 errors, 0 warnings.
-    - `cargo fmt --check`: 100% formatted.
-    - `uv run --with numpy --with scipy python tools/measure/measure_spectral.py`: 100% clean execution.
-  - Updated `Phase1.Progress.md` and marked Phase 1 as `[Completed]`.
-- **What is next (Phase 2: Offline Audio Converter):**
-  - Introduce `audigma-engine` (pure-Rust pipeline & abstract I/O traits) and `audigma-io` (file & stdio stream drivers).
-  - Implement `audigma-cli` with subcommands: `audigma convert`, `audigma benchmark`, `audigma presets`, and `audigma config`.
-  - Validate `.dsf` and `.wav` conversions via `ffprobe` and streaming tests.
+    - `cargo fmt --check`: 100% cleanly formatted.
+  - Updated `Phase2.Progress.md` and marked Phase 2 as `[Completed]`.
+- **What is next (Phase 3: Direct ALSA Hardware Egress):**
+  - Implement ALSA device enumeration and capability probing (`audigma probe`) in `audigma-io`.
+  - Implement the direct ALSA output backend supporting Native DSD (`DSD_U32_BE`) and DoP (`S24_3LE`/`S32_LE`).
+  - Implement clean silence/transition state machines in `audigma-engine`.
+  - Collaborate on user-led hardware testing with connected DACs (**FiiO K17** / **JadeAudio JA11**).
 - **Artifacts:**
-  - `tools/measure/measure_spectral.py`
-  - `crates/audigma-dsp/examples/measure_harness.rs`
-  - `crates/audigma-dsp/tests/spectral_verification.rs`
-  - `docs/measurements/report.md`
-  - `crates/audigma-dsp/src/tables.rs`
-  - `crates/audigma-dsp/src/ftz.rs`
+  - `crates/audigma-io/Cargo.toml`
+  - `crates/audigma-io/src/lib.rs`
+  - `crates/audigma-io/src/file.rs`
+  - `crates/audigma-io/src/stdio.rs`
+  - `crates/audigma-io/tests/io_drivers.rs`
+  - `crates/audigma-cli/Cargo.toml`
+  - `crates/audigma-cli/src/main.rs`
+  - `crates/audigma-cli/src/commands.rs`
+  - `crates/audigma-cli/tests/cli_convert.rs`
   - `crates/audigma-dsp/src/fir.rs`
-  - `crates/audigma-dsp/src/modulator.rs`
-  - `crates/audigma-dsp/src/lib.rs`
-  - `Phase1.Progress.md`
+  - `Phase2.Progress.md`
   - `Plan.md`
-  - `Design.md`

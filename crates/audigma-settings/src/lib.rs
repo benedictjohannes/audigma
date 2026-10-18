@@ -64,7 +64,38 @@ pub enum OutputTransport {
 pub enum OutputContainer {
     Dsf,
     Wav,
+    Flac,
     Raw,
+}
+
+impl OutputContainer {
+    /// Infers output container from a file extension or path (case-insensitive).
+    pub fn from_extension(ext: &str) -> Option<Self> {
+        let clean = ext.trim_start_matches('.').to_ascii_lowercase();
+        match clean.as_str() {
+            "dsf" => Some(Self::Dsf),
+            "wav" | "wave" => Some(Self::Wav),
+            "flac" => Some(Self::Flac),
+            "raw" => Some(Self::Raw),
+            _ => None,
+        }
+    }
+
+    /// Infers output container from a file path.
+    pub fn from_path(path: &std::path::Path) -> Option<Self> {
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .and_then(Self::from_extension)
+    }
+
+    /// Returns the canonical target format associated with this container, if fixed.
+    pub const fn target_format(self) -> Option<TargetFormat> {
+        match self {
+            Self::Dsf => Some(TargetFormat::Dsd),
+            Self::Wav | Self::Flac => Some(TargetFormat::Pcm),
+            Self::Raw => None,
+        }
+    }
 }
 
 /// `[target] rate_policy` options (`Design.md §3.2`, `§6.2`).
@@ -326,6 +357,231 @@ impl Settings {
         Ok(settings)
     }
 
+    /// Returns default offline conversion settings tailored for the given output container.
+    pub fn default_offline(container: OutputContainer) -> Self {
+        match container {
+            OutputContainer::Dsf => Self {
+                schema_version: SCHEMA_VERSION_V1,
+                input: Some(InputConfig {
+                    backend: InputBackend::File,
+                    node_name: None,
+                    device: None,
+                    sample_format: None,
+                    rate_hz: None,
+                    channels: None,
+                }),
+                output: Some(OutputConfig {
+                    backend: OutputBackend::File,
+                    target_node: None,
+                    device: None,
+                    transport: None,
+                    container: Some(OutputContainer::Dsf),
+                    sample_format: None,
+                    reserve_device: None,
+                    buffer_ms: None,
+                    period_ms: None,
+                }),
+                target: Some(TargetConfig {
+                    format: TargetFormat::Dsd,
+                    rate_policy: RatePolicy::Fixed,
+                    pcm_rate_hz: None,
+                    pcm_rate_44100_hz: None,
+                    pcm_rate_48000_hz: None,
+                    dsd_bit_rate_hz: Some(DsdBitRateHz::DSD256),
+                    dsd_bit_rate_44100_hz: None,
+                    dsd_bit_rate_48000_hz: None,
+                    sample_format: None,
+                    valid_bits: None,
+                    dither: None,
+                }),
+                gain: Some(GainConfig {
+                    preamp_db: 0.0,
+                    headroom: HeadroomMode::Profile,
+                    peak_analysis: PeakAnalysisMode::TwoPass,
+                    overload_policy: OverloadPolicy::Error,
+                }),
+                resampler: Some(ResamplerConfig {
+                    preset: FilterPreset::Reference,
+                    phase: FilterPhase::Linear,
+                    apodization: Apodization::Off,
+                }),
+                modulator: Some(ModulatorConfig { order: 5 }),
+                clock: None,
+                runtime: None,
+                offline: Some(OfflineConfig {
+                    seed: Some(12345),
+                    tail_policy: Some(TailPolicy::TrimToDuration),
+                    write_report: Some(false),
+                    dsf_pad_mode: DsfPadMode::SpecZero,
+                }),
+                rules: Vec::new(),
+            },
+            OutputContainer::Wav => Self {
+                schema_version: SCHEMA_VERSION_V1,
+                input: Some(InputConfig {
+                    backend: InputBackend::File,
+                    node_name: None,
+                    device: None,
+                    sample_format: None,
+                    rate_hz: None,
+                    channels: None,
+                }),
+                output: Some(OutputConfig {
+                    backend: OutputBackend::File,
+                    target_node: None,
+                    device: None,
+                    transport: None,
+                    container: Some(OutputContainer::Wav),
+                    sample_format: Some(SampleFormat::S32Le),
+                    reserve_device: None,
+                    buffer_ms: None,
+                    period_ms: None,
+                }),
+                target: Some(TargetConfig {
+                    format: TargetFormat::Pcm,
+                    rate_policy: RatePolicy::Fixed,
+                    pcm_rate_hz: Some(PcmRateHz::PCM_192000),
+                    pcm_rate_44100_hz: None,
+                    pcm_rate_48000_hz: None,
+                    dsd_bit_rate_hz: None,
+                    dsd_bit_rate_44100_hz: None,
+                    dsd_bit_rate_48000_hz: None,
+                    sample_format: Some(SampleFormat::S32Le),
+                    valid_bits: Some(24),
+                    dither: Some(DitherType::Tpdf),
+                }),
+                gain: Some(GainConfig {
+                    preamp_db: -3.0,
+                    headroom: HeadroomMode::Profile,
+                    peak_analysis: PeakAnalysisMode::SinglePass,
+                    overload_policy: OverloadPolicy::Error,
+                }),
+                resampler: Some(ResamplerConfig {
+                    preset: FilterPreset::Reference,
+                    phase: FilterPhase::Linear,
+                    apodization: Apodization::Off,
+                }),
+                modulator: None,
+                clock: None,
+                runtime: None,
+                offline: Some(OfflineConfig {
+                    seed: None,
+                    tail_policy: Some(TailPolicy::TrimToDuration),
+                    write_report: Some(false),
+                    dsf_pad_mode: DsfPadMode::SpecZero,
+                }),
+                rules: Vec::new(),
+            },
+            OutputContainer::Flac => Self {
+                schema_version: SCHEMA_VERSION_V1,
+                input: Some(InputConfig {
+                    backend: InputBackend::File,
+                    node_name: None,
+                    device: None,
+                    sample_format: None,
+                    rate_hz: None,
+                    channels: None,
+                }),
+                output: Some(OutputConfig {
+                    backend: OutputBackend::File,
+                    target_node: None,
+                    device: None,
+                    transport: None,
+                    container: Some(OutputContainer::Flac),
+                    sample_format: Some(SampleFormat::S24Le),
+                    reserve_device: None,
+                    buffer_ms: None,
+                    period_ms: None,
+                }),
+                target: Some(TargetConfig {
+                    format: TargetFormat::Pcm,
+                    rate_policy: RatePolicy::Fixed,
+                    pcm_rate_hz: Some(PcmRateHz::PCM_96000),
+                    pcm_rate_44100_hz: None,
+                    pcm_rate_48000_hz: None,
+                    dsd_bit_rate_hz: None,
+                    dsd_bit_rate_44100_hz: None,
+                    dsd_bit_rate_48000_hz: None,
+                    sample_format: Some(SampleFormat::S24Le),
+                    valid_bits: Some(24),
+                    dither: Some(DitherType::Tpdf),
+                }),
+                gain: Some(GainConfig {
+                    preamp_db: -3.0,
+                    headroom: HeadroomMode::Profile,
+                    peak_analysis: PeakAnalysisMode::SinglePass,
+                    overload_policy: OverloadPolicy::Error,
+                }),
+                resampler: Some(ResamplerConfig {
+                    preset: FilterPreset::Reference,
+                    phase: FilterPhase::Linear,
+                    apodization: Apodization::Off,
+                }),
+                modulator: None,
+                clock: None,
+                runtime: None,
+                offline: Some(OfflineConfig {
+                    seed: None,
+                    tail_policy: Some(TailPolicy::TrimToDuration),
+                    write_report: Some(false),
+                    dsf_pad_mode: DsfPadMode::SpecZero,
+                }),
+                rules: Vec::new(),
+            },
+            OutputContainer::Raw => Self {
+                schema_version: SCHEMA_VERSION_V1,
+                input: Some(InputConfig {
+                    backend: InputBackend::Stdio,
+                    node_name: None,
+                    device: None,
+                    sample_format: Some(SampleFormat::S16Le),
+                    rate_hz: Some(PcmRateHz::PCM_44100),
+                    channels: Some(2),
+                }),
+                output: Some(OutputConfig {
+                    backend: OutputBackend::Stdio,
+                    target_node: None,
+                    device: None,
+                    transport: Some(OutputTransport::Dop),
+                    container: Some(OutputContainer::Raw),
+                    sample_format: Some(SampleFormat::S24_3Le),
+                    reserve_device: None,
+                    buffer_ms: None,
+                    period_ms: None,
+                }),
+                target: Some(TargetConfig {
+                    format: TargetFormat::Dsd,
+                    rate_policy: RatePolicy::Fixed,
+                    pcm_rate_hz: None,
+                    pcm_rate_44100_hz: None,
+                    pcm_rate_48000_hz: None,
+                    dsd_bit_rate_hz: Some(DsdBitRateHz::DSD128),
+                    dsd_bit_rate_44100_hz: None,
+                    dsd_bit_rate_48000_hz: None,
+                    sample_format: None,
+                    valid_bits: None,
+                    dither: None,
+                }),
+                gain: Some(GainConfig {
+                    preamp_db: 0.0,
+                    headroom: HeadroomMode::Profile,
+                    peak_analysis: PeakAnalysisMode::SinglePass,
+                    overload_policy: OverloadPolicy::Error,
+                }),
+                resampler: Some(ResamplerConfig {
+                    preset: FilterPreset::Balanced,
+                    phase: FilterPhase::Linear,
+                    apodization: Apodization::Off,
+                }),
+                modulator: Some(ModulatorConfig { order: 5 }),
+                clock: None,
+                runtime: None,
+                offline: None,
+                rules: Vec::new(),
+            },
+        }
+    }
+
     /// Validates cross-field architectural invariants from `Design.md §1`, `§5.3`, and `§6`.
     pub fn validate(&self) -> Result<(), SettingsError> {
         if self.schema_version != SCHEMA_VERSION_V1 {
@@ -387,6 +643,23 @@ impl Settings {
                     return Err(SettingsError::Validation(
                         "[target] format = \"dsd\" requires exclusive ALSA, file, or stdio backend (cannot use output.backend = \"pipewire\")",
                     ));
+                }
+            }
+
+            // Container vs Target format consistency
+            if let (Some(container), Some(target)) = (output.container, &self.target) {
+                match container {
+                    OutputContainer::Dsf if target.format != TargetFormat::Dsd => {
+                        return Err(SettingsError::Validation(
+                            "output container = \"dsf\" requires [target] format = \"dsd\"",
+                        ));
+                    }
+                    OutputContainer::Flac if target.format != TargetFormat::Pcm => {
+                        return Err(SettingsError::Validation(
+                            "output container = \"flac\" requires [target] format = \"pcm\"",
+                        ));
+                    }
+                    _ => {}
                 }
             }
         }
@@ -906,5 +1179,98 @@ rate_policy = "fixed"
 dsd_bit_rate_hz = 2822400
 "#;
         assert!(Settings::from_toml_str(stdout_dsf).is_err());
+    }
+
+    #[test]
+    fn test_output_container_flac_and_default_offline() {
+        let flac_toml = r#"
+schema_version = 1
+
+[input]
+backend = "file"
+
+[output]
+backend = "file"
+container = "flac"
+sample_format = "s24le"
+
+[target]
+format = "pcm"
+rate_policy = "fixed"
+pcm_rate_hz = 192000
+sample_format = "s24le"
+valid_bits = 24
+dither = "tpdf"
+
+[gain]
+preamp_db = -3.0
+overload_policy = "error"
+
+[resampler]
+preset = "reference"
+"#;
+        let settings = Settings::from_toml_str(flac_toml).unwrap();
+        assert_eq!(
+            settings.output.as_ref().unwrap().container,
+            Some(OutputContainer::Flac)
+        );
+
+        // Test extension & path inference
+        assert_eq!(
+            OutputContainer::from_extension("flac"),
+            Some(OutputContainer::Flac)
+        );
+        assert_eq!(
+            OutputContainer::from_extension(".DSF"),
+            Some(OutputContainer::Dsf)
+        );
+        assert_eq!(
+            OutputContainer::from_extension("wav"),
+            Some(OutputContainer::Wav)
+        );
+        assert_eq!(
+            OutputContainer::from_path(std::path::Path::new("music/test.flac")),
+            Some(OutputContainer::Flac)
+        );
+
+        // Test default_offline
+        let dsf_def = Settings::default_offline(OutputContainer::Dsf);
+        assert!(dsf_def.validate().is_ok());
+        assert_eq!(dsf_def.target.as_ref().unwrap().format, TargetFormat::Dsd);
+
+        let flac_def = Settings::default_offline(OutputContainer::Flac);
+        assert!(flac_def.validate().is_ok());
+        assert_eq!(flac_def.target.as_ref().unwrap().format, TargetFormat::Pcm);
+
+        let wav_def = Settings::default_offline(OutputContainer::Wav);
+        assert!(wav_def.validate().is_ok());
+        assert_eq!(wav_def.target.as_ref().unwrap().format, TargetFormat::Pcm);
+    }
+
+    #[test]
+    fn test_rejects_container_target_mismatch() {
+        let flac_dsd = r#"
+schema_version = 1
+[output]
+backend = "file"
+container = "flac"
+[target]
+format = "dsd"
+rate_policy = "fixed"
+dsd_bit_rate_hz = 11289600
+"#;
+        assert!(Settings::from_toml_str(flac_dsd).is_err());
+
+        let dsf_pcm = r#"
+schema_version = 1
+[output]
+backend = "file"
+container = "dsf"
+[target]
+format = "pcm"
+rate_policy = "fixed"
+pcm_rate_hz = 192000
+"#;
+        assert!(Settings::from_toml_str(dsf_pcm).is_err());
     }
 }

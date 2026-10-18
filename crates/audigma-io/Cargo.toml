@@ -1,0 +1,18 @@
+[package]
+name = "audigma-io"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Concrete file, stdio, and platform audio I/O backends for audigma"
+
+[dependencies]
+audigma-dsp = { path = "../audigma-dsp" }
+audigma-format = { path = "../audigma-format" }
+audigma-settings = { path = "../audigma-settings" }
+audigma-engine = { path = "../audigma-engine" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+hound = { workspace = true }
