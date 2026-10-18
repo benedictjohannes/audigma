@@ -8,8 +8,10 @@ rust-version.workspace = true
 description = "Concrete file, stdio, and platform audio I/O backends for audigma"
 
 [features]
-default = ["alsa"]
+default = ["alsa", "dbus", "pipewire"]
 alsa = ["dep:alsa"]
+dbus = ["dep:zbus"]
+pipewire = ["dep:pipewire", "dep:libspa"]
 
 [dependencies]
 audigma-dsp = { path = "../audigma-dsp" }
@@ -19,7 +21,14 @@ audigma-engine = { path = "../audigma-engine" }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+rtrb = { workspace = true }
 alsa = { workspace = true, optional = true }
+
+zbus = { workspace = true, optional = true }
+pipewire = { workspace = true, optional = true }
+libspa = { workspace = true, optional = true }
+
+
 
 [dev-dependencies]
 hound = { workspace = true }

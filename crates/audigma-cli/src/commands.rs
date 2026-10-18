@@ -1,8 +1,12 @@
 //! CLI subcommands and commands for `audigma` (`Design.md §7`).
 
+use crate::ipc::{
+    ControlClient, ControlServer, IpcError, IpcRequest, IpcResponse, default_socket_path,
+};
 use audigma_dsp::config::{SampleFormat, TargetRateSpec};
 use audigma_dsp::presets::{ALL_PRESETS, by_name};
 use audigma_dsp::rates::PcmRateHz;
+use audigma_engine::live::{DaemonControlHandle, LivePipeline};
 use audigma_engine::traits::{AudioInput, AudioOutput, DecoderInput, EngineError};
 use audigma_engine::{
     IdleCarrierFormat, LifecycleController, MockAudioInput, OfflinePipeline, StreamSink,
@@ -11,9 +15,13 @@ use audigma_format::AudioStreamInfo;
 use audigma_format::decoder::AudioDecoder;
 use audigma_format::dop::DopContainerFormat;
 use audigma_io::alsa::{AlsaAudioOutput, AlsaOutputConfig};
+#[cfg(feature = "dbus")]
+use audigma_io::dbus::{DeviceReservation, request_realtime_priority};
 use audigma_io::file::{FileAudioInput, FileAudioOutput};
+#[cfg(feature = "pipewire")]
+use audigma_io::pipewire::{PipeWirePcmOutput, PipeWireVirtualSink};
 use audigma_io::stdio::{StdioAudioInput, StdioAudioOutput};
-use audigma_settings::{OutputContainer, OutputTransport, Settings};
+use audigma_settings::{InputBackend, OutputBackend, OutputContainer, OutputTransport, Settings};
 use clap::{Args, Parser, Subcommand};
 use serde_json::json;
 use std::f64::consts::PI;
@@ -35,6 +43,18 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
+    /// Run live audio streaming daemon in foreground
+    Run(RunArgs),
+
+    /// Request orderly shutdown of a running audigma daemon
+    Stop(StopArgs),
+
+    /// Query live daemon runtime status and telemetry
+    Status(StatusArgs),
+
+    /// Modify daemon volume or preset dynamically
+    Set(SetArgs),
+
     /// Play audio directly to hardware via exclusive ALSA
     Play(PlayArgs),
 
@@ -52,6 +72,57 @@ pub enum Commands {
 
     /// Probe audio hardware endpoints and supported formats/rates
     Probe(ProbeArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct RunArgs {
+    /// Optional configuration file path (defaults to ~/.config/audigma/config.toml)
+    #[arg(short = 'c', long = "config")]
+    pub config: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+pub struct StopArgs {
+    /// Optional control socket path override
+    #[arg(long = "socket")]
+    pub socket: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+pub struct StatusArgs {
+    /// Continuously watch daemon status telemetry
+    #[arg(short = 'w', long = "watch")]
+    pub watch: bool,
+
+    /// Output report in structured JSON format
+    #[arg(long = "json")]
+    pub json: bool,
+
+    /// Optional control socket path override
+    #[arg(long = "socket")]
+    pub socket: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+pub struct SetArgs {
+    #[command(subcommand)]
+    pub command: SetCommands,
+
+    /// Optional control socket path override
+    #[arg(long = "socket")]
+    pub socket: Option<PathBuf>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SetCommands {
+    /// Set live playback volume in dB (e.g. -3.0 or -- -3.0)
+    Volume {
+        #[arg(allow_hyphen_values = true)]
+        db: f64,
+    },
+
+    /// Switch active DSP preset (balanced, reference, low-latency)
+    Preset { name: String },
 }
 
 #[derive(Args, Debug)]
@@ -245,6 +316,311 @@ fn apply_toml_override(
     Ok(())
 }
 
+pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
+    let config_path = resolve_config_path(args.config.as_deref());
+    if !config_path.exists() {
+        return Err(EngineError::Pipeline(format!(
+            "configuration file not found at: {}",
+            config_path.display()
+        )));
+    }
+
+    let content = std::fs::read_to_string(&config_path)?;
+    let settings = Settings::from_toml_str(&content)?;
+    settings.validate()?;
+
+    let in_cfg = settings
+        .input
+        .as_ref()
+        .ok_or_else(|| EngineError::Pipeline("missing [input] section in config".to_string()))?;
+    let out_cfg = settings
+        .output
+        .as_ref()
+        .ok_or_else(|| EngineError::Pipeline("missing [output] section in config".to_string()))?;
+
+    let input_rate = in_cfg.rate_hz.unwrap_or(PcmRateHz::PCM_48000);
+    let channels = in_cfg.channels.unwrap_or(2);
+
+    let plan = settings.explain_for_input_rate(input_rate)?;
+    let target_spec = plan.stream_spec.target;
+
+    eprintln!("audigma: starting live daemon");
+    eprintln!("  Configuration: {}", config_path.display());
+    eprintln!(
+        "  Input:         {:?} ({} Hz, {} channels)",
+        in_cfg.backend,
+        input_rate.get(),
+        channels
+    );
+    eprintln!("  Output:        {:?}", out_cfg.backend);
+    eprintln!("  Preset:        {:?}", plan.dsp_config.preset);
+
+    // D-Bus device reservation if exclusive ALSA output is selected
+    #[cfg(feature = "dbus")]
+    let _reservation = if out_cfg.backend == OutputBackend::Alsa
+        && out_cfg.reserve_device.unwrap_or(true)
+    {
+        let card_idx = out_cfg
+            .device
+            .as_deref()
+            .and_then(|dev| {
+                if let Some(card_part) = dev.strip_prefix("hw:CARD=") {
+                    let card_name = card_part.split(',').next().unwrap_or("");
+                    // Check /proc/asound/cards or symlinks like /proc/asound/<name>
+                    if let Ok(target) = std::fs::read_link(format!("/proc/asound/{card_name}")) {
+                        if let Some(file_name) = target.file_name().and_then(|f| f.to_str()) {
+                            if let Some(idx_str) = file_name.strip_prefix("card") {
+                                return idx_str.parse::<u32>().ok();
+                            }
+                        }
+                    }
+                    None
+                } else if let Some(stripped) = dev.strip_prefix("hw:") {
+                    stripped
+                        .split(',')
+                        .next()
+                        .and_then(|s| s.parse::<u32>().ok())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+
+        match DeviceReservation::acquire(card_idx, "audigma", 100) {
+            Ok(res) => {
+                eprintln!(
+                    "  DeviceLock:    Acquired {} via D-Bus org.freedesktop.ReserveDevice1",
+                    res.well_known_name()
+                );
+                Some(res)
+            }
+            Err(e) => {
+                eprintln!("  DeviceLock:    Warning: failed to acquire D-Bus reservation: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Real-time thread priority
+    #[cfg(feature = "dbus")]
+    {
+        if let Err(e) = request_realtime_priority(0, 10) {
+            eprintln!("  RT Priority:   RealtimeKit request skipped/fallback: {e}");
+        } else {
+            eprintln!("  RT Priority:   Acquired real-time priority via RealtimeKit");
+        }
+    }
+
+    // Set up Input Backend
+    let mut input_driver: Box<dyn AudioInput> = match in_cfg.backend {
+        #[cfg(feature = "pipewire")]
+        InputBackend::Pipewire => {
+            let node_name = in_cfg.node_name.as_deref().unwrap_or("audigma_sink");
+            let sink = PipeWireVirtualSink::new(node_name, input_rate.get(), channels as u32, 32)
+                .map_err(|e| {
+                EngineError::Pipeline(format!("failed to bind PipeWire virtual sink: {e}"))
+            })?;
+            Box::new(sink)
+        }
+        InputBackend::Alsa => {
+            return Err(EngineError::Pipeline(
+                "ALSA live capture input not yet configured".to_string(),
+            ));
+        }
+        InputBackend::File | InputBackend::Stdio => {
+            return Err(EngineError::Pipeline(
+                "File/Stdio backend is for offline mode; use 'audigma convert'".to_string(),
+            ));
+        }
+        #[cfg(not(feature = "pipewire"))]
+        InputBackend::Pipewire => {
+            return Err(EngineError::Pipeline(
+                "PipeWire feature is disabled in this build".to_string(),
+            ));
+        }
+    };
+
+    // Set up Output Backend
+    let mut output_driver: Box<dyn AudioOutput> = match out_cfg.backend {
+        OutputBackend::Alsa => {
+            let alsa_config =
+                AlsaOutputConfig::from_settings(&settings, &target_spec).map_err(|e| {
+                    EngineError::Pipeline(format!("failed to configure ALSA output: {e}"))
+                })?;
+            let alsa_out = AlsaAudioOutput::open(alsa_config)
+                .map_err(|e| EngineError::Pipeline(format!("failed to open ALSA output: {e}")))?;
+            Box::new(alsa_out)
+        }
+        #[cfg(feature = "pipewire")]
+        OutputBackend::Pipewire => {
+            let target_node = out_cfg.target_node.as_deref();
+            let pw_rate = match target_spec {
+                TargetRateSpec::Pcm { rate, .. } => rate.get(),
+                TargetRateSpec::Dsd { bit_rate } => {
+                    return Err(EngineError::Pipeline(format!(
+                        "PipeWire PCM output cannot carry DSD bit rate {bit_rate}"
+                    )));
+                }
+            };
+            let pw_out = PipeWirePcmOutput::new(
+                "audigma_pcm_out",
+                target_node,
+                pw_rate,
+                channels as u32,
+                32,
+            )
+            .map_err(|e| {
+                EngineError::Pipeline(format!("failed to initialize PipeWire output: {e}"))
+            })?;
+            Box::new(pw_out)
+        }
+        #[cfg(not(feature = "pipewire"))]
+        OutputBackend::Pipewire => {
+            return Err(EngineError::Pipeline(
+                "PipeWire feature is disabled in this build".to_string(),
+            ));
+        }
+        OutputBackend::File | OutputBackend::Stdio => {
+            return Err(EngineError::Pipeline(
+                "File/Stdio backend is for offline mode; use 'audigma convert'".to_string(),
+            ));
+        }
+    };
+
+    let (out_fmt_str, out_rate_hz) = match target_spec {
+        TargetRateSpec::Dsd { bit_rate } => ("dsd".to_string(), bit_rate.get()),
+        TargetRateSpec::Pcm { rate, .. } => ("pcm".to_string(), rate.get()),
+    };
+
+    let control = DaemonControlHandle::new(
+        input_rate.get(),
+        &out_fmt_str,
+        out_rate_hz,
+        match plan.dsp_config.preset {
+            audigma_dsp::config::FilterPreset::Balanced => "balanced",
+            audigma_dsp::config::FilterPreset::Reference => "reference",
+            audigma_dsp::config::FilterPreset::LowLatency => "low-latency",
+        },
+        plan.dsp_config.preamp_db,
+    );
+
+    // Start Unix Control Socket
+    let socket_path = default_socket_path();
+    let _server = ControlServer::start(socket_path.clone(), control.clone())
+        .map_err(|e| EngineError::Pipeline(format!("failed to start control socket: {e}")))?;
+    eprintln!("  ControlSocket: {}", socket_path.display());
+
+    // Prepare and Run Live Pipeline
+    let pipeline = LivePipeline::prepare(settings, input_rate)?;
+    eprintln!("audigma: daemon running. Press Ctrl+C or run 'audigma stop' to exit.");
+
+    pipeline.run_streaming(&mut *input_driver, &mut *output_driver, control)?;
+
+    eprintln!("audigma: daemon stopped cleanly.");
+    Ok(())
+}
+
+pub fn run_stop(args: StopArgs) -> Result<(), EngineError> {
+    let socket_path = args.socket.unwrap_or_else(default_socket_path);
+    match ControlClient::send(&socket_path, IpcRequest::Stop) {
+        Ok(IpcResponse::Ok) => {
+            eprintln!("audigma: stop request sent to daemon.");
+            Ok(())
+        }
+        Ok(IpcResponse::Error(msg)) => Err(EngineError::Pipeline(format!(
+            "daemon returned error: {msg}"
+        ))),
+        Ok(_) => Ok(()),
+        Err(IpcError::DaemonNotRunning(_)) => {
+            eprintln!("audigma: daemon is not running.");
+            Ok(())
+        }
+        Err(e) => Err(EngineError::Pipeline(format!("failed to stop daemon: {e}"))),
+    }
+}
+
+pub fn run_status(args: StatusArgs) -> Result<(), EngineError> {
+    let socket_path = args.socket.unwrap_or_else(default_socket_path);
+
+    loop {
+        match ControlClient::send(&socket_path, IpcRequest::GetStatus) {
+            Ok(IpcResponse::Telemetry(telem)) => {
+                if args.json {
+                    let json_val = serde_json::to_string_pretty(&telem)
+                        .map_err(|e| EngineError::Pipeline(e.to_string()))?;
+                    println!("{json_val}");
+                } else {
+                    println!("Audigma Daemon Status:");
+                    println!("  State:               {}", telem.state);
+                    println!("  Uptime:              {}s", telem.uptime_secs);
+                    println!("  Input Rate:          {} Hz", telem.input_rate_hz);
+                    println!(
+                        "  Output Target:       {} @ {} Hz",
+                        telem.output_format, telem.output_rate_hz
+                    );
+                    println!("  Active Preset:       {}", telem.preset);
+                    println!(
+                        "  Volume:              {:.1} dB (preamp: {:.1} dB)",
+                        telem.volume_db, telem.preamp_db
+                    );
+                    println!(
+                        "  Frames In / Out:     {} / {}",
+                        telem.total_input_frames, telem.total_output_frames
+                    );
+                    println!("  Queue Occupancy:     {:.1}%", telem.queue_fill_pct);
+                    println!("  ASRC Clock Drift:    {:.1} ppm", telem.drift_ppm);
+                    println!("  Overload Events:     {}", telem.overload_count);
+                    println!("  ALSA XRuns:          {}", telem.xrun_count);
+                }
+            }
+            Ok(IpcResponse::Error(msg)) => {
+                return Err(EngineError::Pipeline(format!(
+                    "daemon returned error: {msg}"
+                )));
+            }
+            Ok(_) => {}
+            Err(IpcError::DaemonNotRunning(_)) => {
+                if args.json {
+                    println!("{}", json!({ "status": "stopped", "running": false }));
+                } else {
+                    eprintln!("audigma: daemon is not currently running (no active socket).");
+                }
+                return Ok(());
+            }
+            Err(e) => return Err(EngineError::Pipeline(format!("IPC query failed: {e}"))),
+        }
+
+        if !args.watch {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+    }
+
+    Ok(())
+}
+
+pub fn run_set(args: SetArgs) -> Result<(), EngineError> {
+    let socket_path = args.socket.unwrap_or_else(default_socket_path);
+    let req = match args.command {
+        SetCommands::Volume { db } => IpcRequest::SetVolume { volume_db: db },
+        SetCommands::Preset { name } => IpcRequest::SetPreset { preset: name },
+    };
+
+    match ControlClient::send(&socket_path, req) {
+        Ok(IpcResponse::Ok) => {
+            eprintln!("audigma: setting updated successfully.");
+            Ok(())
+        }
+        Ok(IpcResponse::Error(msg)) => Err(EngineError::Pipeline(format!("daemon error: {msg}"))),
+        Ok(_) => Ok(()),
+        Err(e) => Err(EngineError::Pipeline(format!(
+            "failed to communicate with daemon: {e}"
+        ))),
+    }
+}
+
 pub fn run_play(args: PlayArgs) -> Result<(), EngineError> {
     // 1. Resolve base settings as a toml::Table for flexible layered overriding
     let default_settings = Settings::default_offline(OutputContainer::Raw);
@@ -266,8 +642,14 @@ pub fn run_play(args: PlayArgs) -> Result<(), EngineError> {
         .or_insert_with(|| toml::Value::Table(toml::Table::new()));
     if let toml::Value::Table(output_tbl) = output_entry {
         // Live hardware playback always uses ALSA and raw stream container
-        output_tbl.insert("backend".to_string(), toml::Value::String("alsa".to_string()));
-        output_tbl.insert("container".to_string(), toml::Value::String("raw".to_string()));
+        output_tbl.insert(
+            "backend".to_string(),
+            toml::Value::String("alsa".to_string()),
+        );
+        output_tbl.insert(
+            "container".to_string(),
+            toml::Value::String("raw".to_string()),
+        );
         output_tbl
             .entry("transport".to_string())
             .or_insert_with(|| toml::Value::String("native".to_string()));

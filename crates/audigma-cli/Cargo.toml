@@ -11,6 +11,12 @@ description = "Audigma command-line interface, foreground runner, and control cl
 name = "audigma"
 path = "src/main.rs"
 
+[features]
+default = ["alsa", "dbus", "pipewire"]
+alsa = ["audigma-io/alsa"]
+dbus = ["audigma-io/dbus"]
+pipewire = ["audigma-io/pipewire"]
+
 [dependencies]
 audigma-dsp = { path = "../audigma-dsp" }
 audigma-format = { path = "../audigma-format" }
@@ -18,6 +24,7 @@ audigma-settings = { path = "../audigma-settings" }
 audigma-engine = { path = "../audigma-engine" }
 audigma-io = { path = "../audigma-io" }
 clap = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 toml = { workspace = true }

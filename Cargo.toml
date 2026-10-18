@@ -26,3 +26,12 @@ symphonia = { version = "0.6", default-features = false, features = ["wav", "fla
 hound = "3.5"
 flacenc = "0.5"
 alsa = "0.12"
+rtrb = "0.4.0"
+zbus = "6.0.0"
+pipewire = "0.10.1"
+libspa = "0.10.1"
+
+
+
+
+

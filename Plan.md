@@ -166,7 +166,7 @@ examples/                 # Ready-to-use TOML configs, MPD snippets, and WirePlu
 
 ---
 
-### Phase 4: PipeWire Virtual Sink, Shared-Graph PCM, D-Bus Device Reservation & Adaptive Clock Bridge
+### Phase 4: PipeWire Virtual Sink, Shared-Graph PCM, D-Bus Device Reservation & Adaptive Clock Bridge [Completed]
 **Maps to:** `Design.md §1`, `§3.1–§3.4`, `§6.2.A–C`, and `§7`.
 
 - **Goal:** Build the real-time PipeWire integration in `audigma-io` and clock-bridging in `audigma-engine` so applications (browsers, YouTube Music, MPD) can route into `audigma_sink` and play out continuously either as **PipeWire High-Rate PCM** (`backend = "pipewire"`, `clock.mode = "shared-graph"`) or **Direct Exclusive ALSA DSD / High-Rate PCM** (`backend = "alsa"`, `clock.mode = "adaptive-input"`), acquiring exclusive ALSA access seamlessly via standard D-Bus device reservation (`org.freedesktop.ReserveDevice1`).
@@ -182,7 +182,11 @@ examples/                 # Ready-to-use TOML configs, MPD snippets, and WirePlu
   - Verify smooth volume control, dynamic D-Bus device reservation yielding the DAC from WirePlumber, zero device-lockout when switching between MPD and browser, clean shutdown via `audigma stop`, and bounded queue occupancy / drift ppm in `audigma status --watch`.
 - **Success Criteria & Proof:**
   - Simulated clock-drift integration tests ($\pm 200\text{ ppm}$ drift) in `audigma-engine` (running purely with mock streams and zero C-FFI) pass with bounded queue occupancy, valid generation-tag filtering, p99.9 worker time $\le 70\%$ of block duration, and zero allocation in the audio callback.
-  - `[User-Led]` live session confirms seamless playback from both MPD and browser through `audigma_sink` to PipeWire PCM and hardware ALSA DSD/PCM outputs, with D-Bus device reservation yielding and restoring the DAC cleanly.
+  - `[User-Led]` live session confirms seamless playback from both MPD and browser through `audigma_sink` to PipeWire PCM and hardware ALSA DSD/PCM outputs, with D-Bus device reservation yielding and restoring the DAC cleanly:
+    - **FiiO K17:** Verified Native DSD (`DSD_U32_BE`) live playback from PipeWire at DSD256 with zero XRuns and click-free start/stop.
+    - **JadeAudio JA11:** Verified DoP (`S24_3LE`) live playback from PipeWire at DoP64 with zero XRuns and click-free start/stop.
+    - **Software Volume:** Verified pre-modulator digital volume attenuation (-6 dB, -10 dB) via Unix control socket preserving DSD bitstream/marker integrity.
+  - `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo fmt --check` pass 100% cleanly.
 - **STOP:** Update `# Handoff Brief` and terminate session.
 
 ---
@@ -231,36 +235,27 @@ examples/                 # Ready-to-use TOML configs, MPD snippets, and WirePlu
 
 # Handoff Brief
 
-- **Current Phase:** Phase 3 (Direct ALSA Hardware Egress: Native DSD & DoP Probe/Playback) — **[Completed]**
-- **Next Phase:** Phase 4 (PipeWire Virtual Sink, Shared-Graph PCM, D-Bus Device Reservation & Adaptive Clock Bridge)
+- **Current Phase:** Phase 4 (PipeWire Virtual Sink, Shared-Graph PCM, D-Bus Device Reservation & Adaptive Clock Bridge) — [Completed]
+- **Next Phase:** Phase 5 (Interactive Configurator `audigma-configurator` & WirePlumber Templates)
 - **What was done in this session:**
-  - **Hardware Probing & Device Discovery (`audigma-io`, `audigma-cli`):**
-    - Implemented ALSA device enumeration and capability probing in `crates/audigma-io/src/alsa/probe.rs` with `HwParams` format/rate queries, `/proc/asound` stream descriptor parsing, active stream status detection (`is_busy: true` reporting for cards currently running in MPD/WirePlumber), and Native DSD / DoP tier analysis.
-    - Implemented `audigma probe [--backend alsa|pipewire] [--json]` in `crates/audigma-cli` with human-readable and structured JSON reports.
-    - Integration tests in `crates/audigma-io/tests/probe_integration.rs` and `crates/audigma-cli/tests/cli_probe.rs`.
-  - **Engine Transition Lifecycle State Machine (`audigma-engine`):**
-    - Implemented `crates/audigma-engine/src/lifecycle.rs`:
-      - `LifecycleState`: `Stopped`, `Preparing`, `Priming`, `Running`, `DrainingMuting`, `Reconfiguring`, `Recovering`, `DeviceLost`.
-      - Pre-SRC PCM cosine smooth fade-in (`0.0 -> 1.0`), planned stop/mute pre-SRC fade-out (`1.0 -> 0.0`) followed by `filter_group_delay` zero tail flushing.
-      - Continuous balanced DSD idle sequence (`0x69`, never `0x00`) and uninterrupted `0x05`/`0xFA` DoP marker alternation during stopping, idling, and reconfiguration.
-      - Modulator overload / instability recovery: instant clamp to DSD idle at modulator boundary, reset integrators to zero, smooth pre-SRC fade-in once safe.
-    - Integration tests in `crates/audigma-engine/tests/lifecycle_transition.rs` verifying zero DC pops and bitstream continuity.
-  - **Direct ALSA Output Driver & Streaming Playback (`audigma-io`, `audigma-engine`, `audigma-cli`):**
-    - Implemented `AlsaAudioOutput` supporting `DSD_U32_BE`, `S32_LE`, `S24_3LE`, `S16_LE`, and `FLOAT_LE` with automatic XRun recovery, ring buffer size negotiation, and clean hardware draining.
-    - Implemented `audigma play`: direct file/stream playback to exclusive ALSA hardware with streamlined flags (`-i`, `-d`, `-p`, `-v`, `-c`, `-o key=val`, `--json`).
-    - Fixed carrier container alignment: aligned default DoP container in `pipeline.rs` to `S32Le` matching `output.rs`, and verified both `s32le` and packed 24-bit `s24_3le` formats.
-    - Fixed live playback gain staging: defaulted `gain.peak_analysis` to `single-pass` during live playback to start streaming instantly without multi-second pre-analysis delays.
-    - Fixed negative volume argument parsing (`allow_hyphen_values = true`).
-  - **`[User-Led]` Hardware Verification (Both Devices Verified on Host):**
-    - **FiiO K17 (`hw:CARD=K17,DEV=0`):** Confirmed successful bit-perfect Native DSD streaming (`DSD_U32_BE`) at DSD256 (`11.2896 MHz`) with clean transitions and zero DC pops.
-    - **JadeAudio JA11 (`hw:CARD=JA11,DEV=0`):** Confirmed successful DoP playback across both DoP64 and DoP128, and across both `s32le` and packed 24-bit `s24_3le` ALSA container alignments.
-  - **Toolchain Verification:**
-    - `cargo test --workspace`: 66/66 tests passing cleanly.
-    - `cargo clippy --workspace --all-targets -- -D warnings`: 0 warnings, 0 errors.
-    - `cargo fmt --check`: 100% formatted cleanly.
-- **What is next (Phase 4):**
-  - Real-time lock-free SPSC queues (`rtrb`) and monotonic generation tags in `audigma-engine`.
-  - D-Bus device reservation (`org.freedesktop.ReserveDevice1`) in `audigma-io` to dynamically yield/reclaim the ALSA DAC from WirePlumber.
-  - PipeWire virtual sink node (`audigma_sink`) registration and PipeWire graph clock bridge.
-  - Daemon commands (`audigma run`, `audigma stop`, `audigma status`) and Unix control socket (`$XDG_RUNTIME_DIR/audigma/control.sock`).
+  - **PipeWire Format Negotiation Resolution:**
+    - Diagnosed that `build_format_pod` was passing `id: 1` instead of `libspa::param::ParamType::EnumFormat.as_raw()` (3), causing PipeWire to reject the format enumeration and fall back to single-port generic DSP format (`F32P`).
+    - Fixed the POD object serialization in `PipeWireVirtualSink` using standard `libspa` types, and added `STREAM_CAPTURE_SINK => "true"` with `MEDIA_ROLE => "Music"`.
+    - Confirmed PipeWire automatically creates discrete stereo ports (`input_FL`, `input_FR`) and auto-links them to the sink monitor (`audigma_k17_sink:monitor_FL/FR`).
+  - **Chunk Slicing & Frame Preservation:**
+    - Discovered that `read_stereo` was popping full 1024-frame chunks from the SPSC ring buffer, copying only the requested 256-frame tile, and discarding the remaining 768 frames (dropping 75% of incoming audio and causing the garbled "musical beat without notes").
+    - Added persistent cursor buffering (`current_chunk: Option<TaggedChunk>`, `read_offset: usize`) to `PipeWireVirtualSink` so unread frames are seamlessly preserved and consumed on consecutive calls.
+  - **Hardware Listening Tests Verified:**
+    - **FiiO K17:** Verified clean, musical Native DSD256 playback from desktop applications (Edge/KDE) with zero XRuns and zero overloads.
+    - **JadeAudio JA11:** Verified clean, musical DoP64 playback in `S24_3LE` container format with zero XRuns.
+    - **Software Digital Volume Control:** Verified real-time software attenuation via Unix control socket (`audigma set volume -6`, `-10`, `0`) operating cleanly on floating-point PCM before modulation, preserving DSD marker and bitstream integrity.
+  - **Workspace Quality Gate:**
+    - `cargo test --workspace` passed 100% (all unit and integration tests across all crates).
+    - `cargo clippy --workspace --all-targets -- -D warnings` passed with 0 warnings.
+    - `cargo fmt --check` passed cleanly.
+- **Action Items for Next Session:**
+  1. Initiate Phase 5: Scaffold `audigma-configurator` crate with interactive TUI (`ratatui` / `crossterm`) and one-shot Web wizard.
+  2. Implement guided configuration workflow, full `[[rules]]` evaluation, and `audigma config explain`.
+  3. Package systemd user services, WirePlumber configuration templates, shell completions, and manpages.
+
 
