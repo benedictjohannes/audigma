@@ -115,6 +115,43 @@ impl PcmRateHz {
             None
         }
     }
+
+    /// Returns the fundamental 1x base PCM rate for this rate's family (44,100 Hz or 48,000 Hz).
+    #[inline]
+    pub const fn base_family_rate(self) -> Option<PcmRateHz> {
+        match self.rate_family() {
+            RateFamily::Hz44100 => Some(PcmRateHz::PCM_44100),
+            RateFamily::Hz48000 => Some(PcmRateHz::PCM_48000),
+            RateFamily::Other => None,
+        }
+    }
+
+    /// Returns the integer multiplier of this rate relative to its 1x base family rate (e.g. 4 for 192 kHz).
+    #[inline]
+    pub const fn rate_multiplier(self) -> Option<u32> {
+        match self.base_family_rate() {
+            Some(base) => Some(self.0 / base.0),
+            None => None,
+        }
+    }
+
+    /// Returns the equivalent rate in the target `RateFamily` at the same multiplier tier
+    /// (e.g. 192 kHz in Hz48000 -> 176.4 kHz in Hz44100).
+    #[inline]
+    pub const fn corresponding_rate_in_family(
+        self,
+        target_family: RateFamily,
+    ) -> Option<PcmRateHz> {
+        let mult = match self.rate_multiplier() {
+            Some(m) => m,
+            None => return None,
+        };
+        match target_family {
+            RateFamily::Hz44100 => PcmRateHz::new(44_100 * mult),
+            RateFamily::Hz48000 => PcmRateHz::new(48_000 * mult),
+            RateFamily::Other => None,
+        }
+    }
 }
 
 impl fmt::Display for PcmRateHz {

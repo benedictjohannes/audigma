@@ -241,3 +241,37 @@ fn test_offline_pipeline_cross_family_48k_to_dsd256() {
         audigma_format::dsf::parse_stereo_dsf_file(&dsf_bytes).expect("valid DSF file");
     assert_eq!(header.bit_rate.get(), 11_289_600);
 }
+
+#[test]
+fn test_offline_pipeline_cross_family_192k_to_dsd256() {
+    let in_rate = PcmRateHz::PCM_192000;
+    let (left, right) = generate_synthetic_stereo_sine(in_rate, 0.05, 1000.0, 0.5);
+    let total_frames = left.len() as u64;
+
+    let info = AudioStreamInfo {
+        sample_rate: in_rate,
+        original_channels: 2,
+        total_frames: Some(total_frames),
+        bits_per_sample: Some(24),
+    };
+
+    let mut input = MockAudioInput::new(info, left, right, true);
+    let mut out_buffer = Cursor::new(Vec::new());
+
+    // Target is DSD256 (44.1k family: 11.2896 MHz), requiring 192k -> 44.1k rational SRC
+    let settings = Settings::default_offline(OutputContainer::Dsf);
+    let pipeline = OfflinePipeline::prepare(settings, in_rate).expect("prepare failed");
+
+    let report = pipeline
+        .run(&mut input, Box::new(SeekableSink(&mut out_buffer)))
+        .expect("192k to DSD256 conversion failed");
+
+    assert_eq!(report.input_rate, in_rate);
+    assert_eq!(report.target_format, TargetFormat::Dsd);
+    assert_eq!(report.overload_count, 0);
+
+    let dsf_bytes = out_buffer.into_inner();
+    let (header, _, _) =
+        audigma_format::dsf::parse_stereo_dsf_file(&dsf_bytes).expect("valid DSF file");
+    assert_eq!(header.bit_rate.get(), 11_289_600);
+}

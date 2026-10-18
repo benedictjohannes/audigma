@@ -9,11 +9,13 @@
 //!   and container egress.
 //! - Deterministic seeding, gapless `trim-to-duration` phase-alignment, and `preserve-tail` flushing.
 
+pub mod lifecycle;
 pub mod peak;
 pub mod pipeline;
 pub mod tail;
 pub mod traits;
 
+pub use lifecycle::{BlockAction, IdleCarrierFormat, LifecycleController, LifecycleState};
 pub use peak::{Pass1PeakResult, measure_true_peak_pass1};
 pub use pipeline::{OfflinePipeline, OfflineReport};
 pub use tail::TailManager;

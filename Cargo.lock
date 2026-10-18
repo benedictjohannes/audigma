@@ -3,6 +3,29 @@
 version = 4
 
 [[package]]
+name = "alsa"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3f93573e7ddb15145d27c58c0fa0a452faad9f5452ac17ed4554ea035ea9b71"
+dependencies = [
+ "alsa-sys",
+ "bitflags",
+ "cfg-if",
+ "libc",
+]
+
+[[package]]
+name = "alsa-sys"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0320138053ef93099f168102c37b46ac0b9c53affc56ef7696633ad5477e2be"
+dependencies = [
+ "cc",
+ "libc",
+ "pkg-config",
+]
+
+[[package]]
 name = "anstream"
 version = "0.6.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -65,6 +88,7 @@ dependencies = [
  "hound",
  "serde_json",
  "thiserror",
+ "toml",
 ]
 
 [[package]]
@@ -103,11 +127,14 @@ dependencies = [
 name = "audigma-io"
 version = "0.1.0"
 dependencies = [
+ "alsa",
  "audigma-dsp",
  "audigma-engine",
  "audigma-format",
  "audigma-settings",
  "hound",
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 
@@ -160,6 +187,16 @@ name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
+
+[[package]]
+name = "cc"
+version = "1.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6651c9ed80effdc7db0ff72512157f901af5e3549e341e24b1dd4887d836d838"
+dependencies = [
+ "find-msvc-tools",
+ "shlex",
+]
 
 [[package]]
 name = "cfg-if"
@@ -276,6 +313,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af9673d8203fcb076b19dfd17e38b3d4ae9f44959416ea532ce72415a6020365"
 
 [[package]]
+name = "find-msvc-tools"
+version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
+
+[[package]]
 name = "flacenc"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -370,6 +413,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
+name = "libc"
+version = "0.2.191"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
+
+[[package]]
 name = "log"
 version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -423,6 +472,12 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "pkg-config"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "primal-check"
@@ -534,6 +589,12 @@ checksum = "bf41e0cfaf7226dca15e8197172c295a782857fcb97fad1808a166870dee75a3"
 dependencies = [
  "serde",
 ]
+
+[[package]]
+name = "shlex"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "smallvec"

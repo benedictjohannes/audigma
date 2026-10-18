@@ -12,6 +12,7 @@
 use crate::peak::measure_true_peak_pass1;
 use crate::tail::TailManager;
 use crate::traits::{AudioInput, AudioOutput, EngineError};
+use audigma_dsp::DSD_IDLE_BYTE;
 use audigma_dsp::config::{SampleFormat, TargetFormat, TargetRateSpec};
 use audigma_dsp::fir::{HalfBandCascade, PolyphaseResampler};
 use audigma_dsp::ftz::ScopedFtzDaz;
@@ -60,6 +61,8 @@ enum ContainerWriter<'a> {
     RawDsdNative {
         output: Box<dyn AudioOutput + 'a>,
         staging_u32: Vec<u8>,
+        residue_left: Vec<u8>,
+        residue_right: Vec<u8>,
         frames_written: u64,
         bytes_written: u64,
     },
@@ -67,6 +70,8 @@ enum ContainerWriter<'a> {
         output: Box<dyn AudioOutput + 'a>,
         packer: DopPacker,
         staging_dop: Vec<u8>,
+        residue_left: Vec<u8>,
+        residue_right: Vec<u8>,
         frames_written: u64,
         bytes_written: u64,
     },
@@ -166,6 +171,8 @@ impl<'a> ContainerWriter<'a> {
                     OutputTransport::Native => Ok(Self::RawDsdNative {
                         output,
                         staging_u32: Vec::new(),
+                        residue_left: Vec::new(),
+                        residue_right: Vec::new(),
                         frames_written: 0,
                         bytes_written: 0,
                     }),
@@ -174,17 +181,19 @@ impl<'a> ContainerWriter<'a> {
                             .output
                             .as_ref()
                             .and_then(|o| o.sample_format)
-                            .unwrap_or(SampleFormat::S24_3Le);
+                            .unwrap_or(SampleFormat::S32Le);
                         let dop_fmt = match sample_format {
                             SampleFormat::S32Le => DopContainerFormat::S32Le,
                             SampleFormat::S24Le => DopContainerFormat::S24Le,
                             SampleFormat::S24_3Le => DopContainerFormat::S24_3Le,
-                            _ => DopContainerFormat::S24_3Le,
+                            _ => DopContainerFormat::S32Le,
                         };
                         Ok(Self::RawDsdDop {
                             output,
                             packer: DopPacker::new(dop_fmt),
                             staging_dop: Vec::new(),
+                            residue_left: Vec::new(),
+                            residue_right: Vec::new(),
                             frames_written: 0,
                             bytes_written: 0,
                         })
@@ -284,36 +293,85 @@ impl<'a> ContainerWriter<'a> {
             Self::RawDsdNative {
                 output,
                 staging_u32,
+                residue_left,
+                residue_right,
                 frames_written,
                 bytes_written,
             } => {
-                let required_u32_words = left_bytes.len() / 4;
-                let required_bytes = required_u32_words * STEREO_DSD_U32_FRAME_BYTES;
-                staging_u32.resize(required_bytes, 0);
+                let (combined_l, combined_r) = if !residue_left.is_empty() {
+                    let mut l = std::mem::take(residue_left);
+                    let mut r = std::mem::take(residue_right);
+                    l.extend_from_slice(left_bytes);
+                    r.extend_from_slice(right_bytes);
+                    (l, r)
+                } else {
+                    (left_bytes.to_vec(), right_bytes.to_vec())
+                };
 
-                let words_packed =
-                    pack_stereo_dsd_u32_be(left_bytes, right_bytes, false, staging_u32)?;
-                output.write_all(&staging_u32[..words_packed * STEREO_DSD_U32_FRAME_BYTES])?;
-                *frames_written += (left_bytes.len() * 8) as u64;
-                *bytes_written += (words_packed * STEREO_DSD_U32_FRAME_BYTES) as u64;
+                let whole_u32_words = combined_l.len() / 4;
+                let whole_bytes = whole_u32_words * 4;
+
+                if whole_u32_words > 0 {
+                    let required_bytes = whole_u32_words * STEREO_DSD_U32_FRAME_BYTES;
+                    staging_u32.resize(required_bytes, 0);
+
+                    let bytes_packed = pack_stereo_dsd_u32_be(
+                        &combined_l[..whole_bytes],
+                        &combined_r[..whole_bytes],
+                        false,
+                        staging_u32,
+                    )?;
+                    output.write_all(&staging_u32[..bytes_packed])?;
+                    *frames_written += (whole_bytes * 8) as u64;
+                    *bytes_written += bytes_packed as u64;
+                }
+
+                if whole_bytes < combined_l.len() {
+                    residue_left.extend_from_slice(&combined_l[whole_bytes..]);
+                    residue_right.extend_from_slice(&combined_r[whole_bytes..]);
+                }
             }
             Self::RawDsdDop {
                 output,
                 packer,
                 staging_dop,
+                residue_left,
+                residue_right,
                 frames_written,
                 bytes_written,
             } => {
-                let frame_bytes = packer.format().bytes_per_stereo_frame();
-                let num_dop_frames = left_bytes.len() / 2;
-                let required_bytes = num_dop_frames * frame_bytes;
-                staging_dop.resize(required_bytes, 0);
+                let (combined_l, combined_r) = if !residue_left.is_empty() {
+                    let mut l = std::mem::take(residue_left);
+                    let mut r = std::mem::take(residue_right);
+                    l.extend_from_slice(left_bytes);
+                    r.extend_from_slice(right_bytes);
+                    (l, r)
+                } else {
+                    (left_bytes.to_vec(), right_bytes.to_vec())
+                };
 
-                let dop_frames_packed =
-                    packer.pack_stereo_frames(left_bytes, right_bytes, staging_dop)?;
-                output.write_all(&staging_dop[..dop_frames_packed * frame_bytes])?;
-                *frames_written += (left_bytes.len() * 8) as u64;
-                *bytes_written += (dop_frames_packed * frame_bytes) as u64;
+                let whole_dop_frames = combined_l.len() / 2;
+                let whole_bytes = whole_dop_frames * 2;
+
+                if whole_dop_frames > 0 {
+                    let frame_bytes = packer.format().bytes_per_stereo_frame();
+                    let required_bytes = whole_dop_frames * frame_bytes;
+                    staging_dop.resize(required_bytes, 0);
+
+                    let dop_bytes_packed = packer.pack_stereo_frames(
+                        &combined_l[..whole_bytes],
+                        &combined_r[..whole_bytes],
+                        staging_dop,
+                    )?;
+                    output.write_all(&staging_dop[..dop_bytes_packed])?;
+                    *frames_written += (whole_bytes * 8) as u64;
+                    *bytes_written += dop_bytes_packed as u64;
+                }
+
+                if whole_bytes < combined_l.len() {
+                    residue_left.extend_from_slice(&combined_l[whole_bytes..]);
+                    residue_right.extend_from_slice(&combined_r[whole_bytes..]);
+                }
             }
             _ => {
                 return Err(EngineError::Pipeline(
@@ -340,19 +398,55 @@ impl<'a> ContainerWriter<'a> {
             }
             Self::RawDsdNative {
                 mut output,
-                frames_written,
-                bytes_written,
-                ..
+                mut staging_u32,
+                mut residue_left,
+                mut residue_right,
+                mut frames_written,
+                mut bytes_written,
             } => {
+                if !residue_left.is_empty() {
+                    let pad = 4 - residue_left.len();
+                    residue_left.resize(4, DSD_IDLE_BYTE);
+                    residue_right.resize(4, DSD_IDLE_BYTE);
+
+                    let bytes_packed = pack_stereo_dsd_u32_be(
+                        &residue_left,
+                        &residue_right,
+                        false,
+                        &mut staging_u32,
+                    )?;
+                    output.write_all(&staging_u32[..bytes_packed])?;
+                    frames_written += ((4 - pad) * 8) as u64;
+                    bytes_written += bytes_packed as u64;
+                }
                 output.flush()?;
                 Ok((frames_written, bytes_written))
             }
             Self::RawDsdDop {
                 mut output,
-                frames_written,
-                bytes_written,
-                ..
+                mut packer,
+                mut staging_dop,
+                mut residue_left,
+                mut residue_right,
+                mut frames_written,
+                mut bytes_written,
             } => {
+                if !residue_left.is_empty() {
+                    let pad = 2 - residue_left.len();
+                    residue_left.resize(2, DSD_IDLE_BYTE);
+                    residue_right.resize(2, DSD_IDLE_BYTE);
+
+                    let frame_bytes = packer.format().bytes_per_stereo_frame();
+                    staging_dop.resize(frame_bytes, 0);
+                    let dop_bytes_packed = packer.pack_stereo_frames(
+                        &residue_left,
+                        &residue_right,
+                        &mut staging_dop,
+                    )?;
+                    output.write_all(&staging_dop[..dop_bytes_packed])?;
+                    frames_written += ((2 - pad) * 8) as u64;
+                    bytes_written += dop_bytes_packed as u64;
+                }
                 output.flush()?;
                 Ok((frames_written, bytes_written))
             }
@@ -390,14 +484,34 @@ impl OfflinePipeline {
         let (intermediate_rate, stages) = match plan.stream_spec.target {
             TargetRateSpec::Dsd { bit_rate } => {
                 let dsd_family = bit_rate.rate_family();
-                let base_family = dsd_family.base_pcm_rate().ok_or_else(|| {
-                    EngineError::Pipeline(format!(
-                        "invalid rate family for DSD bit rate {bit_rate}"
-                    ))
-                })?;
-                let mult = bit_rate.get() / base_family.get();
-                let stages = (mult as f64).log2().round() as usize;
-                (base_family, stages)
+                let in_family = input_rate.rate_family();
+                if in_family == dsd_family {
+                    if bit_rate.get() >= input_rate.get() {
+                        let mult = bit_rate.get() / input_rate.get();
+                        let stages = (mult as f64).log2().round() as usize;
+                        (input_rate, stages)
+                    } else {
+                        return Err(EngineError::Pipeline(format!(
+                            "input rate {input_rate} exceeds DSD bit rate {bit_rate}"
+                        )));
+                    }
+                } else {
+                    // Cross-family conversion (e.g. 192k 48-family -> 44.1-family DSD):
+                    // Resample at matched tier (192k -> 176.4k) to preserve ultrasonic content,
+                    // then upsample via power-of-two half-band FIR stages to target DSD bit rate.
+                    let matched_tier_rate = input_rate
+                        .corresponding_rate_in_family(dsd_family)
+                        .filter(|r| bit_rate.get() >= r.get())
+                        .or_else(|| dsd_family.base_pcm_rate())
+                        .ok_or_else(|| {
+                            EngineError::Pipeline(format!(
+                                "invalid rate family for DSD bit rate {bit_rate}"
+                            ))
+                        })?;
+                    let mult = bit_rate.get() / matched_tier_rate.get();
+                    let stages = (mult as f64).log2().round() as usize;
+                    (matched_tier_rate, stages)
+                }
             }
             TargetRateSpec::Pcm { rate, .. } => {
                 let target_family = rate.rate_family();
@@ -411,12 +525,22 @@ impl OfflinePipeline {
                     };
                     (input_rate, stages)
                 } else {
-                    let base_target = target_family.base_pcm_rate().ok_or_else(|| {
-                        EngineError::Pipeline(format!("invalid target rate family for {rate}"))
-                    })?;
-                    let mult = rate.get() / base_target.get();
-                    let stages = (mult as f64).log2().round() as usize;
-                    (base_target, stages)
+                    // Cross-family PCM conversion:
+                    // If target rate allows, resample at matched tier first, then power-of-two stages
+                    let matched_tier_rate = input_rate
+                        .corresponding_rate_in_family(target_family)
+                        .filter(|r| rate.get() >= r.get())
+                        .or_else(|| target_family.base_pcm_rate())
+                        .ok_or_else(|| {
+                            EngineError::Pipeline(format!("invalid target rate family for {rate}"))
+                        })?;
+                    let mult = rate.get() / matched_tier_rate.get();
+                    let stages = if mult >= 1 {
+                        (mult as f64).log2().round() as usize
+                    } else {
+                        0
+                    };
+                    (matched_tier_rate, stages)
                 }
             }
         };

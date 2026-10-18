@@ -9,7 +9,7 @@
 //!   conversion (44.1k <-> 48k via 160 phases) and sub-sample ASRC drift tracking (256 phases).
 
 use crate::config::FilterPreset;
-use crate::rates::PcmRateHz;
+use crate::rates::{PcmRateHz, RateFamily};
 use crate::tables::{
     SRC_ASRC_256_PHASES, SRC_RATIONAL_160_PHASES, get_halfband_stage0_taps,
     get_halfband_stage1_taps,
@@ -296,27 +296,37 @@ impl PolyphaseResampler {
     /// Creates a rational resampler for cross-family conversions (44.1k <-> 48k).
     pub fn new_rational(in_rate: PcmRateHz, out_rate: PcmRateHz) -> Result<Self, FirError> {
         let (in_hz, out_hz) = (in_rate.get(), out_rate.get());
-        // Check for 44.1k <-> 48k baseband relationship
-        // 44100 * 160 / 147 == 48000
-        let (phase_step, num_phases) = if (in_hz == 44_100 && out_hz == 48_000)
-            || (in_hz == 88_200 && out_hz == 96_000)
-            || (in_hz == 176_400 && out_hz == 192_000)
-            || (in_hz == 352_800 && out_hz == 384_000)
-        {
-            // Up-sampling by 160/147: step is 147 in 160-phase grid
-            (147, 160)
-        } else if (in_hz == 48_000 && out_hz == 44_100)
-            || (in_hz == 96_000 && out_hz == 88_200)
-            || (in_hz == 192_000 && out_hz == 176_400)
-            || (in_hz == 384_000 && out_hz == 352_800)
-        {
-            // Down-sampling by 147/160: step is 160 in 147-phase grid
-            (160, 147)
-        } else {
-            return Err(FirError::UnsupportedRatio {
-                in_rate_hz: in_hz,
-                out_rate_hz: out_hz,
-            });
+        let in_family = in_rate.rate_family();
+        let out_family = out_rate.rate_family();
+
+        let (phase_step, num_phases) = match (in_family, out_family) {
+            (RateFamily::Hz44100, RateFamily::Hz48000) => {
+                // Ratio out_rate / in_rate = (out_mult * 48000) / (in_mult * 44100)
+                // = (out_mult / in_mult) * (160 / 147)
+                // Since phase_acc advances by phase_step / num_phases = in_rate / out_rate:
+                // in_rate / out_rate = (in_mult * 147) / (out_mult * 160)
+                let in_mult = in_rate.rate_multiplier().unwrap_or(1);
+                let out_mult = out_rate.rate_multiplier().unwrap_or(1);
+                let step = (in_mult * 147) as usize;
+                let phases = (out_mult * 160) as usize;
+                (step, phases)
+            }
+            (RateFamily::Hz48000, RateFamily::Hz44100) => {
+                // Ratio out_rate / in_rate = (out_mult * 44100) / (in_mult * 48000)
+                // = (out_mult / in_mult) * (147 / 160)
+                // phase_acc step = in_rate / out_rate = (in_mult * 160) / (out_mult * 147)
+                let in_mult = in_rate.rate_multiplier().unwrap_or(1);
+                let out_mult = out_rate.rate_multiplier().unwrap_or(1);
+                let step = (in_mult * 160) as usize;
+                let phases = (out_mult * 147) as usize;
+                (step, phases)
+            }
+            _ => {
+                return Err(FirError::UnsupportedRatio {
+                    in_rate_hz: in_hz,
+                    out_rate_hz: out_hz,
+                });
+            }
         };
 
         const TAPS: usize = 48;

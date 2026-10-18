@@ -25,3 +25,4 @@ clap = { version = "=4.5.53", features = ["derive"] }
 symphonia = { version = "0.6", default-features = false, features = ["wav", "flac", "pcm", "opt-simd"] }
 hound = "3.5"
 flacenc = "0.5"
+alsa = "0.12"

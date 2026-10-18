@@ -1,17 +1,23 @@
 //! CLI subcommands and commands for `audigma` (`Design.md §7`).
 
+use audigma_dsp::config::{SampleFormat, TargetRateSpec};
 use audigma_dsp::presets::{ALL_PRESETS, by_name};
 use audigma_dsp::rates::PcmRateHz;
 use audigma_engine::traits::{AudioInput, AudioOutput, DecoderInput, EngineError};
-use audigma_engine::{MockAudioInput, OfflinePipeline};
+use audigma_engine::{
+    IdleCarrierFormat, LifecycleController, MockAudioInput, OfflinePipeline, StreamSink,
+};
 use audigma_format::AudioStreamInfo;
 use audigma_format::decoder::AudioDecoder;
+use audigma_format::dop::DopContainerFormat;
+use audigma_io::alsa::{AlsaAudioOutput, AlsaOutputConfig};
 use audigma_io::file::{FileAudioInput, FileAudioOutput};
 use audigma_io::stdio::{StdioAudioInput, StdioAudioOutput};
-use audigma_settings::{OutputContainer, Settings};
+use audigma_settings::{OutputContainer, OutputTransport, Settings};
 use clap::{Args, Parser, Subcommand};
 use serde_json::json;
 use std::f64::consts::PI;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -29,6 +35,9 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
+    /// Play audio directly to hardware via exclusive ALSA
+    Play(PlayArgs),
+
     /// Convert an audio file or stream offline
     Convert(ConvertArgs),
 
@@ -40,6 +49,51 @@ pub enum Commands {
 
     /// Validate or inspect configuration files
     Config(ConfigArgs),
+
+    /// Probe audio hardware endpoints and supported formats/rates
+    Probe(ProbeArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct PlayArgs {
+    /// Input file path (WAV/FLAC) or '-' for stdin
+    #[arg(short = 'i', long = "input")]
+    pub input: String,
+
+    /// Target ALSA hardware device (e.g. "hw:CARD=K17,DEV=0" or "hw:CARD=JA11,DEV=0")
+    #[arg(short = 'd', long = "device")]
+    pub device: Option<String>,
+
+    /// Resampler & filter preset ("balanced", "reference", "low-latency")
+    #[arg(short = 'p', long = "preset")]
+    pub preset: Option<String>,
+
+    /// Optional playback volume/preamp in dB (e.g. -3.0 or --volume=-3.0)
+    #[arg(short = 'v', long = "volume", allow_hyphen_values = true)]
+    pub volume: Option<f64>,
+
+    /// Ad-hoc configuration override (e.g. -o output.transport=dop -o output.buffer_ms=20)
+    #[arg(short = 'o', long = "override")]
+    pub overrides: Vec<String>,
+
+    /// Optional TOML configuration file path
+    #[arg(short = 'c', long = "config")]
+    pub config: Option<PathBuf>,
+
+    /// Emit JSON status report at playback completion
+    #[arg(long = "json")]
+    pub json: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ProbeArgs {
+    /// Audio backend to probe ("alsa" or "pipewire")
+    #[arg(short = 'b', long = "backend", default_value = "alsa")]
+    pub backend: String,
+
+    /// Output report in structured JSON format
+    #[arg(long = "json")]
+    pub json: bool,
 }
 
 #[derive(Args, Debug)]
@@ -136,6 +190,307 @@ fn resolve_config_path(explicit: Option<&Path>) -> PathBuf {
     } else {
         PathBuf::from("config.toml")
     }
+}
+
+/// Recursively sets a dotted key (e.g. "output.transport" or "gain.preamp_db") on a `toml::Table`.
+fn apply_toml_override(
+    root: &mut toml::Table,
+    key_path: &str,
+    raw_value: &str,
+) -> Result<(), EngineError> {
+    let parts: Vec<&str> = key_path.split('.').collect();
+    if parts.is_empty() {
+        return Err(EngineError::Pipeline("empty override key".to_string()));
+    }
+
+    // Parse the value: try integer, float, boolean, or fallback to string
+    let parsed_val: toml::Value = if let Ok(i) = raw_value.parse::<i64>() {
+        toml::Value::Integer(i)
+    } else if let Ok(f) = raw_value.parse::<f64>() {
+        toml::Value::Float(f)
+    } else if let Ok(b) = raw_value.parse::<bool>() {
+        toml::Value::Boolean(b)
+    } else {
+        // Strip optional surrounding quotes
+        let trimmed = raw_value.trim();
+        let unquoted = if (trimmed.starts_with('"') && trimmed.ends_with('"'))
+            || (trimmed.starts_with('\'') && trimmed.ends_with('\''))
+        {
+            &trimmed[1..trimmed.len() - 1]
+        } else {
+            trimmed
+        };
+        toml::Value::String(unquoted.to_string())
+    };
+
+    let mut current = root;
+    for (i, &part) in parts.iter().enumerate() {
+        if i == parts.len() - 1 {
+            current.insert(part.to_string(), parsed_val);
+            return Ok(());
+        }
+        let entry = current
+            .entry(part.to_string())
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        match entry {
+            toml::Value::Table(tbl) => current = tbl,
+            _ => {
+                return Err(EngineError::Pipeline(format!(
+                    "cannot set nested key '{key_path}': segment '{part}' is not a table"
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub fn run_play(args: PlayArgs) -> Result<(), EngineError> {
+    // 1. Resolve base settings as a toml::Table for flexible layered overriding
+    let default_settings = Settings::default_offline(OutputContainer::Raw);
+    let mut toml_table: toml::Table = if let Some(ref cfg_path) = args.config {
+        let content = std::fs::read_to_string(cfg_path)?;
+        toml::from_str(&content)
+            .map_err(|e| EngineError::Pipeline(format!("failed to parse config TOML: {e}")))?
+    } else {
+        let serialized = toml::to_string(&default_settings).map_err(|e| {
+            EngineError::Pipeline(format!("failed to serialize default settings: {e}"))
+        })?;
+        toml::from_str(&serialized)
+            .map_err(|e| EngineError::Pipeline(format!("failed to parse default TOML: {e}")))?
+    };
+
+    // 2. Configure output as exclusive ALSA Raw container
+    let output_entry = toml_table
+        .entry("output".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    if let toml::Value::Table(output_tbl) = output_entry {
+        // Live hardware playback always uses ALSA and raw stream container
+        output_tbl.insert("backend".to_string(), toml::Value::String("alsa".to_string()));
+        output_tbl.insert("container".to_string(), toml::Value::String("raw".to_string()));
+        output_tbl
+            .entry("transport".to_string())
+            .or_insert_with(|| toml::Value::String("native".to_string()));
+        output_tbl
+            .entry("buffer_ms".to_string())
+            .or_insert_with(|| toml::Value::Integer(40));
+        output_tbl
+            .entry("period_ms".to_string())
+            .or_insert_with(|| toml::Value::Integer(5));
+        output_tbl
+            .entry("reserve_device".to_string())
+            .or_insert_with(|| toml::Value::Boolean(true));
+    }
+
+    // For live playback, default peak_analysis to single-pass (force override from file's two-pass)
+    // Users can still explicitly opt into two-pass using `-o gain.peak_analysis=two-pass`.
+    let gain_entry = toml_table
+        .entry("gain".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    if let toml::Value::Table(gain_tbl) = gain_entry {
+        gain_tbl.insert(
+            "peak_analysis".to_string(),
+            toml::Value::String("single-pass".to_string()),
+        );
+    }
+
+    // 3. Apply common CLI ergonomics (device, volume, preset)
+    if let Some(ref dev) = args.device {
+        apply_toml_override(&mut toml_table, "output.device", dev)?;
+    }
+    if let Some(vol) = args.volume {
+        apply_toml_override(&mut toml_table, "gain.preamp_db", &vol.to_string())?;
+    }
+    if let Some(ref p) = args.preset {
+        let preset = by_name(p)
+            .ok_or_else(|| EngineError::Pipeline(format!("unknown filter preset '{p}'")))?;
+        let preset_str = match preset.preset {
+            audigma_dsp::FilterPreset::Balanced => "balanced",
+            audigma_dsp::FilterPreset::Reference => "reference",
+            audigma_dsp::FilterPreset::LowLatency => "low-latency",
+        };
+        apply_toml_override(&mut toml_table, "resampler.preset", preset_str)?;
+    }
+
+    // 4. Apply ad-hoc CLI overrides (-o key=value)
+    for ovr in &args.overrides {
+        let (key, val) = ovr.split_once('=').ok_or_else(|| {
+            EngineError::Pipeline(format!(
+                "invalid override syntax '{ovr}' (expected key=value)"
+            ))
+        })?;
+        apply_toml_override(&mut toml_table, key.trim(), val.trim())?;
+    }
+
+    // 5. Deserialize merged TOML table into typed Settings and validate
+    let settings_str = toml::to_string(&toml_table)
+        .map_err(|e| EngineError::Pipeline(format!("failed to serialize merged TOML: {e}")))?;
+    let settings = Settings::from_toml_str(&settings_str)?;
+    settings.validate()?;
+
+    // 3. Open AudioInput
+    let (mut input, input_rate): (Box<dyn AudioInput>, PcmRateHz) = if args.input == "-" {
+        let sample_format = settings
+            .input
+            .as_ref()
+            .and_then(|i| i.sample_format)
+            .unwrap_or(SampleFormat::S16Le);
+        let sample_rate = settings
+            .input
+            .as_ref()
+            .and_then(|i| i.rate_hz)
+            .unwrap_or(PcmRateHz::PCM_44100);
+        let channels = settings
+            .input
+            .as_ref()
+            .and_then(|i| i.channels)
+            .unwrap_or(2);
+        (
+            Box::new(StdioAudioInput::new(sample_format, sample_rate, channels)),
+            sample_rate,
+        )
+    } else {
+        let file_input = FileAudioInput::open(&args.input)?;
+        let rate = file_input.info().sample_rate;
+        (Box::new(file_input), rate)
+    };
+
+    // 4. Prepare Pipeline
+    let pipeline = OfflinePipeline::prepare(settings.clone(), input_rate)?;
+    let plan = pipeline.plan().clone();
+    let target_spec = plan.stream_spec.target;
+
+    // 5. Build ALSA Output Driver
+    let alsa_config = AlsaOutputConfig::from_settings(&settings, &target_spec)
+        .map_err(|e| EngineError::Pipeline(format!("failed to configure ALSA output: {e}")))?;
+
+    if !args.json {
+        eprintln!("audigma: starting hardware playback");
+        eprintln!(
+            "  Input:         {} ({} Hz, {} channels)",
+            args.input,
+            input_rate.get(),
+            input.info().original_channels
+        );
+        eprintln!("  Device:        {}", alsa_config.device);
+        eprintln!(
+            "  ALSA Format:   {} @ {} frames/s",
+            alsa_config.alsa_format, alsa_config.frame_rate_hz
+        );
+        match target_spec {
+            TargetRateSpec::Dsd { bit_rate } => {
+                let transport = settings
+                    .output
+                    .as_ref()
+                    .and_then(|o| o.transport)
+                    .unwrap_or(OutputTransport::Native);
+                eprintln!(
+                    "  Target:        DSD ({:.4} MHz) via {:?}",
+                    bit_rate.get() as f64 / 1_000_000.0,
+                    transport
+                );
+            }
+            TargetRateSpec::Pcm {
+                rate,
+                sample_format,
+                ..
+            } => {
+                eprintln!(
+                    "  Target:        PCM {} Hz ({:?})",
+                    rate.get(),
+                    sample_format
+                );
+            }
+        }
+        eprintln!(
+            "  Filter Preset: {:?} (phase: {:?})",
+            plan.dsp_config.preset, plan.dsp_config.phase
+        );
+        if let Some(ref g) = settings.gain {
+            eprintln!("  Preamp / Gain: {:.2} dB", g.preamp_db);
+        }
+    }
+
+    let mut alsa_output = AlsaAudioOutput::open(alsa_config)
+        .map_err(|e| EngineError::Pipeline(format!("ALSA open failed: {e}")))?;
+
+    // 6. Click-free Priming
+    let carrier = match target_spec {
+        TargetRateSpec::Dsd { .. } => {
+            let transport = settings
+                .output
+                .as_ref()
+                .and_then(|o| o.transport)
+                .unwrap_or(OutputTransport::Native);
+            match transport {
+                OutputTransport::Native => IdleCarrierFormat::NativeDsd,
+                OutputTransport::Dop => {
+                    let fmt = settings
+                        .output
+                        .as_ref()
+                        .and_then(|o| o.sample_format)
+                        .unwrap_or(SampleFormat::S32Le);
+                    let dop_fmt = match fmt {
+                        SampleFormat::S32Le => DopContainerFormat::S32Le,
+                        SampleFormat::S24Le => DopContainerFormat::S24Le,
+                        _ => DopContainerFormat::S24_3Le,
+                    };
+                    IdleCarrierFormat::DoP(dop_fmt)
+                }
+                OutputTransport::Pcm => IdleCarrierFormat::Pcm,
+            }
+        }
+        TargetRateSpec::Pcm { .. } => IdleCarrierFormat::Pcm,
+    };
+
+    let mut lifecycle = LifecycleController::new(carrier, 256, 256);
+    let prime_frames = (alsa_output.period_frames() * 2) as usize;
+    let prime_bytes = prime_frames * alsa_output.frame_bytes();
+    let mut prime_buf = vec![0u8; prime_bytes];
+    lifecycle.emit_idle_frames(&mut prime_buf);
+    let _ = alsa_output.write_all(&prime_buf);
+
+    // 7. Stream audio through pipeline
+    let report = pipeline.run(&mut *input, Box::new(StreamSink(&mut alsa_output)))?;
+
+    // 8. Drain hardware
+    alsa_output
+        .drain()
+        .map_err(|e| EngineError::Pipeline(format!("ALSA drain failed: {e}")))?;
+
+    let xruns = alsa_output.xrun_count();
+
+    if args.json {
+        let json_val = json!({
+            "device": alsa_output.device(),
+            "alsa_format": alsa_output.alsa_format(),
+            "frame_rate_hz": alsa_output.frame_rate_hz(),
+            "total_input_frames": report.total_input_frames,
+            "total_output_frames": alsa_output.frames_written(),
+            "total_bytes_written": alsa_output.bytes_written(),
+            "xrun_count": xruns,
+            "applied_gain_db": report.applied_gain_db,
+            "overload_count": report.overload_count,
+            "elapsed_ms": report.elapsed_ms,
+        });
+        println!("{}", serde_json::to_string_pretty(&json_val).unwrap());
+    } else {
+        eprintln!("audigma: playback finished cleanly.");
+        eprintln!(
+            "  Input Frames:    {} ({:.2} s)",
+            report.total_input_frames,
+            report.total_input_frames as f64 / input_rate.get() as f64
+        );
+        eprintln!(
+            "  Output Frames:   {} ({} bytes written)",
+            alsa_output.frames_written(),
+            alsa_output.bytes_written()
+        );
+        eprintln!("  XRuns / Glitches: {}", xruns);
+        eprintln!("  Elapsed Time:    {} ms", report.elapsed_ms);
+    }
+
+    Ok(())
 }
 
 pub fn run_convert(args: ConvertArgs) -> Result<(), EngineError> {
@@ -562,5 +917,161 @@ pub fn run_config(args: ConfigArgs) -> Result<(), EngineError> {
             }
             Ok(())
         }
+    }
+}
+
+pub fn run_probe(args: ProbeArgs) -> Result<(), EngineError> {
+    match args.backend.to_lowercase().as_str() {
+        "alsa" => {
+            let report = audigma_io::alsa::probe_alsa_devices()
+                .map_err(|e| EngineError::Pipeline(format!("ALSA probe failed: {e}")))?;
+
+            if args.json {
+                let json_val = serde_json::to_string_pretty(&report).map_err(|e| {
+                    EngineError::Pipeline(format!("JSON serialization failed: {e}"))
+                })?;
+                println!("{json_val}");
+            } else {
+                print_alsa_probe_report(&report);
+            }
+            Ok(())
+        }
+        "pipewire" => {
+            if args.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "backend": "pipewire",
+                        "status": "planned for Phase 4 (PipeWire Virtual Sink & Graph Clock Bridge)",
+                        "note": "Use 'audigma probe --backend alsa' to inspect direct ALSA DAC hardware."
+                    }))
+                    .unwrap()
+                );
+            } else {
+                println!("audigma probe: PipeWire backend probing is scheduled for Phase 4.");
+                println!(
+                    "Use 'audigma probe --backend alsa' to probe direct hardware ALSA devices."
+                );
+            }
+            Ok(())
+        }
+        other => Err(EngineError::Pipeline(format!(
+            "unknown audio backend '{other}'; supported backends: 'alsa', 'pipewire'"
+        ))),
+    }
+}
+
+fn print_alsa_probe_report(report: &audigma_io::AlsaProbeReport) {
+    println!("=== ALSA Hardware Capability Probe Report ===");
+    println!("Discovered {} sound card(s):\n", report.cards.len());
+
+    for card in &report.cards {
+        let usb_str = card
+            .usb_id
+            .as_ref()
+            .map(|u| format!(" [USB ID: {u}]"))
+            .unwrap_or_default();
+        println!(
+            "Card {}: [{}] {}{}",
+            card.index, card.id, card.name, usb_str
+        );
+        if !card.longname.is_empty() && card.longname != card.name {
+            println!("  Longname: {}", card.longname);
+        }
+
+        if card.devices.is_empty() {
+            println!("  (No PCM playback devices found)");
+        }
+
+        for dev in &card.devices {
+            println!("  Endpoint: {}", dev.device_path);
+            if dev.is_busy {
+                if let Some(ref st) = dev.active_status {
+                    println!(
+                        "    Status:      ACTIVE / BUSY (state: {}, format: {}, rate: {} Hz, period: {}, buffer: {})",
+                        st.state, st.format, st.rate_hz, st.period_size, st.buffer_size
+                    );
+                } else {
+                    println!("    Status:      BUSY (opened by another process)");
+                }
+            } else {
+                println!("    Status:      IDLE (available for exclusive access)");
+            }
+
+            if let Some(ref caps) = dev.capabilities {
+                if caps.native_dsd.supported {
+                    let dsd_fmts = caps.native_dsd.formats.join(", ");
+                    let tier = caps.native_dsd.max_dsd_tier.as_deref().unwrap_or("unknown");
+                    let raw_str = caps
+                        .native_dsd
+                        .dsd_raw
+                        .as_ref()
+                        .map(|r| format!(" (raw: {r})"))
+                        .unwrap_or_default();
+                    println!(
+                        "    Native DSD:  Supported (max: {tier}, formats: [{dsd_fmts}]{raw_str})"
+                    );
+                } else {
+                    println!("    Native DSD:  Not supported");
+                }
+
+                if caps.dop.supported {
+                    let tier = caps.dop.max_dop_tier.as_deref().unwrap_or("unknown");
+                    let containers = caps.dop.supported_containers.join(", ");
+                    println!(
+                        "    DoP (v1.1):  Supported (max: {tier}, containers: [{containers}])"
+                    );
+                } else {
+                    println!("    DoP (v1.1):  Not supported");
+                }
+
+                if !caps.formats.is_empty() {
+                    let pcm_fmts: Vec<&str> = caps
+                        .formats
+                        .iter()
+                        .filter(|f| !f.starts_with("DSD_"))
+                        .map(|s| s.as_str())
+                        .collect();
+                    if !pcm_fmts.is_empty() {
+                        println!("    PCM Formats: {}", pcm_fmts.join(", "));
+                    }
+                }
+
+                if !caps.rates_hz.is_empty() {
+                    let rates_str: Vec<String> = caps
+                        .rates_hz
+                        .iter()
+                        .map(|r| {
+                            if *r >= 1000 && *r % 1000 == 0 {
+                                format!("{}k", *r / 1000)
+                            } else if *r >= 1000 {
+                                format!("{:.1}k", *r as f64 / 1000.0)
+                            } else {
+                                format!("{r}")
+                            }
+                        })
+                        .collect();
+                    println!("    Rates:       {} Hz", rates_str.join(", "));
+                }
+
+                if !caps.usb_altsets.is_empty() {
+                    println!("    USB Altsets:");
+                    for alt in &caps.usb_altsets {
+                        let dsd = alt
+                            .dsd_raw
+                            .as_ref()
+                            .map(|d| format!(" (DSD: {d})"))
+                            .unwrap_or_default();
+                        println!(
+                            "      Altset {}: {} ({} ch){dsd}",
+                            alt.altset, alt.format, alt.channels
+                        );
+                    }
+                }
+            } else if let Some(ref err) = dev.error {
+                println!("    Error:       {err}");
+            }
+        }
+        println!();
     }
 }

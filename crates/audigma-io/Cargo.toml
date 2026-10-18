@@ -7,12 +7,19 @@ repository.workspace = true
 rust-version.workspace = true
 description = "Concrete file, stdio, and platform audio I/O backends for audigma"
 
+[features]
+default = ["alsa"]
+alsa = ["dep:alsa"]
+
 [dependencies]
 audigma-dsp = { path = "../audigma-dsp" }
 audigma-format = { path = "../audigma-format" }
 audigma-settings = { path = "../audigma-settings" }
 audigma-engine = { path = "../audigma-engine" }
 thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+alsa = { workspace = true, optional = true }
 
 [dev-dependencies]
 hound = { workspace = true }
