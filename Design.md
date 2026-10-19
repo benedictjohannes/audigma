@@ -1,4 +1,4 @@
-# audigma — Technical Specification & Architecture (v2.2)
+# audigma — Technical Specification & Architecture (v2.3)
 
 `audigma` is an open-source Rust audio engine, CLI, and Linux audio service for high-precision PCM resampling and PCM-to-1-bit Delta-Sigma Modulation (DSD). Inspired by foobar2000's `foo_dsd_processor`, it integrates with PipeWire and ALSA so Linux desktop applications and dedicated music players (such as MPD) can output high-rate PCM (back into PipeWire or directly to ALSA) or 1-bit DSD (Native or DoP via exclusive ALSA) without manual device switching.
 
@@ -34,10 +34,28 @@ In `audigma`, architectural decisions are enforced directly by the Rust type sys
    - The continuously variable fractional-phase stage ($R_{\text{asrc}}(t)$) **always executes at the low baseband/intermediate PCM rate ($1\times$ or $2\times$)** *before* the fixed-coefficient $2\times$ half-band FIR cascade—never at the final MHz DSD bit rate, and never by dropping/duplicating DSD bits.
    - **ASRC Drift Bounds & Recovery:** The drift loop operates within a bounded correction range (e.g. `max_correction_ppm = 500`). When measured drift or queue fill exceeds safety thresholds, the engine invokes a controlled fault/recovery sequence rather than silently dropping or duplicating samples.
 
-6. **DSD Passthrough Invariant (`audigma-engine` / `audigma-dsp`):**
+6. **DSD Ingestion, Passthrough & Bounded Decimation Remodulation (`audigma-engine` / `audigma-dsp`):**
    - Bit-exact DSD passthrough is a dedicated, typed signal path with zero intermediate float conversions.
    - DSD passthrough is only valid across shared-clock or backpressured links where input and output rates match. It **cannot** reconcile independent live clock domains (which require PCM ASRC) without losing bit-exactness.
-   - Any volume change, EQ, or sample-rate conversion on an incoming DSD stream requires explicit remodulation ($\text{DSD} \to \text{PCM} \to \text{DSM}$), which must be reported as a lossy conversion path.
+   - Any volume change, EQ, or sample-rate conversion on an incoming DSD stream requires explicit remodulation:
+     $$\text{DSD}_{\text{in}} \xrightarrow{\text{decimate}} \text{PCM}_{\text{intermediate}} \xrightarrow{\text{gain / ASRC / EQ}} \text{PCM}_{\text{intermediate}} \xrightarrow{2^K \text{ FIR cascade}} \text{DSM} \xrightarrow{} \text{DSD}_{\text{out}}$$
+   - **Intermediate Rate Formula:**
+     $$\text{Rate}_{\text{intermediate}} = \min\Big(\text{Rate}_{\text{in\_useful}},\; \text{Rate}_{\text{out\_useful}},\; \text{max\_intermediate\_rate\_hz}\Big)$$
+     Defaulting to $352.8\text{ kHz}$ ($8\times 44.1\text{k}$) / $384\text{ kHz}$ ($8\times 48\text{k}$) for reference tier, and $176.4\text{ kHz}$ for DSD64 or low-power profiles.
+
+7. **Decoupled OS Process & PipeWire Graph Lifecycles (`audigma-engine` / `audigma-io`):**
+   - USB DAC disconnects, power-cycles, or undocking must never cause the `audigma` daemon process to crash or exit abruptly (unless explicitly configured to fail fast with `device_wait_ms = 0`).
+   - The engine decouples the **Process Lifecycle** (`[output] device_wait_ms`, default `-1` = wait indefinitely for device) from the **PipeWire Graph Lifecycle** (`[output] keep_audio_sink_ms`, default `5000` ms grace period).
+   - **Event-Driven Push Detection:** The daemon uses event-driven notification rather than polling loops: ALSA `ENODEV` / `POLLERR` instantly triggers transition to `WaitingForDevice`, while Linux `inotify` on `/dev/snd` (`IN_CREATE`) detects device re-appearance immediately.
+   - **Silent Bit-Bucket Pacing:** While in `WaitingForDevice` within the `keep_audio_sink_ms` window, `PipeWireVirtualSink` continues draining incoming frames into a silent bit-bucket at nominal stream clock, preventing PipeWire application stalls while the DAC settles or reconnects.
+
+8. **Unified Volume Control Boundaries (`audigma-io` / `audigma-engine`):**
+   - Controlled by `[output] volume_control = "hardware-software-fallback" | "software" | "hardware" | "none"` (default: `"hardware-software-fallback"`).
+   - **`"hardware-software-fallback"` (Default):** Probes for an ALSA UAC2 hardware mixer element on the target DAC (e.g., `Master`, `PCM`, `Playback`). If found, applies analog volume attenuation on the DAC hardware while keeping digital stream audio at full scale ($0\text{ dBFS}$). If no mixer element is found, or if output is PipeWire/file, seamlessly falls back to pre-modulator floating-point PCM software attenuation.
+   - **`"software"`:** Strictly scales linear floating-point PCM before the FIR cascade and DSM loop. Universally compatible across all DACs; preserves 1-bit DSD and DoP marker integrity.
+   - **`"hardware"`:** Exclusively binds to the DAC's UAC2 hardware mixer element; logs an error/warning and refuses digital scaling if the device lacks a mixer.
+   - **`"none"`:** Enforces fixed, bit-exact unity gain line-out; ignores or rejects desktop volume adjustments.
+   - **Desktop Slider Interception:** `PipeWireVirtualSink` observes `param_changed` for `SPA_PARAM_Props` to capture desktop volume slider and mute adjustments in real time, routing them through the configured `volume_control` strategy.
 
 ---
 
@@ -88,19 +106,25 @@ examples/                 # Ready-to-use TOML configs, MPD snippets, and WirePlu
    - Reads a file (`WAV`/`FLAC`) or `stdin` (`raw`), runs synchronous DSP without hardware clock tracking, and writes `.dsf`, high-rate `.wav`, or raw DoP/PCM to `stdout`.
    - Supports deterministic seeding, two-pass true-peak headroom analysis, and exact sample-count duration trimming.
 
-### 3.2 Two Rate Policies (`[target] rate_policy`)
+### 3.2 Two Rate Policies (`[target] rate_policy`) & Dynamic Multi-Rate Negotiation
 
 Rather than an artificial "desktop vs. music mode" switch on the input, output rate switching is controlled purely by `[target] rate_policy` (or `[[rules]]`):
 
 1. **`rate_policy = "fixed"` (Zero-Relock / Always-On Policy):**
-   - Keeps the output locked at one fixed rate (e.g., always `DSD256` at `11.2896 MHz` or `PCM 192 kHz`).
-   - Any input rate (`44.1 kHz` or `48 kHz`) is seamlessly converted into that single target rate via the polyphase SRC + $2\times$ FIR cascade.
+   - Keeps the output locked at one fixed rate (e.g., always `DSD256` or `PCM 192 kHz`).
+   - For DSD targets, rate is expressed symbolically via `dsd_rate = "dsd64" | "dsd128" | "dsd256" | "dsd512"`, resolving to the standard 44.1 kHz-family bit rate (e.g., `11.2896 MHz` for `dsd256`).
+   - Any input rate (`44.1 kHz` or `48 kHz` family) is seamlessly converted into that single target rate via the polyphase SRC + $2\times$ FIR cascade.
    - Ideal when mixing desktop audio or switching between apps/tracks without triggering DAC hardware relay clicks or relock delays.
 
 2. **`rate_policy = "source-family"` (Family-Preserving Policy):**
    - Dynamically switches the output rate between its `44.1 kHz`-family target (e.g., `705.6 kHz` / `DSD256-44.1`) and `48 kHz`-family target (e.g., `768 kHz` / `DSD256-48`) whenever the input stream changes rate family.
+   - For DSD targets, symbolic `dsd_rate = "dsd256"` automatically resolves to `11.2896 MHz` for 44.1 kHz-family inputs and `12.288 MHz` for 48 kHz-family inputs, eliminating raw frequency misconfiguration.
    - Avoids cross-family rational SRC so upsampling uses pure $2^K$ half-band FIR stages (plus low-rate ASRC drift tracking when driving an independent ALSA clock).
-   - When used with a PipeWire virtual sink input, `audigma doctor` inspects PipeWire's `default.clock.allowed-rates` and warns if the PipeWire graph is pinned to a single rate (such as `48000`) that would prevent dynamic input rates.
+
+3. **Dynamic Multi-Rate PipeWire Virtual Sink (`[input] rate_mode = "dynamic"`):**
+   - When running as a live desktop daemon, `PipeWireVirtualSink` advertises `audio.allowed-rates` in its adapter node properties (e.g., `[ 44100 48000 88200 96000 176400 192000 352800 384000 ]`) and serializes an SPA `Choice::Enum` POD covering all supported input rates.
+   - When an upstream application begins playback at a different rate, PipeWire notifies the sink via `param_changed` on `SPA_PARAM_EnumFormat`.
+   - The engine intercepts the format transition, atomically increments the pipeline generation tag (`generation += 1`), smoothly mutes and drains active filter tails, re-prepares the pipeline (`prepare(new_spec, config)`), and resumes audio without restarting the daemon process.
 
 ### 3.3 Three Supported Live Output Paths
 
@@ -108,26 +132,44 @@ Rather than an artificial "desktop vs. music mode" switch on the input, output r
 |---|---|---|---|
 | **1. PipeWire High-Rate PCM Upsampler** | `backend = "pipewire"`<br>`target_node = "alsa_output..."` | `format = "pcm"`<br>`sample_format = "f32"` | **`shared-graph` clock** (no ASRC drift loop needed); PipeWire retains ownership of the DAC. |
 | **2. Direct Exclusive ALSA PCM (NOS / High-Rate)** | `backend = "alsa"`<br>`device = "hw:CARD=K17,DEV=0"` | `format = "pcm"`<br>`sample_format = "s32le"` + `dither = "tpdf"` | **`adaptive-input` ASRC** referenced to DAC master clock; `audigma` owns the ALSA DAC exclusively. |
-| **3. Direct Exclusive ALSA DSD (Native / DoP)** | `backend = "alsa"`<br>`device = "hw:CARD=K17,DEV=0"`<br>`transport = "native" \| "dop"` | `format = "dsd"`<br>`dsd_bit_rate_hz = 11289600` | **`adaptive-input` ASRC** referenced to DAC master clock; `audigma` owns the ALSA DAC exclusively. |
+| **3. Direct Exclusive ALSA DSD (Native / DoP)** | `backend = "alsa"`<br>`device = "hw:CARD=K17,DEV=0"`<br>`transport = "native" \| "dop"` | `format = "dsd"`<br>`dsd_rate = "dsd256"` | **`adaptive-input` ASRC** referenced to DAC master clock; `audigma` owns the ALSA DAC exclusively. |
 
-### 3.4 Prepared Pipeline Stages
+### 3.4 Prepared Pipeline Stages & Worker Threading
 
 Every active pipeline executes the following ordered stages:
 
 ```text
-decode / unpack
-  → channel validation (stereo primary)
-  → user volume + preamp_db + profile headroom gain (f64 PCM)
+decode / unpack / DSD decimation
+  → channel validation & ordering (explicit channel_positions, order strictly preserved)
+  → volume control (software PCM scale if active) + preamp_db + profile headroom gain (f64 PCM)
   → low-rate adaptive/rational polyphase SRC (R_asrc × R_rational)
-  → staged 2× half-band FIR interpolation cascade (2^K)
+  → staged 2× half-band FIR interpolation cascade (2^K) [Persistent RT Channel Worker Pool]
   → modulator-input peak meter & overload guard
-  → PCM quantizer (+ TPDF dither for integer PCM)  OR  1-bit Delta-Sigma Modulator (CRFB)
+  → PCM quantizer (+ TPDF dither for integer PCM)  OR  1-bit Delta-Sigma Modulator (CRFB) [Channel Worker Pool]
   → transport packer (Native DSD_U32_BE / DoP s32le|s24le|s24_3le / DSF / PCM)
-  → backend output
+  → backend output (ALSA HW mixer volume if active)
 ```
 
-- **Zero Allocation & Generation Tags in Real-Time:** `prepare(spec, config)` resolves all filter stages, coefficients, and preallocated `rtrb` SPSC ring buffers off the audio thread. `process(input, output)` never allocates on the heap, locks mutexes, or performs I/O. SPSC queue chunks carry a monotonic **generation tag** (`u64`) incremented on every pipeline/format reconfiguration so stale-format blocks in flight are immediately discarded and can never reach a newly configured audio endpoint.
-- **Real-Time Thread Scheduling:** The DSP worker and ALSA hardware egress threads acquire real-time priority via standard Linux user-session facilities (`RTKit` / PipeWire RT thread properties / `RLIMIT_RTPRIO`), logging an observable warning and falling back cleanly to normal scheduling if unavailable.
+- **Multi-Channel Topology & Order-Preserving `channel_positions`:**
+  - Configured via `[input] channels = N` and `channel_positions = [ ... ]` (e.g., `[ "FL", "FR" ]`).
+  - **Strict Order Preservation Invariant:** If `channel_positions` is explicitly declared, Audigma validates that `channel_positions.len() == channels as usize` and that all entries are valid channel tokens, but **never** reorders, normalizes, or overrides the declared order. This preserves intentional channel remapping (e.g., reversed stereo: `[ "FR", "FL" ]`).
+  - **Default Synthesis:** When omitted, standard channel layouts are automatically synthesized:
+    - `1` $\to$ `[ "MONO" ]`
+    - `2` $\to$ `[ "FL", "FR" ]`
+    - `4` $\to$ `[ "FL", "FR", "RL", "RR" ]`
+    - `6` $\to$ `[ "FL", "FR", "FC", "LFE", "RL", "RR" ]` (5.1 surround)
+    - `8` $\to$ `[ "FL", "FR", "FC", "LFE", "RL", "RR", "SL", "SR" ]` (7.1 surround)
+  - Both PipeWire adapter node properties (`audio.channels`, `audio.position`) and SPA `AudioInfoRaw` channel arrays are constructed dynamically from the resolved `channel_positions`.
+
+- **Persistent Real-Time Channel Worker Pool (1 Thread Per Channel):**
+  - Spawns $N$ dedicated worker threads (one per channel) upon pipeline preparation, persisting across the stream lifecycle.
+  - Workers acquire real-time priority (`SCHED_FIFO` via RTKit / `RLIMIT_RTPRIO`) and pin their thread contexts to minimize scheduling jitter.
+  - Master and worker threads synchronize via a lock-free, cache-line aligned atomic barrier / futex (~20 ns).
+  - **Zero Copies & Zero Heap Allocation:** Workers process non-overlapping slices of preallocated shared-memory block buffers with zero heap allocations and zero lock contention during real-time processing.
+  - **Cache Locality:** Filter delay lines and modulator integrator states remain strictly thread-local (preventing CPU cache bouncing), while filter coefficient tables are read concurrently from shared static memory.
+  - **Unified Offline & Live Acceleration:** The same worker pool architecture powers both live playback and offline conversion (`audigma convert` & `benchmark`), delivering $\sim 1.8\times$ throughput speedup on stereo and scaling linearly across multi-channel audio.
+
+- **Zero Allocation & Generation Tags in Real-Time:** `prepare(spec, config)` resolves all filter stages, coefficients, channel worker threads, and preallocated `rtrb` SPSC ring buffers off the audio thread. `process(input, output)` never allocates on the heap, locks mutexes, or performs I/O. SPSC queue chunks carry a monotonic **generation tag** (`u64`) incremented on every pipeline/format reconfiguration so stale-format blocks in flight are immediately discarded and can never reach a newly configured audio endpoint.
 - **Bounded Tile Streaming:** Upsampling to `DSD256` ($256\times$) expands 1024 input frames into 262,144 samples per channel. To preserve L1/L2 cache locality and small memory footprints, the final $2\times$ interpolation stages stream in small bounded tiles directly into the modulator rather than materializing huge MHz-rate float buffers.
 
 ---
@@ -173,9 +215,14 @@ decode / unpack
 
 ### 4.5 Lifecycle & Click-Free Transitions
 The engine state machine runs through:
-`Stopped → Preparing → Priming → Running → Draining/Muting → Reconfiguring` (plus `Recovering` and `DeviceLost`).
+`Stopped → Preparing → Priming → Running → Draining/Muting → Reconfiguring` (plus `WaitingForDevice`, `Recovering`, `DeviceLost`).
 
 - **Planned Stop / Rate Switch:** Ramp PCM gain to zero pre-SRC $\to$ run `filter_group_delay` frames until the FIR tail clears $\to$ emit the balanced DSD idle pattern (`0x69`) while holding DoP marker alternation (`0x05`/`0xFA`) during device settling.
+- **Resilient Device Disconnect & Reconnect Sequence:**
+  $$\text{Running} \xrightarrow{\text{ALSA ENODEV}} \text{WaitingForDevice (draining bit-bucket)} \xrightarrow{\text{inotify /dev/snd arrival}} \text{Re-reserving D-Bus} \xrightarrow{\text{re-open ALSA}} \text{Priming} \xrightarrow{\text{cosine ramp}} \text{Running}$$
+  1. *ALSA Error Push:* When an active hardware device disconnects (unplug or power-off), the ALSA file descriptor emits `POLLERR` / `POLLHUP` and returns `ENODEV`. The engine transitions immediately to `WaitingForDevice`.
+  2. *Bit-Bucket Pacing & Grace Period:* If `keep_audio_sink_ms` is positive or `-1`, `PipeWireVirtualSink` stays registered in the PipeWire graph and discards incoming audio frames at nominal stream clock rate. If `keep_audio_sink_ms` expires before the hardware returns, the sink node unregisters from PipeWire to allow desktop audio routing to fall back cleanly to secondary speakers.
+  3. *Zero-Spin Hotplug Arrival:* Linux `inotify` on `/dev/snd` (`IN_CREATE`) wakes the daemon instantly on DAC reconnection. Audigma re-acquires the D-Bus device reservation (`org.freedesktop.ReserveDevice1`), re-opens the ALSA device, re-primes the carrier, re-registers `PipeWireVirtualSink` (if previously torn down), and fades in audio smoothly with a cosine ramp.
 
 ---
 
@@ -229,7 +276,7 @@ schema_version = 1
 [[rules]]
 when_input_rate_family = "44100"   # 44.1k, 88.2k, 176.4k, 352.8k
 apply_preset = "reference"
-set_target = { format = "dsd", dsd_bit_rate_hz = 11289600 }
+set_target = { format = "dsd", dsd_rate = "dsd256" }
 
 [[rules]]
 when_input_rate_family = "48000"   # 48k, 96k, 192k, 384k
@@ -247,11 +294,17 @@ schema_version = 1
 backend = "pipewire"
 node_name = "audigma_sink"
 channels = 2
+channel_positions = [ "FL", "FR" ]
+rate_mode = "dynamic"
+allowed_rates = [ 44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000 ]
 
 [output]
 backend = "pipewire"
 target_node = "alsa_output.usb-FiiO_K17-00.analog-stereo"
 transport = "pcm"
+volume_control = "hardware-software-fallback"
+device_wait_ms = -1
+keep_audio_sink_ms = 5000
 
 [target]
 format = "pcm"
@@ -284,19 +337,26 @@ schema_version = 1
 backend = "pipewire"
 node_name = "audigma_sink"
 channels = 2
+channel_positions = [ "FL", "FR" ]
+rate_mode = "dynamic"
+allowed_rates = [ 44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000 ]
+allow_dsd = true
 
 [output]
 backend = "alsa"
 device = "hw:CARD=K17,DEV=0"
 transport = "native"
 reserve_device = true
+volume_control = "hardware-software-fallback"
+device_wait_ms = -1
+keep_audio_sink_ms = 5000
 buffer_ms = 40
 period_ms = 5
 
 [target]
 format = "dsd"
 rate_policy = "fixed"
-dsd_bit_rate_hz = 11289600
+dsd_rate = "dsd256"
 
 [gain]
 preamp_db = 0.0
@@ -329,12 +389,16 @@ schema_version = 1
 backend = "alsa"
 device = "hw:Loopback,1,0"
 channels = 2
+channel_positions = [ "FL", "FR" ]
 
 [output]
 backend = "alsa"
 device = "hw:CARD=K17,DEV=0"
 transport = "pcm"
 reserve_device = true
+volume_control = "hardware-software-fallback"
+device_wait_ms = -1
+keep_audio_sink_ms = 5000
 buffer_ms = 40
 period_ms = 5
 
@@ -375,7 +439,7 @@ container = "dsf"
 [target]
 format = "dsd"
 rate_policy = "fixed"
-dsd_bit_rate_hz = 11289600
+dsd_rate = "dsd256"
 
 [gain]
 preamp_db = 0.0
@@ -417,7 +481,7 @@ sample_format = "s24_3le"
 [target]
 format = "dsd"
 rate_policy = "fixed"
-dsd_bit_rate_hz = 5644800
+dsd_rate = "dsd128"
 
 [gain]
 headroom = "profile"
@@ -463,13 +527,15 @@ audigma doctor [--fix] [--json]
   2. *PipeWire Multi-Rate Configuration:* Checks `default.clock.allowed-rates` in PipeWire when `rate_policy = "source-family"` is active on a PipeWire virtual sink, warning and offering to install the required multi-rate configuration drop-in if the graph is pinned to a single rate (e.g. `48000`).
   3. *Real-Time Scheduling Limits:* Verifies `RLIMIT_RTPRIO` / RTKit availability for real-time DSP threads.
 - **Control Socket & Telemetry Protocol (`audigma status`):** Operates over a local Unix domain socket at `$XDG_RUNTIME_DIR/audigma/control.sock`. Runtime telemetry exported via `status [--watch] [--json]` exposes:
-  - Input negotiated format/rate and PipeWire graph rate.
+  - Input negotiated format/rate, PipeWire graph rate, and active channel positions.
   - Output bit/sample/transport rate and active physical device/endpoint.
+  - Daemon and device state (`Running`, `WaitingForDevice`, etc.) and `disconnect_duration_ms`.
+  - Active volume mode (`hardware`, `software`, `none`) and current volume attenuation levels.
   - Active preset, profile hash, and applied gain breakdown (`preamp_db`, user volume, profile headroom).
   - Measured true peaks and modulator integrator operating envelope.
   - Latency breakdown (graph + queue + filter group delay + backend buffer).
   - SPSC queue fill percentage and estimated ASRC clock drift ($\delta_{\text{ppm}}$).
-  - Hardware XRun counters, fault/recovery event counts, and per-stage processing timing.
+  - Hardware XRun counters, fault/recovery event counts, and per-channel worker execution timing.
 
 ---
 
