@@ -15,12 +15,11 @@
 use crate::asrc::{AdaptiveClockDriftController, ClockDriftConfig};
 use crate::lifecycle::{IdleCarrierFormat, LifecycleController};
 use crate::traits::{AudioInput, AudioOutput, EngineError};
+use crate::worker::{ChannelWorkerPool, TargetDsdConfig};
 use audigma_dsp::config::{SampleFormat, TargetRateSpec};
-use audigma_dsp::fir::{HalfBandCascade, PolyphaseResampler};
+use audigma_dsp::fir::PolyphaseResampler;
 use audigma_dsp::ftz::ScopedFtzDaz;
-use audigma_dsp::modulator::CrfbModulator;
 use audigma_dsp::rates::PcmRateHz;
-use audigma_dsp::tables;
 use audigma_format::dop::{DopContainerFormat, DopPacker};
 use audigma_format::dsd_u32::{STEREO_DSD_U32_FRAME_BYTES, pack_stereo_dsd_u32_be};
 use audigma_settings::{OutputTransport, ResolvedPipelinePlan, Settings};
@@ -266,11 +265,27 @@ impl LivePipeline {
         let preset = self.plan.dsp_config.preset;
 
         const TILE_BASEBAND_FRAMES: usize = 256;
-        let mut cascade_left =
-            HalfBandCascade::new(preset, self.cascade_stages, TILE_BASEBAND_FRAMES);
-        let mut cascade_right =
-            HalfBandCascade::new(preset, self.cascade_stages, TILE_BASEBAND_FRAMES);
-        let mult = cascade_left.rate_multiplier();
+        let is_dsd = matches!(target_spec, TargetRateSpec::Dsd { .. });
+        let target_dsd = match target_spec {
+            TargetRateSpec::Dsd { bit_rate } => Some(TargetDsdConfig {
+                bit_rate,
+                dither: self.plan.dsp_config.dither,
+                overload_policy: self.plan.dsp_config.overload_policy,
+                seed_base: 12345,
+            }),
+            TargetRateSpec::Pcm { .. } => None,
+        };
+
+        let mut worker_pool = ChannelWorkerPool::new(
+            2,
+            preset,
+            self.cascade_stages,
+            TILE_BASEBAND_FRAMES,
+            target_dsd,
+            Some(80),
+            None,
+        )?;
+        let mult = worker_pool.rate_multiplier();
 
         // Clock mode & low-rate ASRC
         let is_adaptive = self
@@ -307,39 +322,6 @@ impl LivePipeline {
             None
         };
 
-        // Modulators for DSD
-        let mut mod_left = match target_spec {
-            TargetRateSpec::Dsd { bit_rate } => {
-                let coeffs = tables::get_crfb_coefficients(bit_rate).ok_or_else(|| {
-                    EngineError::Pipeline(format!(
-                        "no verified CRFB coefficients for bit rate {bit_rate}"
-                    ))
-                })?;
-                Some(CrfbModulator::new(
-                    *coeffs,
-                    self.plan.dsp_config.dither,
-                    self.plan.dsp_config.overload_policy,
-                ))
-            }
-            TargetRateSpec::Pcm { .. } => None,
-        };
-
-        let mut mod_right = match target_spec {
-            TargetRateSpec::Dsd { bit_rate } => {
-                let coeffs = tables::get_crfb_coefficients(bit_rate).ok_or_else(|| {
-                    EngineError::Pipeline(format!(
-                        "no verified CRFB coefficients for bit rate {bit_rate}"
-                    ))
-                })?;
-                Some(CrfbModulator::new(
-                    *coeffs,
-                    self.plan.dsp_config.dither,
-                    self.plan.dsp_config.overload_policy,
-                ))
-            }
-            TargetRateSpec::Pcm { .. } => None,
-        };
-
         let mut dop_packer = match self.carrier {
             IdleCarrierFormat::DoP(fmt) => Some(DopPacker::new(fmt)),
             _ => None,
@@ -353,16 +335,14 @@ impl LivePipeline {
         let mut in_right = vec![0.0; TILE_BASEBAND_FRAMES];
         let mut src_out_left = vec![0.0; TILE_BASEBAND_FRAMES * 2];
         let mut src_out_right = vec![0.0; TILE_BASEBAND_FRAMES * 2];
-        let mut cascade_out_left = vec![0.0; cascade_tile_len];
-        let mut cascade_out_right = vec![0.0; cascade_tile_len];
-        let mut dsd_bytes_left = vec![0u8; cascade_tile_len / 8];
-        let mut dsd_bytes_right = vec![0u8; cascade_tile_len / 8];
-        let mut transport_staging = vec![0u8; cascade_tile_len * 4];
+        let staging_len = (cascade_tile_len * 4).max(16384);
+        let mut transport_staging = vec![0u8; staging_len];
 
         let start_time = Instant::now();
         let mut total_input_frames = 0u64;
         let mut total_output_frames = 0u64;
         let mut overload_events = 0u64;
+        let mut was_idle = false;
 
         let base_preamp = self.plan.dsp_config.preamp_db;
         let profile_headroom = self.plan.dsp_config.profile_headroom_db;
@@ -376,9 +356,54 @@ impl LivePipeline {
             // Read input frames
             let frames_read = input.read_stereo(&mut in_left, &mut in_right)?;
             if frames_read == 0 {
-                // When input is temporarily idle or quiet in live streaming, sleep briefly to avoid spin
-                std::thread::sleep(Duration::from_millis(5));
+                // When input is temporarily idle or quiet in live streaming:
+                // Emit continuous idle / silence frames to keep DAC clock locked and prevent ALSA XRuns.
+                let idle_tile_frames = TILE_BASEBAND_FRAMES;
+                let idle_bytes = match self.carrier {
+                    IdleCarrierFormat::NativeDsd => {
+                        let dsd_u32_frames = (idle_tile_frames * mult) / 32;
+                        dsd_u32_frames * STEREO_DSD_U32_FRAME_BYTES
+                    }
+                    IdleCarrierFormat::DoP(ref fmt) => {
+                        let dop_frames = (idle_tile_frames * mult) / 16;
+                        dop_frames * fmt.bytes_per_stereo_frame()
+                    }
+                    IdleCarrierFormat::Pcm => idle_tile_frames * mult * 8,
+                };
+
+                let to_write = idle_bytes.min(transport_staging.len());
+                let written = lifecycle.emit_idle_frames(&mut transport_staging[..to_write]);
+                if written > 0 {
+                    output
+                        .write_all(&transport_staging[..written])
+                        .map_err(|e| {
+                            let code = e.raw_os_error().unwrap_or(0);
+                            if e.kind() == std::io::ErrorKind::BrokenPipe
+                                || code == libc::ENODEV
+                                || code == -libc::ENODEV
+                                || code == libc::EBADFD
+                                || code == -libc::EBADFD
+                                || code == libc::EIO
+                                || code == -libc::EIO
+                            {
+                                EngineError::DeviceDisconnected(e.to_string())
+                            } else {
+                                EngineError::Io(e)
+                            }
+                        })?;
+                }
+                was_idle = true;
+                let chunk_dur = Duration::from_secs_f64(
+                    idle_tile_frames as f64 / self.intermediate_rate.get() as f64,
+                );
+                std::thread::sleep((chunk_dur / 2).max(Duration::from_millis(1)));
                 continue;
+            }
+
+            if was_idle {
+                was_idle = false;
+                let _ = worker_pool.reset();
+                let _ = lifecycle.start();
             }
             total_input_frames += frames_read as u64;
 
@@ -407,9 +432,11 @@ impl LivePipeline {
 
                     // Update drift controller
                     let dt = frames_read as f64 / self.input_rate.get() as f64;
-                    if let Ok(ppm) = drift_ctrl.update(128, 256, dt) {
-                        src_l.set_drift_ppm(ppm);
-                        src_r.set_drift_ppm(ppm);
+                    if let Some((fill, cap)) = input.buffer_occupancy() {
+                        if let Ok(ppm) = drift_ctrl.update(fill, cap, dt) {
+                            src_l.set_drift_ppm(ppm);
+                            src_r.set_drift_ppm(ppm);
+                        }
                     }
 
                     (&src_out_left[..prod], &src_out_right[..prod], prod)
@@ -417,45 +444,61 @@ impl LivePipeline {
                     (left_slice, right_slice, frames_read)
                 };
 
-            // Interpolation & Modulation in bounded tiles
+            // Interpolation & Modulation in bounded tiles via ChannelWorkerPool
             let mut offset = 0;
             while offset < proc_len {
                 let tile = (proc_len - offset).min(TILE_BASEBAND_FRAMES);
                 let req_out = tile * mult;
 
-                cascade_left.process_tile(
-                    &proc_left[offset..offset + tile],
-                    &mut cascade_out_left[..req_out],
-                )?;
-                cascade_right.process_tile(
-                    &proc_right[offset..offset + tile],
-                    &mut cascade_out_right[..req_out],
-                )?;
+                let in_l = &proc_left[offset..offset + tile];
+                let in_r = &proc_right[offset..offset + tile];
 
-                match (&mut mod_left, &mut mod_right) {
-                    (Some(ml), Some(mr)) => {
-                        let bytes_req = req_out / 8;
-                        let out_l = &mut dsd_bytes_left[..bytes_req];
-                        let out_r = &mut dsd_bytes_right[..bytes_req];
+                if is_dsd {
+                    worker_pool.process_tile_dsd(&[in_l, in_r])?;
+                    let out_l = worker_pool.channel_dsd(0);
+                    let out_r = worker_pool.channel_dsd(1);
 
-                        let init_ov_l = ml.overload_count();
-                        let init_ov_r = mr.overload_count();
+                    let ov = worker_pool.total_overload_count();
+                    if ov > overload_events {
+                        lifecycle.report_overload_trip();
+                        overload_events = ov;
+                    }
 
-                        ml.process_tile_bytes(&cascade_out_left[..req_out], out_l)?;
-                        mr.process_tile_bytes(&cascade_out_right[..req_out], out_r)?;
+                    // Pack and emit
+                    let write_res: Result<(), EngineError> = match self.carrier {
+                        IdleCarrierFormat::NativeDsd => {
+                            let packed_bytes = pack_stereo_dsd_u32_be(
+                                out_l,
+                                out_r,
+                                false,
+                                &mut transport_staging,
+                            )?;
+                            output
+                                .write_all(&transport_staging[..packed_bytes])
+                                .map_err(|e| {
+                                    let code = e.raw_os_error().unwrap_or(0);
+                                    if e.kind() == std::io::ErrorKind::BrokenPipe
+                                        || code == libc::ENODEV
+                                        || code == -libc::ENODEV
+                                        || code == libc::EBADFD
+                                        || code == -libc::EBADFD
+                                        || code == libc::EIO
+                                        || code == -libc::EIO
+                                    {
+                                        EngineError::DeviceDisconnected(e.to_string())
+                                    } else {
+                                        EngineError::Io(e)
+                                    }
+                                })?;
 
-                        if ml.overload_count() > init_ov_l || mr.overload_count() > init_ov_r {
-                            lifecycle.report_overload_trip();
-                            overload_events += 1;
+                            total_output_frames += req_out as u64;
+                            Ok(())
                         }
-
-                        // Pack and emit
-                        let write_res: Result<(), EngineError> = match self.carrier {
-                            IdleCarrierFormat::NativeDsd => {
-                                let packed_bytes = pack_stereo_dsd_u32_be(
+                        IdleCarrierFormat::DoP(_) => {
+                            if let Some(ref mut packer) = dop_packer {
+                                let packed_bytes = packer.pack_stereo_frames(
                                     out_l,
                                     out_r,
-                                    false,
                                     &mut transport_staging,
                                 )?;
                                 output
@@ -477,68 +520,42 @@ impl LivePipeline {
                                     })?;
 
                                 total_output_frames += req_out as u64;
-                                Ok(())
                             }
-                            IdleCarrierFormat::DoP(_) => {
-                                if let Some(ref mut packer) = dop_packer {
-                                    let packed_bytes = packer.pack_stereo_frames(
-                                        out_l,
-                                        out_r,
-                                        &mut transport_staging,
-                                    )?;
-                                    output
-                                        .write_all(&transport_staging[..packed_bytes])
-                                        .map_err(|e| {
-                                            let code = e.raw_os_error().unwrap_or(0);
-                                            if e.kind() == std::io::ErrorKind::BrokenPipe
-                                                || code == libc::ENODEV
-                                                || code == -libc::ENODEV
-                                                || code == libc::EBADFD
-                                                || code == -libc::EBADFD
-                                                || code == libc::EIO
-                                                || code == -libc::EIO
-                                            {
-                                                EngineError::DeviceDisconnected(e.to_string())
-                                            } else {
-                                                EngineError::Io(e)
-                                            }
-                                        })?;
-
-                                    total_output_frames += req_out as u64;
-                                }
-                                Ok(())
-                            }
-                            IdleCarrierFormat::Pcm => Ok(()),
-                        };
-                        write_res?;
-                    }
-                    _ => {
-                        // High-rate PCM output
-                        let mut pcm_bytes = Vec::with_capacity(req_out * 8);
-                        for i in 0..req_out {
-                            let fl = (cascade_out_left[i] as f32).to_le_bytes();
-                            let fr = (cascade_out_right[i] as f32).to_le_bytes();
-                            pcm_bytes.extend_from_slice(&fl);
-                            pcm_bytes.extend_from_slice(&fr);
+                            Ok(())
                         }
-                        output.write_all(&pcm_bytes).map_err(|e| {
-                            let code = e.raw_os_error().unwrap_or(0);
-                            if e.kind() == std::io::ErrorKind::BrokenPipe
-                                || code == libc::ENODEV
-                                || code == -libc::ENODEV
-                                || code == libc::EBADFD
-                                || code == -libc::EBADFD
-                                || code == libc::EIO
-                                || code == -libc::EIO
-                            {
-                                EngineError::DeviceDisconnected(e.to_string())
-                            } else {
-                                EngineError::Io(e)
-                            }
-                        })?;
+                        IdleCarrierFormat::Pcm => Ok(()),
+                    };
+                    write_res?;
+                } else {
+                    worker_pool.process_tile_pcm(&[in_l, in_r])?;
+                    let out_l = worker_pool.channel_pcm(0);
+                    let out_r = worker_pool.channel_pcm(1);
 
-                        total_output_frames += req_out as u64;
+                    // High-rate PCM output
+                    let mut pcm_bytes = Vec::with_capacity(req_out * 8);
+                    for i in 0..req_out {
+                        let fl = (out_l[i] as f32).to_le_bytes();
+                        let fr = (out_r[i] as f32).to_le_bytes();
+                        pcm_bytes.extend_from_slice(&fl);
+                        pcm_bytes.extend_from_slice(&fr);
                     }
+                    output.write_all(&pcm_bytes).map_err(|e| {
+                        let code = e.raw_os_error().unwrap_or(0);
+                        if e.kind() == std::io::ErrorKind::BrokenPipe
+                            || code == libc::ENODEV
+                            || code == -libc::ENODEV
+                            || code == libc::EBADFD
+                            || code == -libc::EBADFD
+                            || code == libc::EIO
+                            || code == -libc::EIO
+                        {
+                            EngineError::DeviceDisconnected(e.to_string())
+                        } else {
+                            EngineError::Io(e)
+                        }
+                    })?;
+
+                    total_output_frames += req_out as u64;
                 }
 
                 offset += tile;

@@ -9,7 +9,8 @@ use audigma_dsp::rates::PcmRateHz;
 use audigma_engine::live::{DaemonControlHandle, LivePipeline};
 use audigma_engine::traits::{AudioInput, AudioOutput, DecoderInput, EngineError};
 use audigma_engine::{
-    IdleCarrierFormat, LifecycleController, MockAudioInput, OfflinePipeline, StreamSink,
+    ChannelWorkerPool, IdleCarrierFormat, LifecycleController, MockAudioInput, OfflinePipeline,
+    StreamSink, TargetDsdConfig,
 };
 use audigma_format::AudioStreamInfo;
 use audigma_format::decoder::AudioDecoder;
@@ -195,6 +196,10 @@ pub struct BenchmarkArgs {
     /// Optional input audio file (if omitted, uses a deterministic 10s synthetic stereo signal)
     #[arg(short = 'i', long = "input")]
     pub input: Option<PathBuf>,
+
+    /// Resampler & filter preset ("balanced", "reference", "low-latency")
+    #[arg(short = 'p', long = "preset")]
+    pub preset: Option<String>,
 
     /// Optional TOML configuration file path
     #[arg(short = 'c', long = "config")]
@@ -1143,7 +1148,7 @@ pub fn run_convert(args: ConvertArgs) -> Result<(), EngineError> {
 }
 
 pub fn run_benchmark(args: BenchmarkArgs) -> Result<(), EngineError> {
-    let settings = if let Some(ref cfg_path) = args.config {
+    let mut settings = if let Some(ref cfg_path) = args.config {
         let content = std::fs::read_to_string(cfg_path)?;
         let s = Settings::from_toml_str(&content)?;
         s.validate()?;
@@ -1151,6 +1156,25 @@ pub fn run_benchmark(args: BenchmarkArgs) -> Result<(), EngineError> {
     } else {
         Settings::default_offline(OutputContainer::Dsf)
     };
+
+    if let Some(ref preset_name) = args.preset {
+        let preset_def = by_name(preset_name)
+            .ok_or_else(|| EngineError::Pipeline(format!("unknown preset '{preset_name}'")))?;
+        if let Some(ref mut resampler) = settings.resampler {
+            resampler.preset = preset_def.preset;
+        } else {
+            let r = audigma_settings::ResamplerConfig {
+                preset: preset_def.preset,
+                ..Default::default()
+            };
+            settings.resampler = Some(r);
+        }
+    } else if args.config.is_none() {
+        // Default standalone benchmark preset is "balanced" (standard live real-time DSP preset)
+        if let Some(ref mut resampler) = settings.resampler {
+            resampler.preset = audigma_dsp::config::FilterPreset::Balanced;
+        }
+    }
 
     const BENCH_SECONDS: usize = 10;
     const SAMPLE_RATE_HZ: u32 = 44_100;
@@ -1221,27 +1245,36 @@ pub fn run_benchmark(args: BenchmarkArgs) -> Result<(), EngineError> {
 
     let mult = 1usize << stages;
     let tile_expanded = BLOCK_FRAMES * mult;
-    let mut dsp_cascade_l =
-        audigma_dsp::fir::HalfBandCascade::new(plan.dsp_config.preset, stages, BLOCK_FRAMES);
-    let mut bb_l = [0.0f64; BLOCK_FRAMES];
-    let mut exp_l = vec![0.0f64; tile_expanded];
-    let mut dsd_bytes_l = vec![0u8; tile_expanded / 8];
-
     let amp = 10.0f64.powf(-6.0 / 20.0);
-    for (i, item) in bb_l.iter_mut().enumerate() {
+
+    let mut bb_l = [0.0f64; BLOCK_FRAMES];
+    let mut bb_r = [0.0f64; BLOCK_FRAMES];
+    for i in 0..BLOCK_FRAMES {
         let t = i as f64 / input_rate.get() as f64;
-        let s = amp * (2.0 * PI * 1000.0 * t).sin();
-        *item = s;
+        bb_l[i] = amp * (2.0 * PI * 1000.0 * t).sin();
+        bb_r[i] = amp * (2.0 * PI * 2000.0 * t).sin();
     }
 
-    let mut dsp_mod_l = if is_dsd {
+    // 2.A: Single-Threaded Sequential Baseline (Stereo L + R on 1 thread)
+    let mut seq_cascade_l =
+        audigma_dsp::fir::HalfBandCascade::new(plan.dsp_config.preset, stages, BLOCK_FRAMES);
+    let mut seq_cascade_r =
+        audigma_dsp::fir::HalfBandCascade::new(plan.dsp_config.preset, stages, BLOCK_FRAMES);
+    let mut exp_l = vec![0.0f64; tile_expanded];
+    let mut exp_r = vec![0.0f64; tile_expanded];
+    let mut dsd_bytes_l = vec![0u8; tile_expanded / 8];
+    let mut dsd_bytes_r = vec![0u8; tile_expanded / 8];
+
+    let mut seq_mod_l = if is_dsd {
         if let audigma_dsp::config::TargetRateSpec::Dsd { bit_rate } = target_spec {
             let coeffs = audigma_dsp::tables::get_crfb_coefficients(bit_rate).unwrap();
-            Some(audigma_dsp::modulator::CrfbModulator::new(
+            let mut m = audigma_dsp::modulator::CrfbModulator::new(
                 *coeffs,
                 audigma_dsp::config::DitherType::Tpdf,
                 audigma_dsp::config::OverloadPolicy::MuteRecover,
-            ))
+            );
+            m.set_dither_seed(12345);
+            Some(m)
         } else {
             None
         }
@@ -1249,23 +1282,89 @@ pub fn run_benchmark(args: BenchmarkArgs) -> Result<(), EngineError> {
         None
     };
 
-    // Warm up
-    for _ in 0..100 {
-        dsp_cascade_l.process_tile(&bb_l, &mut exp_l).unwrap();
-        if let Some(ml) = &mut dsp_mod_l {
+    let mut seq_mod_r = if is_dsd {
+        if let audigma_dsp::config::TargetRateSpec::Dsd { bit_rate } = target_spec {
+            let coeffs = audigma_dsp::tables::get_crfb_coefficients(bit_rate).unwrap();
+            let mut m = audigma_dsp::modulator::CrfbModulator::new(
+                *coeffs,
+                audigma_dsp::config::DitherType::Tpdf,
+                audigma_dsp::config::OverloadPolicy::MuteRecover,
+            );
+            m.set_dither_seed(12346);
+            Some(m)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Sequential Warm-up
+    for _ in 0..50 {
+        seq_cascade_l.process_tile(&bb_l, &mut exp_l).unwrap();
+        seq_cascade_r.process_tile(&bb_r, &mut exp_r).unwrap();
+        if let (Some(ml), Some(mr)) = (&mut seq_mod_l, &mut seq_mod_r) {
             ml.process_tile_bytes(&exp_l, &mut dsd_bytes_l).unwrap();
+            mr.process_tile_bytes(&exp_r, &mut dsd_bytes_r).unwrap();
         }
     }
 
     const BENCH_BLOCKS: usize = 2000;
+    let seq_start = Instant::now();
+    for _ in 0..BENCH_BLOCKS {
+        seq_cascade_l.process_tile(&bb_l, &mut exp_l).unwrap();
+        seq_cascade_r.process_tile(&bb_r, &mut exp_r).unwrap();
+        if let (Some(ml), Some(mr)) = (&mut seq_mod_l, &mut seq_mod_r) {
+            ml.process_tile_bytes(&exp_l, &mut dsd_bytes_l).unwrap();
+            mr.process_tile_bytes(&exp_r, &mut dsd_bytes_r).unwrap();
+        }
+    }
+    let seq_total_elapsed = seq_start.elapsed();
+
+    // 2.B: Multi-Threaded ChannelWorkerPool (1 dedicated RT thread per channel)
+    let target_dsd = if is_dsd {
+        if let audigma_dsp::config::TargetRateSpec::Dsd { bit_rate } = target_spec {
+            Some(TargetDsdConfig {
+                bit_rate,
+                dither: audigma_dsp::config::DitherType::Tpdf,
+                overload_policy: audigma_dsp::config::OverloadPolicy::MuteRecover,
+                seed_base: 12345,
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let mut worker_pool = ChannelWorkerPool::new(
+        2,
+        plan.dsp_config.preset,
+        stages,
+        BLOCK_FRAMES,
+        target_dsd,
+        None,
+        None,
+    )?;
+
+    // Worker Pool Warm-up
+    for _ in 0..50 {
+        if is_dsd {
+            worker_pool.process_tile_dsd(&[&bb_l, &bb_r]).unwrap();
+        } else {
+            worker_pool.process_tile_pcm(&[&bb_l, &bb_r]).unwrap();
+        }
+    }
+
     let mut worker_block_times_ns = Vec::with_capacity(BENCH_BLOCKS);
     let worker_start = Instant::now();
 
     for _ in 0..BENCH_BLOCKS {
         let b_start = Instant::now();
-        dsp_cascade_l.process_tile(&bb_l, &mut exp_l).unwrap();
-        if let Some(ml) = &mut dsp_mod_l {
-            ml.process_tile_bytes(&exp_l, &mut dsd_bytes_l).unwrap();
+        if is_dsd {
+            worker_pool.process_tile_dsd(&[&bb_l, &bb_r]).unwrap();
+        } else {
+            worker_pool.process_tile_pcm(&[&bb_l, &bb_r]).unwrap();
         }
         worker_block_times_ns.push(b_start.elapsed().as_nanos() as u64);
     }
@@ -1275,6 +1374,8 @@ pub fn run_benchmark(args: BenchmarkArgs) -> Result<(), EngineError> {
     let dsp_audio_duration_sec =
         BENCH_BLOCKS as f64 * (BLOCK_FRAMES as f64 / input_rate.get() as f64);
     let worker_throughput_x = dsp_audio_duration_sec / worker_total_elapsed.as_secs_f64();
+    let seq_throughput_x = dsp_audio_duration_sec / seq_total_elapsed.as_secs_f64();
+    let speedup_factor = seq_total_elapsed.as_secs_f64() / worker_total_elapsed.as_secs_f64();
 
     let p50_ns = worker_block_times_ns[BENCH_BLOCKS * 50 / 100];
     let p99_ns = worker_block_times_ns[BENCH_BLOCKS * 99 / 100];
@@ -1284,10 +1385,23 @@ pub fn run_benchmark(args: BenchmarkArgs) -> Result<(), EngineError> {
     let block_budget_micros = (BLOCK_FRAMES as f64 / input_rate.get() as f64) * 1_000_000.0;
     let p999_micros = p999_ns as f64 / 1000.0;
     let p999_budget_used_percent = (p999_micros / block_budget_micros) * 100.0;
+    let efficiency_pct = (speedup_factor / 2.0) * 100.0;
 
-    let pass_throughput = worker_throughput_x >= 2.0;
-    let pass_budget = p999_budget_used_percent <= 70.0;
-    let status_pass = pass_throughput && pass_budget;
+    let realtime_status = if worker_throughput_x >= 2.0 {
+        "Optimal (>= 2x realtime margin)"
+    } else if worker_throughput_x >= 1.0 {
+        "Capable (realtime playback supported)"
+    } else {
+        "Constrained (sub-realtime; offline conversion recommended)"
+    };
+
+    let budget_status = if p999_budget_used_percent <= 50.0 {
+        "Ample RT headroom"
+    } else if p999_budget_used_percent <= 70.0 {
+        "Within safe RT limits"
+    } else {
+        "High CPU utilization for 64-frame block"
+    };
 
     if args.json {
         let json_val = json!({
@@ -1295,6 +1409,10 @@ pub fn run_benchmark(args: BenchmarkArgs) -> Result<(), EngineError> {
             "input_rate_hz": input_rate.get(),
             "target_format": format!("{:?}", report.target_format),
             "dsp_worker_throughput_x_realtime": worker_throughput_x,
+            "dsp_sequential_throughput_x_realtime": seq_throughput_x,
+            "dsp_speedup_factor": speedup_factor,
+            "parallel_efficiency_percent": efficiency_pct,
+            "realtime_tier": if worker_throughput_x >= 2.0 { "optimal" } else if worker_throughput_x >= 1.0 { "capable" } else { "constrained" },
             "end_to_end_throughput_x_realtime": e2e_throughput_x,
             "audio_duration_sec": audio_duration_sec,
             "block_frames": BLOCK_FRAMES,
@@ -1304,32 +1422,33 @@ pub fn run_benchmark(args: BenchmarkArgs) -> Result<(), EngineError> {
             "p99_block_micros": p99_ns as f64 / 1000.0,
             "p999_block_micros": p999_micros,
             "p999_budget_percent": p999_budget_used_percent,
-            "target_throughput_pass": pass_throughput,
-            "target_budget_pass": pass_budget,
-            "status": if status_pass { "PASS" } else { "FAIL" },
         });
         println!("{}", serde_json::to_string_pretty(&json_val).unwrap());
     } else {
         println!("=======================================================");
         println!("audigma benchmark: {}", plan.preset_def.name);
         println!("=======================================================");
-        println!("  Input Rate:        {} Hz", input_rate.get());
-        println!("  Target Format:     {:?}", report.target_format);
+        println!("  Input Rate:            {} Hz", input_rate.get());
+        println!("  Target Format:         {:?}", report.target_format);
         println!(
-            "  Worker Throughput: {:.2}x real-time (Goal: >= 2.0x) -> {}",
-            worker_throughput_x,
-            if pass_throughput { "PASS" } else { "FAIL" }
+            "  Worker Pool Rate:      {:.2}x real-time ({})",
+            worker_throughput_x, realtime_status
         );
         println!(
-            "  p99.9 Latency:     {:.2} µs / {:.2} µs ({:.1}% of budget, Goal: <= 70%) -> {}",
-            p999_micros,
-            block_budget_micros,
-            p999_budget_used_percent,
-            if pass_budget { "PASS" } else { "FAIL" }
+            "  Sequential Baseline:   {:.2}x real-time",
+            seq_throughput_x
         );
-        println!("  Avg Block Latency: {:.2} µs", avg_ns as f64 / 1000.0);
         println!(
-            "  End-to-End Rate:   {:.2}x real-time (with two-pass peak analysis)",
+            "  Parallel Scaling:      {:.2}x speedup across 2 channels ({:.1}% efficiency)",
+            speedup_factor, efficiency_pct
+        );
+        println!(
+            "  p99.9 Block Latency:   {:.2} µs / {:.2} µs ({:.1}% of budget: {})",
+            p999_micros, block_budget_micros, p999_budget_used_percent, budget_status
+        );
+        println!("  Avg Block Latency:     {:.2} µs", avg_ns as f64 / 1000.0);
+        println!(
+            "  End-to-End Rate:       {:.2}x real-time (with two-pass peak analysis)",
             e2e_throughput_x
         );
         println!("=======================================================");

@@ -57,6 +57,11 @@ pub trait AudioInput: Send {
 
     /// Rewinds the stream back to timestamp 0.
     fn rewind(&mut self) -> Result<(), EngineError>;
+
+    /// Returns current input queue buffer fill and capacity `(current_fill, capacity)`, if supported.
+    fn buffer_occupancy(&self) -> Option<(usize, usize)> {
+        None
+    }
 }
 
 /// Abstract audio output sink trait with optional seek support.

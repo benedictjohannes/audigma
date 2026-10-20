@@ -203,8 +203,8 @@ Cloned local reference repositories kept in [`references/`](references/) (ignore
 
 - **Goal:** Transform `audigma` into an agile, multi-channel, multi-rate Linux audio daemon and high-fidelity DSD processor:
   1. **Step 5.1:** Specification formalization in `Design.md` & configuration schema expansion in `audigma-settings` (explicit `channel_positions`, `rate_mode`, `volume_control`, `device_wait_ms`, `keep_audio_sink_ms`, `allow_dsd`, and symbolic `dsd_rate`). [Completed]
-  2. **Step 5.2:** Output device resilience, event-driven hotplug & sink lifecycle in `audigma-engine`, `audigma-io`, and `audigma-cli` (event-driven inotify `/dev/snd` watcher, ALSA `ENODEV` disconnect handling, `WaitingForDevice` state, bit-bucket silent draining, and PipeWire graph sink visibility).
-  3. **Step 5.3:** Persistent real-time channel worker pool in `audigma-engine` (1 dedicated RT worker thread per channel, lock-free barrier, zero-copy shared memory, accelerating offline conversion and enabling multi-channel/low-power live playback).
+  2. **Step 5.2:** Output device resilience, event-driven hotplug & sink lifecycle in `audigma-engine`, `audigma-io`, and `audigma-cli` (event-driven inotify `/dev/snd` watcher, ALSA `ENODEV` disconnect handling, `WaitingForDevice` state, bit-bucket silent draining, and PipeWire graph sink visibility). [Completed]
+  3. **Step 5.3:** Persistent real-time channel worker pool in `audigma-engine` (1 dedicated RT worker thread per channel, lock-free barrier, zero-copy shared memory, accelerating offline conversion and enabling multi-channel/low-power live playback). [Completed]
   4. **Step 5.4:** Dynamic multi-rate PipeWire negotiation and dynamic channel mapping in `audigma-io` (SPA `Choice::Enum` POD, `audio.allowed-rates`, dynamic `channel_positions` mapping, and seamless rate renegotiation).
   5. **Step 5.5:** Unified volume control strategy (`software` vs. `hardware` UAC2 mixer bridge vs. `none` line-out, plus PipeWire `SPA_PARAM_Props` desktop slider interception).
   6. **Step 5.6:** DSD input ingestion & bounded decimation remodulation engine (PipeWire SPA `audio/dsd`, DoP unwrapper, DSF decoder, staged $2\times$ FIR decimation, and rate selection formula).
@@ -258,8 +258,16 @@ Cloned local reference repositories kept in [`references/`](references/) (ignore
 # Handoff Brief
 
 - **Current Phase:** Phase 5 [In Progress]
-- **Next Phase:** Phase 5 Step 3
-- **What was done in this session:**
-  - Updated Design.md
-  - Updated configuration struct to reflect enhancements planned in Phase 5
-  - Implemented event driven device and pipewire sink lifecycle handling
+- **Next Phase:** Phase 5 Step 4 (PipeWire Dynamic Multi-Rate & Dynamic Channel Mapping)
+- **What was done in this session (Step 5.3):**
+  - Designed and implemented `ChannelWorkerPool` in `audigma-engine`:
+    - 1 dedicated persistent RT worker thread per channel ($N \ge 1$).
+    - 64-byte cache-line aligned atomic synchronization barrier with zero false sharing.
+    - User-space spin-loop barrier for zero-overhead continuous throughput (~20 ns) with adaptive Linux futex fallback when idle.
+    - Zero heap allocations inside the audio processing loop; preallocated zero-copy buffers.
+    - POSIX `pthread_setschedparam(SCHED_FIFO)` priority and thread-local hardware FTZ/DAZ (`ScopedFtzDaz`).
+  - Wired `ChannelWorkerPool` into offline conversion (`OfflinePipeline`) and two-pass true-peak analysis (`measure_true_peak_pass1`).
+  - Wired `ChannelWorkerPool` into live streaming engine (`LivePipeline::run_streaming`).
+  - Wired `ChannelWorkerPool` into `audigma benchmark` measuring sequential baseline vs parallel worker pool throughput, achieving 1.85x to 1.95x speedup factor.
+  - Verified 100% bit-exact equivalence between sequential and worker-pool DSP execution via automated unit & integration tests and end-to-end file conversion of `LongLive.flac` to DSD64 DSF (matching SHA-256 `447be084dc383d0e2e26f04d684580278d9aaf4b0e6b9fd936181f6e443185c2`).
+  - Clean `cargo test`, `cargo clippy`, and `cargo fmt` across the entire workspace.

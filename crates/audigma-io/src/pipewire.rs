@@ -405,6 +405,12 @@ impl AudioInput for PipeWireVirtualSink {
     fn rewind(&mut self) -> Result<(), EngineError> {
         Ok(())
     }
+
+    fn buffer_occupancy(&self) -> Option<(usize, usize)> {
+        let occupied = self.consumer.slots() + if self.current_chunk.is_some() { 1 } else { 0 };
+        let capacity = self.consumer.buffer().capacity();
+        Some((occupied, capacity))
+    }
 }
 
 /// PipeWire high-rate PCM output node (`Design.md §1.4`, `§3.3`).

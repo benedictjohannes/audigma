@@ -12,13 +12,12 @@
 use crate::peak::measure_true_peak_pass1;
 use crate::tail::TailManager;
 use crate::traits::{AudioInput, AudioOutput, EngineError};
+use crate::worker::{ChannelWorkerPool, TargetDsdConfig};
 use audigma_dsp::DSD_IDLE_BYTE;
 use audigma_dsp::config::{SampleFormat, TargetFormat, TargetRateSpec};
-use audigma_dsp::fir::{HalfBandCascade, PolyphaseResampler};
+use audigma_dsp::fir::PolyphaseResampler;
 use audigma_dsp::ftz::ScopedFtzDaz;
-use audigma_dsp::modulator::CrfbModulator;
 use audigma_dsp::rates::PcmRateHz;
-use audigma_dsp::tables;
 use audigma_format::dop::{DopContainerFormat, DopPacker};
 use audigma_format::dsd_u32::{STEREO_DSD_U32_FRAME_BYTES, pack_stereo_dsd_u32_be};
 use audigma_format::dsf::{DsfBitOrder, DsfPadMode};
@@ -468,8 +467,7 @@ pub struct OfflinePipeline {
     plan: ResolvedPipelinePlan,
     settings: Settings,
     rational_src: Option<(PolyphaseResampler, PolyphaseResampler)>,
-    cascade_left: HalfBandCascade,
-    cascade_right: HalfBandCascade,
+    worker_pool: ChannelWorkerPool,
     tile_size: usize,
     mult: usize,
 }
@@ -555,16 +553,39 @@ impl OfflinePipeline {
         };
 
         const TILE_BASEBAND_FRAMES: usize = 512;
-        let cascade_left = HalfBandCascade::new(preset, stages, TILE_BASEBAND_FRAMES);
-        let cascade_right = HalfBandCascade::new(preset, stages, TILE_BASEBAND_FRAMES);
-        let mult = cascade_left.rate_multiplier();
+        let target_dsd = match plan.stream_spec.target {
+            TargetRateSpec::Dsd { bit_rate } => {
+                let seed = settings
+                    .offline
+                    .as_ref()
+                    .and_then(|o| o.seed)
+                    .unwrap_or(12345);
+                Some(TargetDsdConfig {
+                    bit_rate,
+                    dither: plan.dsp_config.dither,
+                    overload_policy: plan.dsp_config.overload_policy,
+                    seed_base: seed,
+                })
+            }
+            TargetRateSpec::Pcm { .. } => None,
+        };
+
+        let worker_pool = ChannelWorkerPool::new(
+            2,
+            preset,
+            stages,
+            TILE_BASEBAND_FRAMES,
+            target_dsd,
+            None,
+            None,
+        )?;
+        let mult = worker_pool.rate_multiplier();
 
         Ok(Self {
             plan,
             settings,
             rational_src,
-            cascade_left,
-            cascade_right,
+            worker_pool,
             tile_size: TILE_BASEBAND_FRAMES,
             mult,
         })
@@ -586,6 +607,7 @@ impl OfflinePipeline {
 
         let input_rate = input.info().sample_rate;
         let target_spec = self.plan.stream_spec.target;
+        let is_dsd = matches!(target_spec, TargetRateSpec::Dsd { .. });
         let peak_mode = self
             .settings
             .gain
@@ -599,8 +621,7 @@ impl OfflinePipeline {
                 let peak_result = measure_true_peak_pass1(
                     input,
                     self.rational_src.clone(),
-                    self.cascade_left.clone(),
-                    self.cascade_right.clone(),
+                    &mut self.worker_pool,
                     &self.plan.dsp_config,
                     self.tile_size,
                 )?;
@@ -619,7 +640,7 @@ impl OfflinePipeline {
             .and_then(|o| o.tail_policy)
             .unwrap_or(TailPolicy::TrimToDuration);
 
-        let group_delay_output_samples = self.cascade_left.total_group_delay_output_samples();
+        let group_delay_output_samples = self.worker_pool.total_group_delay_output_samples();
         let target_output_samples = input.info().total_frames.map(|frames| match target_spec {
             TargetRateSpec::Dsd { bit_rate } => {
                 (frames as f64 * (bit_rate.get() as f64 / input_rate.get() as f64)).round() as u64
@@ -630,7 +651,7 @@ impl OfflinePipeline {
         });
 
         // Round group delay to nearest whole byte (multiple of 8) for seamless DSD streaming
-        let aligned_group_delay = if matches!(target_spec, TargetRateSpec::Dsd { .. }) {
+        let aligned_group_delay = if is_dsd {
             ((group_delay_output_samples + 4) / 8) * 8
         } else {
             group_delay_output_samples
@@ -639,71 +660,19 @@ impl OfflinePipeline {
         let mut tail_manager =
             TailManager::new(tail_policy, aligned_group_delay, target_output_samples);
 
-        // Step 3: Initialize Modulator or Dither
-        let seed = self
-            .settings
-            .offline
-            .as_ref()
-            .and_then(|o| o.seed)
-            .unwrap_or(12345);
-
-        let mut mod_left = match target_spec {
-            TargetRateSpec::Dsd { bit_rate } => {
-                let coeffs = tables::get_crfb_coefficients(bit_rate).ok_or_else(|| {
-                    EngineError::Pipeline(format!(
-                        "no verified CRFB coefficients found for DSD bit rate {bit_rate}"
-                    ))
-                })?;
-                let mut m = CrfbModulator::new(
-                    *coeffs,
-                    self.plan.dsp_config.dither,
-                    self.plan.dsp_config.overload_policy,
-                );
-                m.set_dither_seed(seed);
-                Some(m)
-            }
-            TargetRateSpec::Pcm { .. } => None,
-        };
-
-        let mut mod_right = match target_spec {
-            TargetRateSpec::Dsd { bit_rate } => {
-                let coeffs = tables::get_crfb_coefficients(bit_rate).ok_or_else(|| {
-                    EngineError::Pipeline(format!(
-                        "no verified CRFB coefficients found for DSD bit rate {bit_rate}"
-                    ))
-                })?;
-                let mut m = CrfbModulator::new(
-                    *coeffs,
-                    self.plan.dsp_config.dither,
-                    self.plan.dsp_config.overload_policy,
-                );
-                m.set_dither_seed(seed.wrapping_add(1));
-                Some(m)
-            }
-            TargetRateSpec::Pcm { .. } => None,
-        };
-
         let mut container_writer = ContainerWriter::new(&self.settings, &target_spec, output)?;
 
         // Pre-allocate bounded buffers
         let tile_size = self.tile_size;
-        let mult = self.mult;
-        let cascade_tile_len = tile_size * mult;
-
         let mut in_left = vec![0.0; tile_size];
         let mut in_right = vec![0.0; tile_size];
-        let mut cascade_out_left = vec![0.0; cascade_tile_len];
-        let mut cascade_out_right = vec![0.0; cascade_tile_len];
 
         let mut src_out_left = vec![0.0; tile_size * 2];
         let mut src_out_right = vec![0.0; tile_size * 2];
 
-        let mut dsd_bytes_left = vec![0u8; cascade_tile_len / 8];
-        let mut dsd_bytes_right = vec![0u8; cascade_tile_len / 8];
-
         let mut total_input_frames = 0u64;
 
-        // Step 4: Stream Processing Loop
+        // Step 3: Stream Processing Loop
         loop {
             let frames_read = input.read_stereo(&mut in_left, &mut in_right)?;
             if frames_read == 0 {
@@ -729,24 +698,17 @@ impl OfflinePipeline {
                     let mut offset = 0;
                     while offset < prod {
                         let chunk = (prod - offset).min(tile_size);
-                        let req_out = chunk * mult;
+                        let in_l = &src_out_left[offset..offset + chunk];
+                        let in_r = &src_out_right[offset..offset + chunk];
 
-                        self.cascade_left.process_tile(
-                            &src_out_left[offset..offset + chunk],
-                            &mut cascade_out_left[..req_out],
-                        )?;
-                        self.cascade_right.process_tile(
-                            &src_out_right[offset..offset + chunk],
-                            &mut cascade_out_right[..req_out],
-                        )?;
+                        if is_dsd {
+                            self.worker_pool.process_tile_dsd(&[in_l, in_r])?;
+                        } else {
+                            self.worker_pool.process_tile_pcm(&[in_l, in_r])?;
+                        }
 
                         self.process_interpolated_block(
-                            &cascade_out_left[..req_out],
-                            &cascade_out_right[..req_out],
-                            &mut mod_left,
-                            &mut mod_right,
-                            &mut dsd_bytes_left,
-                            &mut dsd_bytes_right,
+                            chunk,
                             &mut tail_manager,
                             &mut container_writer,
                             &target_spec,
@@ -756,19 +718,16 @@ impl OfflinePipeline {
                     }
                 }
                 None => {
-                    let req_out = frames_read * mult;
-                    self.cascade_left
-                        .process_tile(left_slice, &mut cascade_out_left[..req_out])?;
-                    self.cascade_right
-                        .process_tile(right_slice, &mut cascade_out_right[..req_out])?;
+                    if is_dsd {
+                        self.worker_pool
+                            .process_tile_dsd(&[left_slice, right_slice])?;
+                    } else {
+                        self.worker_pool
+                            .process_tile_pcm(&[left_slice, right_slice])?;
+                    }
 
                     self.process_interpolated_block(
-                        &cascade_out_left[..req_out],
-                        &cascade_out_right[..req_out],
-                        &mut mod_left,
-                        &mut mod_right,
-                        &mut dsd_bytes_left,
-                        &mut dsd_bytes_right,
+                        frames_read,
                         &mut tail_manager,
                         &mut container_writer,
                         &target_spec,
@@ -788,28 +747,25 @@ impl OfflinePipeline {
         };
         tail_manager.set_target_output_samples(computed_target_output_samples);
 
-        // Step 5: Flush Filter Tail with Digital Silence
-        let flush_delay_frames = (aligned_group_delay / mult) + 48;
+        // Step 4: Flush Filter Tail with Digital Silence
+        let flush_delay_frames = (aligned_group_delay / self.mult) + 48;
         in_left.fill(0.0);
         in_right.fill(0.0);
 
         let mut flushed = 0;
         while flushed < flush_delay_frames && !tail_manager.is_target_satisfied() {
             let chunk = (flush_delay_frames - flushed).min(tile_size);
-            let req_out = chunk * mult;
+            let in_l = &in_left[..chunk];
+            let in_r = &in_right[..chunk];
 
-            self.cascade_left
-                .process_tile(&in_left[..chunk], &mut cascade_out_left[..req_out])?;
-            self.cascade_right
-                .process_tile(&in_right[..chunk], &mut cascade_out_right[..req_out])?;
+            if is_dsd {
+                self.worker_pool.process_tile_dsd(&[in_l, in_r])?;
+            } else {
+                self.worker_pool.process_tile_pcm(&[in_l, in_r])?;
+            }
 
             self.process_interpolated_block(
-                &cascade_out_left[..req_out],
-                &cascade_out_right[..req_out],
-                &mut mod_left,
-                &mut mod_right,
-                &mut dsd_bytes_left,
-                &mut dsd_bytes_right,
+                chunk,
                 &mut tail_manager,
                 &mut container_writer,
                 &target_spec,
@@ -818,12 +774,9 @@ impl OfflinePipeline {
             flushed += chunk;
         }
 
-        // Step 6: Finalize Container
+        // Step 5: Finalize Container
         let (total_output_frames, total_bytes_written) = container_writer.finalize()?;
-
-        let overload_count = mod_left.as_ref().map(|m| m.overload_count()).unwrap_or(0)
-            + mod_right.as_ref().map(|m| m.overload_count()).unwrap_or(0);
-
+        let overload_count = self.worker_pool.total_overload_count();
         let elapsed_ms = start_time.elapsed().as_millis() as u64;
 
         Ok(OfflineReport {
@@ -843,27 +796,18 @@ impl OfflinePipeline {
     }
 
     #[inline]
-    #[allow(clippy::too_many_arguments)]
     fn process_interpolated_block(
-        &self,
-        left_samples: &[f64],
-        right_samples: &[f64],
-        mod_left: &mut Option<CrfbModulator>,
-        mod_right: &mut Option<CrfbModulator>,
-        dsd_bytes_left: &mut [u8],
-        dsd_bytes_right: &mut [u8],
+        &mut self,
+        chunk_frames: usize,
         tail_manager: &mut TailManager,
         container_writer: &mut ContainerWriter,
         target_spec: &TargetRateSpec,
     ) -> Result<(), EngineError> {
         match target_spec {
             TargetRateSpec::Dsd { .. } => {
-                let m_l = mod_left.as_mut().unwrap();
-                let m_r = mod_right.as_mut().unwrap();
-
-                let req_bytes = left_samples.len() / 8;
-                m_l.process_tile_bytes(left_samples, &mut dsd_bytes_left[..req_bytes])?;
-                m_r.process_tile_bytes(right_samples, &mut dsd_bytes_right[..req_bytes])?;
+                let req_bytes = (chunk_frames * self.mult) / 8;
+                let dsd_l = self.worker_pool.channel_dsd(0);
+                let dsd_r = self.worker_pool.channel_dsd(1);
 
                 // Discard ramp-up / trim at byte boundary
                 if let Some((start_b, end_b)) = tail_manager
@@ -871,20 +815,19 @@ impl OfflinePipeline {
                     .map(|(s, e)| (s / 8, e / 8))
                 {
                     if end_b > start_b {
-                        container_writer.write_stereo_dsd(
-                            &dsd_bytes_left[start_b..end_b],
-                            &dsd_bytes_right[start_b..end_b],
-                        )?;
+                        container_writer
+                            .write_stereo_dsd(&dsd_l[start_b..end_b], &dsd_r[start_b..end_b])?;
                     }
                 }
             }
             TargetRateSpec::Pcm { .. } => {
-                if let Some((start, end)) = tail_manager.process_slice_range(left_samples.len()) {
+                let pcm_l = self.worker_pool.channel_pcm(0);
+                let pcm_r = self.worker_pool.channel_pcm(1);
+
+                if let Some((start, end)) = tail_manager.process_slice_range(pcm_l.len()) {
                     if end > start {
-                        container_writer.write_stereo_pcm(
-                            &left_samples[start..end],
-                            &right_samples[start..end],
-                        )?;
+                        container_writer
+                            .write_stereo_pcm(&pcm_l[start..end], &pcm_r[start..end])?;
                     }
                 }
             }

@@ -8,8 +8,9 @@
 //! `P` in dBFS, solving `gain_db = min(configured_gain_db, L - M - P)` per Design.md §4.4.
 
 use crate::traits::{AudioInput, EngineError};
+use crate::worker::ChannelWorkerPool;
 use audigma_dsp::config::DspConfiguration;
-use audigma_dsp::fir::{HalfBandCascade, PolyphaseResampler};
+use audigma_dsp::fir::PolyphaseResampler;
 
 /// Peak analysis measurement result from Pass 1.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -26,12 +27,11 @@ pub struct Pass1PeakResult {
     pub total_input_frames: u64,
 }
 
-/// Measures the true inter-sample peak across the LTI interpolation cascade.
+/// Measures the true inter-sample peak across the LTI interpolation cascade using the channel worker pool.
 pub fn measure_true_peak_pass1(
     input: &mut dyn AudioInput,
     mut rational_src: Option<(PolyphaseResampler, PolyphaseResampler)>,
-    mut cascade_left: HalfBandCascade,
-    mut cascade_right: HalfBandCascade,
+    worker_pool: &mut ChannelWorkerPool,
     dsp_config: &DspConfiguration,
     tile_size: usize,
 ) -> Result<Pass1PeakResult, EngineError> {
@@ -39,13 +39,10 @@ pub fn measure_true_peak_pass1(
         return Err(EngineError::TwoPassRequiresSeekableInput);
     }
 
-    let mult = cascade_left.rate_multiplier();
-    let cascade_tile_len = tile_size * mult;
+    let mult = worker_pool.rate_multiplier();
 
     let mut in_left = vec![0.0; tile_size];
     let mut in_right = vec![0.0; tile_size];
-    let mut cascade_out_left = vec![0.0; cascade_tile_len];
-    let mut cascade_out_right = vec![0.0; cascade_tile_len];
 
     let mut src_out_left = vec![0.0; tile_size * 2];
     let mut src_out_right = vec![0.0; tile_size * 2];
@@ -72,24 +69,22 @@ pub fn measure_true_peak_pass1(
                 let mut offset = 0;
                 while offset < prod {
                     let chunk = (prod - offset).min(tile_size);
-                    let req_out = chunk * mult;
 
-                    cascade_left.process_tile(
+                    worker_pool.process_tile_pcm(&[
                         &src_out_left[offset..offset + chunk],
-                        &mut cascade_out_left[..req_out],
-                    )?;
-                    cascade_right.process_tile(
                         &src_out_right[offset..offset + chunk],
-                        &mut cascade_out_right[..req_out],
-                    )?;
+                    ])?;
 
-                    for &sample in &cascade_out_left[..req_out] {
+                    let out_l = worker_pool.channel_pcm(0);
+                    let out_r = worker_pool.channel_pcm(1);
+
+                    for &sample in out_l {
                         let abs = sample.abs();
                         if abs > max_peak {
                             max_peak = abs;
                         }
                     }
-                    for &sample in &cascade_out_right[..req_out] {
+                    for &sample in out_r {
                         let abs = sample.abs();
                         if abs > max_peak {
                             max_peak = abs;
@@ -100,17 +95,18 @@ pub fn measure_true_peak_pass1(
                 }
             }
             None => {
-                let req_out = frames_read * mult;
-                cascade_left.process_tile(left_slice, &mut cascade_out_left[..req_out])?;
-                cascade_right.process_tile(right_slice, &mut cascade_out_right[..req_out])?;
+                worker_pool.process_tile_pcm(&[left_slice, right_slice])?;
 
-                for &sample in &cascade_out_left[..req_out] {
+                let out_l = worker_pool.channel_pcm(0);
+                let out_r = worker_pool.channel_pcm(1);
+
+                for &sample in out_l {
                     let abs = sample.abs();
                     if abs > max_peak {
                         max_peak = abs;
                     }
                 }
-                for &sample in &cascade_out_right[..req_out] {
+                for &sample in out_r {
                     let abs = sample.abs();
                     if abs > max_peak {
                         max_peak = abs;
@@ -121,25 +117,26 @@ pub fn measure_true_peak_pass1(
     }
 
     // Flush filter group delay with digital silence to capture filter tail overshoots
-    let delay_frames = cascade_left.total_group_delay_output_samples() / mult + 48;
+    let delay_frames = worker_pool.total_group_delay_output_samples() / mult + 48;
     in_left.fill(0.0);
     in_right.fill(0.0);
 
     let mut flushed = 0;
     while flushed < delay_frames {
         let chunk = (delay_frames - flushed).min(tile_size);
-        let req_out = chunk * mult;
 
-        cascade_left.process_tile(&in_left[..chunk], &mut cascade_out_left[..req_out])?;
-        cascade_right.process_tile(&in_right[..chunk], &mut cascade_out_right[..req_out])?;
+        worker_pool.process_tile_pcm(&[&in_left[..chunk], &in_right[..chunk]])?;
 
-        for &sample in &cascade_out_left[..req_out] {
+        let out_l = worker_pool.channel_pcm(0);
+        let out_r = worker_pool.channel_pcm(1);
+
+        for &sample in out_l {
             let abs = sample.abs();
             if abs > max_peak {
                 max_peak = abs;
             }
         }
-        for &sample in &cascade_out_right[..req_out] {
+        for &sample in out_r {
             let abs = sample.abs();
             if abs > max_peak {
                 max_peak = abs;
@@ -148,6 +145,9 @@ pub fn measure_true_peak_pass1(
 
         flushed += chunk;
     }
+
+    // Reset worker pool filters back to initial clean state
+    worker_pool.reset()?;
 
     // Rewind input stream back to timestamp 0 for Pass 2
     input.rewind()?;

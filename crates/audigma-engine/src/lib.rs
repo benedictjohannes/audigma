@@ -17,6 +17,7 @@ pub mod pipeline;
 pub mod queue;
 pub mod tail;
 pub mod traits;
+pub mod worker;
 
 pub use asrc::{AdaptiveClockDriftController, ClockDriftConfig, ClockDriftError};
 pub use lifecycle::{BlockAction, IdleCarrierFormat, LifecycleController, LifecycleState};
@@ -28,3 +29,4 @@ pub use tail::TailManager;
 pub use traits::{
     AudioInput, AudioOutput, DecoderInput, EngineError, MockAudioInput, SeekableSink, StreamSink,
 };
+pub use worker::{ChannelWorkerPool, TargetDsdConfig};

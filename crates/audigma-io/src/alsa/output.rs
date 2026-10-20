@@ -477,11 +477,12 @@ impl Write for AlsaAudioOutput {
             }
 
             let frames_data = &combined[..whole_frames_len];
-            self.write_frames(frames_data)?;
+            let written = self.write_frames(frames_data)?;
 
-            // Store remaining residue
-            self.residue
-                .extend_from_slice(&combined[whole_frames_len..]);
+            // Store remaining residue: unwritten whole frames + unaligned trailing bytes
+            if written < combined.len() {
+                self.residue.extend_from_slice(&combined[written..]);
+            }
             return Ok(buf.len());
         }
 
@@ -493,11 +494,11 @@ impl Write for AlsaAudioOutput {
         }
 
         let frames_data = &buf[..whole_frames_len];
-        self.write_frames(frames_data)?;
+        let written = self.write_frames(frames_data)?;
 
-        // Store any trailing bytes in residue
-        if whole_frames_len < buf.len() {
-            self.residue.extend_from_slice(&buf[whole_frames_len..]);
+        // Store any unwritten bytes in residue
+        if written < buf.len() {
+            self.residue.extend_from_slice(&buf[written..]);
         }
 
         Ok(buf.len())
