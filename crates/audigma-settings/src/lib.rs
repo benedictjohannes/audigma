@@ -2,9 +2,9 @@
 //! preset resolution, and architectural invariant validation (`Design.md §6`).
 
 use audigma_dsp::{
-    Apodization, DitherType, DsdBitRateHz, DsdMultiplier, DspConfiguration, FilterPhase,
-    FilterPreset, OverloadPolicy, PcmRateHz, PresetDefinition, RateFamily, SampleFormat,
-    StreamSpec, TargetFormat, TargetRateSpec, presets,
+    Apodization, DitherType, DsdMultiplier, DspConfiguration, FilterPhase, FilterPreset,
+    OverloadPolicy, PcmRateHz, PresetDefinition, RateFamily, SampleFormat, StreamSpec,
+    TargetFormat, TargetRateSpec, presets,
 };
 use audigma_format::DsfPadMode;
 use serde::{Deserialize, Serialize};
@@ -98,14 +98,41 @@ impl OutputContainer {
     }
 }
 
-/// `[target] rate_policy` options (`Design.md §3.2`, `§6.2`).
+/// `[target] rate_family` options (`Design.md §1.1`, `§6.2`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum RatePolicy {
+pub enum TargetRateFamily {
     #[default]
-    #[serde(rename = "fixed")]
-    Fixed,
-    #[serde(rename = "source-family")]
-    SourceFamily,
+    #[serde(rename = "source", alias = "source-family")]
+    Source,
+    #[serde(rename = "44100")]
+    Hz44100,
+    #[serde(rename = "48000")]
+    Hz48000,
+}
+
+impl TargetRateFamily {
+    /// Resolves the concrete clock family for a given input clock family.
+    #[inline]
+    pub const fn resolve_family(self, input_family: RateFamily) -> RateFamily {
+        match self {
+            Self::Source => match input_family {
+                RateFamily::Hz44100 => RateFamily::Hz44100,
+                RateFamily::Hz48000 | RateFamily::Other => RateFamily::Hz48000,
+            },
+            Self::Hz44100 => RateFamily::Hz44100,
+            Self::Hz48000 => RateFamily::Hz48000,
+        }
+    }
+}
+
+impl std::fmt::Display for TargetRateFamily {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Source => write!(f, "source"),
+            Self::Hz44100 => write!(f, "44100"),
+            Self::Hz48000 => write!(f, "48000"),
+        }
+    }
 }
 
 /// `[gain] headroom` options (`Design.md §6.2`).
@@ -327,15 +354,9 @@ impl OutputConfig {
 pub struct TargetConfig {
     pub format: TargetFormat,
     #[serde(default)]
-    pub rate_policy: RatePolicy,
+    pub rate_family: TargetRateFamily,
     pub pcm_rate_hz: Option<PcmRateHz>,
-    pub pcm_rate_44100_hz: Option<PcmRateHz>,
-    pub pcm_rate_48000_hz: Option<PcmRateHz>,
     pub dsd_rate: Option<DsdMultiplier>,
-    #[serde(default)]
-    pub dsd_bit_rate_hz: Option<DsdBitRateHz>,
-    pub dsd_bit_rate_44100_hz: Option<DsdBitRateHz>,
-    pub dsd_bit_rate_48000_hz: Option<DsdBitRateHz>,
     pub sample_format: Option<SampleFormat>,
     pub valid_bits: Option<u8>,
     pub dither: Option<DitherType>,
@@ -441,9 +462,8 @@ pub struct OfflineConfig {
 #[serde(deny_unknown_fields)]
 pub struct RuleTargetOverride {
     pub format: TargetFormat,
+    pub rate_family: Option<TargetRateFamily>,
     pub dsd_rate: Option<DsdMultiplier>,
-    #[serde(default)]
-    pub dsd_bit_rate_hz: Option<DsdBitRateHz>,
     pub pcm_rate_hz: Option<PcmRateHz>,
     pub sample_format: Option<SampleFormat>,
     pub valid_bits: Option<u8>,
@@ -526,14 +546,9 @@ impl Settings {
                 }),
                 target: Some(TargetConfig {
                     format: TargetFormat::Dsd,
-                    rate_policy: RatePolicy::Fixed,
+                    rate_family: TargetRateFamily::Hz44100,
                     pcm_rate_hz: None,
-                    pcm_rate_44100_hz: None,
-                    pcm_rate_48000_hz: None,
                     dsd_rate: Some(DsdMultiplier::Dsd256),
-                    dsd_bit_rate_hz: None,
-                    dsd_bit_rate_44100_hz: None,
-                    dsd_bit_rate_48000_hz: None,
                     sample_format: None,
                     valid_bits: None,
                     dither: None,
@@ -591,14 +606,9 @@ impl Settings {
                 }),
                 target: Some(TargetConfig {
                     format: TargetFormat::Pcm,
-                    rate_policy: RatePolicy::Fixed,
+                    rate_family: TargetRateFamily::Hz48000,
                     pcm_rate_hz: Some(PcmRateHz::PCM_192000),
-                    pcm_rate_44100_hz: None,
-                    pcm_rate_48000_hz: None,
                     dsd_rate: None,
-                    dsd_bit_rate_hz: None,
-                    dsd_bit_rate_44100_hz: None,
-                    dsd_bit_rate_48000_hz: None,
                     sample_format: Some(SampleFormat::S32Le),
                     valid_bits: Some(24),
                     dither: Some(DitherType::Tpdf),
@@ -656,14 +666,9 @@ impl Settings {
                 }),
                 target: Some(TargetConfig {
                     format: TargetFormat::Pcm,
-                    rate_policy: RatePolicy::Fixed,
+                    rate_family: TargetRateFamily::Hz48000,
                     pcm_rate_hz: Some(PcmRateHz::PCM_96000),
-                    pcm_rate_44100_hz: None,
-                    pcm_rate_48000_hz: None,
                     dsd_rate: None,
-                    dsd_bit_rate_hz: None,
-                    dsd_bit_rate_44100_hz: None,
-                    dsd_bit_rate_48000_hz: None,
                     sample_format: Some(SampleFormat::S24Le),
                     valid_bits: Some(24),
                     dither: Some(DitherType::Tpdf),
@@ -721,14 +726,9 @@ impl Settings {
                 }),
                 target: Some(TargetConfig {
                     format: TargetFormat::Dsd,
-                    rate_policy: RatePolicy::Fixed,
+                    rate_family: TargetRateFamily::Hz44100,
                     pcm_rate_hz: None,
-                    pcm_rate_44100_hz: None,
-                    pcm_rate_48000_hz: None,
                     dsd_rate: Some(DsdMultiplier::Dsd128),
-                    dsd_bit_rate_hz: None,
-                    dsd_bit_rate_44100_hz: None,
-                    dsd_bit_rate_48000_hz: None,
                     sample_format: None,
                     valid_bits: None,
                     dither: None,
@@ -869,36 +869,18 @@ impl Settings {
 
         // Validate [target] rate fields
         if let Some(target) = &self.target {
-            match (target.format, target.rate_policy) {
-                (TargetFormat::Pcm, RatePolicy::Fixed) => {
+            match target.format {
+                TargetFormat::Pcm => {
                     if target.pcm_rate_hz.is_none() {
                         return Err(SettingsError::Validation(
-                            "[target] format = \"pcm\" with rate_policy = \"fixed\" requires pcm_rate_hz",
+                            "[target] format = \"pcm\" requires pcm_rate_hz",
                         ));
                     }
                 }
-                (TargetFormat::Pcm, RatePolicy::SourceFamily) => {
-                    if target.pcm_rate_44100_hz.is_none() || target.pcm_rate_48000_hz.is_none() {
+                TargetFormat::Dsd => {
+                    if target.dsd_rate.is_none() {
                         return Err(SettingsError::Validation(
-                            "[target] format = \"pcm\" with rate_policy = \"source-family\" requires pcm_rate_44100_hz and pcm_rate_48000_hz",
-                        ));
-                    }
-                }
-                (TargetFormat::Dsd, RatePolicy::Fixed) => {
-                    if target.dsd_rate.is_none() && target.dsd_bit_rate_hz.is_none() {
-                        return Err(SettingsError::Validation(
-                            "[target] format = \"dsd\" with rate_policy = \"fixed\" requires dsd_rate (or dsd_bit_rate_hz)",
-                        ));
-                    }
-                }
-                (TargetFormat::Dsd, RatePolicy::SourceFamily) => {
-                    if target.dsd_rate.is_none()
-                        && target.dsd_bit_rate_44100_hz.is_none()
-                        && target.dsd_bit_rate_48000_hz.is_none()
-                        && target.dsd_bit_rate_hz.is_none()
-                    {
-                        return Err(SettingsError::Validation(
-                            "[target] format = \"dsd\" with rate_policy = \"source-family\" requires dsd_rate or DSD bit rate specifications",
+                            "[target] format = \"dsd\" requires dsd_rate",
                         ));
                     }
                 }
@@ -923,7 +905,7 @@ impl Settings {
         warnings
     }
 
-    /// Evaluates `[[rules]]` in first-match order (or falls back to `[target]` + `rate_policy`)
+    /// Evaluates `[[rules]]` in first-match order (or falls back to `[target]` + `rate_family`)
     /// to resolve the concrete `PresetDefinition`, `StreamSpec`, and `DspConfiguration` (`Design.md §6.1`).
     pub fn explain_for_input_rate(
         &self,
@@ -943,19 +925,37 @@ impl Settings {
             let preset_def = presets::by_preset(rule.apply_preset);
             let target_spec = match rule.set_target.format {
                 TargetFormat::Dsd => {
-                    let bit_rate = rule
+                    let multiplier = rule
                         .set_target
                         .dsd_rate
-                        .and_then(|m| m.to_bit_rate(input_family))
-                        .or(rule.set_target.dsd_bit_rate_hz)
+                        .ok_or(SettingsError::UnresolvedTargetRate(input_rate))?;
+                    let family = rule
+                        .set_target
+                        .rate_family
+                        .unwrap_or(TargetRateFamily::Source)
+                        .resolve_family(input_family);
+                    let bit_rate = multiplier
+                        .to_bit_rate(family)
                         .ok_or(SettingsError::UnresolvedTargetRate(input_rate))?;
                     TargetRateSpec::Dsd { bit_rate }
                 }
                 TargetFormat::Pcm => {
-                    let rate = rule
+                    let base_rate = rule
                         .set_target
                         .pcm_rate_hz
                         .ok_or(SettingsError::UnresolvedTargetRate(input_rate))?;
+                    let family = rule
+                        .set_target
+                        .rate_family
+                        .unwrap_or(TargetRateFamily::Source)
+                        .resolve_family(input_family);
+                    let rate = if base_rate.rate_family() == family {
+                        base_rate
+                    } else {
+                        base_rate
+                            .corresponding_rate_in_family(family)
+                            .ok_or(SettingsError::UnresolvedTargetRate(input_rate))?
+                    };
                     TargetRateSpec::Pcm {
                         rate,
                         sample_format: rule.set_target.sample_format.unwrap_or(SampleFormat::F32),
@@ -986,52 +986,39 @@ impl Settings {
             });
         }
 
-        // 2. Fallback to [target] + rate_policy
+        // 2. Fallback to [target] + rate_family
         let target = self
             .target
             .as_ref()
             .ok_or(SettingsError::UnresolvedTargetRate(input_rate))?;
         let preset_def = presets::by_preset(resampler.preset);
 
-        let target_spec = match (target.format, target.rate_policy) {
-            (TargetFormat::Pcm, RatePolicy::Fixed) => TargetRateSpec::Pcm {
-                rate: target
+        let target_spec = match target.format {
+            TargetFormat::Pcm => {
+                let base_rate = target
                     .pcm_rate_hz
-                    .ok_or(SettingsError::UnresolvedTargetRate(input_rate))?,
-                sample_format: target.sample_format.unwrap_or(SampleFormat::F32),
-                valid_bits: target.valid_bits,
-            },
-            (TargetFormat::Pcm, RatePolicy::SourceFamily) => {
-                let rate = match input_family {
-                    RateFamily::Hz44100 => target.pcm_rate_44100_hz,
-                    RateFamily::Hz48000 | RateFamily::Other => target.pcm_rate_48000_hz,
-                }
-                .ok_or(SettingsError::UnresolvedTargetRate(input_rate))?;
+                    .ok_or(SettingsError::UnresolvedTargetRate(input_rate))?;
+                let family = target.rate_family.resolve_family(input_family);
+                let rate = if base_rate.rate_family() == family {
+                    base_rate
+                } else {
+                    base_rate
+                        .corresponding_rate_in_family(family)
+                        .ok_or(SettingsError::UnresolvedTargetRate(input_rate))?
+                };
                 TargetRateSpec::Pcm {
                     rate,
                     sample_format: target.sample_format.unwrap_or(SampleFormat::S32Le),
                     valid_bits: target.valid_bits,
                 }
             }
-            (TargetFormat::Dsd, RatePolicy::Fixed) => TargetRateSpec::Dsd {
-                bit_rate: target
+            TargetFormat::Dsd => {
+                let multiplier = target
                     .dsd_rate
-                    .and_then(|m| m.to_bit_rate(RateFamily::Hz44100))
-                    .or(target.dsd_bit_rate_hz)
-                    .ok_or(SettingsError::UnresolvedTargetRate(input_rate))?,
-            },
-            (TargetFormat::Dsd, RatePolicy::SourceFamily) => {
-                let bit_rate = target
-                    .dsd_rate
-                    .and_then(|m| m.to_bit_rate(input_family))
-                    .or_else(|| match input_family {
-                        RateFamily::Hz44100 => {
-                            target.dsd_bit_rate_44100_hz.or(target.dsd_bit_rate_hz)
-                        }
-                        RateFamily::Hz48000 | RateFamily::Other => {
-                            target.dsd_bit_rate_48000_hz.or(target.dsd_bit_rate_hz)
-                        }
-                    })
+                    .ok_or(SettingsError::UnresolvedTargetRate(input_rate))?;
+                let family = target.rate_family.resolve_family(input_family);
+                let bit_rate = multiplier
+                    .to_bit_rate(family)
                     .ok_or(SettingsError::UnresolvedTargetRate(input_rate))?;
                 TargetRateSpec::Dsd { bit_rate }
             }
@@ -1069,6 +1056,7 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use audigma_dsp::DsdBitRateHz;
 
     #[test]
     fn test_design_md_section_6_1_rules_fixture() {
@@ -1134,7 +1122,7 @@ keep_audio_sink_ms = 5000
 
 [target]
 format = "pcm"
-rate_policy = "fixed"
+rate_family = "48000"
 pcm_rate_hz = 192000
 sample_format = "f32"
 
@@ -1207,7 +1195,7 @@ period_ms = 5
 
 [target]
 format = "dsd"
-rate_policy = "fixed"
+rate_family = "44100"
 dsd_rate = "dsd256"
 
 [gain]
@@ -1272,9 +1260,8 @@ period_ms = 5
 
 [target]
 format = "pcm"
-rate_policy = "source-family"
-pcm_rate_44100_hz = 705600
-pcm_rate_48000_hz = 768000
+rate_family = "source"
+pcm_rate_hz = 768000
 sample_format = "s32le"
 valid_bits = 24
 dither = "tpdf"
@@ -1332,7 +1319,7 @@ container = "dsf"
 
 [target]
 format = "dsd"
-rate_policy = "fixed"
+rate_family = "44100"
 dsd_rate = "dsd256"
 
 [gain]
@@ -1385,7 +1372,7 @@ sample_format = "s24_3le"
 
 [target]
 format = "dsd"
-rate_policy = "fixed"
+rate_family = "44100"
 dsd_rate = "dsd128"
 
 [gain]
@@ -1420,8 +1407,8 @@ schema_version = 1
 backend = "pipewire"
 [target]
 format = "dsd"
-rate_policy = "fixed"
-dsd_bit_rate_hz = 2822400
+rate_family = "44100"
+dsd_rate = "dsd64"
 "#;
         assert!(Settings::from_toml_str(dsd_over_pw).is_err());
 
@@ -1432,8 +1419,8 @@ backend = "stdio"
 container = "dsf"
 [target]
 format = "dsd"
-rate_policy = "fixed"
-dsd_bit_rate_hz = 2822400
+rate_family = "44100"
+dsd_rate = "dsd64"
 "#;
         assert!(Settings::from_toml_str(stdout_dsf).is_err());
     }
@@ -1453,7 +1440,7 @@ sample_format = "s24le"
 
 [target]
 format = "pcm"
-rate_policy = "fixed"
+rate_family = "48000"
 pcm_rate_hz = 192000
 sample_format = "s24le"
 valid_bits = 24
@@ -1513,8 +1500,8 @@ backend = "file"
 container = "flac"
 [target]
 format = "dsd"
-rate_policy = "fixed"
-dsd_bit_rate_hz = 11289600
+rate_family = "44100"
+dsd_rate = "dsd256"
 "#;
         assert!(Settings::from_toml_str(flac_dsd).is_err());
 
@@ -1525,10 +1512,44 @@ backend = "file"
 container = "dsf"
 [target]
 format = "pcm"
-rate_policy = "fixed"
+rate_family = "48000"
 pcm_rate_hz = 192000
 "#;
         assert!(Settings::from_toml_str(dsf_pcm).is_err());
+    }
+
+    #[test]
+    fn test_rejects_unknown_field_dsd_bit_rate_hz() {
+        let legacy_toml = r#"
+schema_version = 1
+[target]
+format = "dsd"
+rate_family = "44100"
+dsd_bit_rate_hz = 11289600
+"#;
+        let err = Settings::from_toml_str(legacy_toml).unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("unknown field `dsd_bit_rate_hz`"),
+            "Expected unknown field error for dsd_bit_rate_hz, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_rejects_unknown_field_rate_policy() {
+        let legacy_toml = r#"
+schema_version = 1
+[target]
+format = "dsd"
+rate_policy = "source-family"
+dsd_rate = "dsd256"
+"#;
+        let err = Settings::from_toml_str(legacy_toml).unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("unknown field `rate_policy`"),
+            "Expected unknown field error for rate_policy, got: {err_msg}"
+        );
     }
 
     #[test]
@@ -1781,16 +1802,16 @@ pcm_rate_hz = 192000
 
     #[test]
     fn test_dsd_rate_symbolic_multipliers_and_source_family() {
-        // Test fixed policy with dsd_rate = "dsd256"
-        let fixed_dsd = r#"
+        // Test fixed 44100 family with dsd_rate = "dsd256"
+        let fixed_dsd_44 = r#"
 schema_version = 1
 [target]
 format = "dsd"
-rate_policy = "fixed"
+rate_family = "44100"
 dsd_rate = "dsd256"
 "#;
-        let fixed_settings = Settings::from_toml_str(fixed_dsd).unwrap();
-        let plan_44 = fixed_settings
+        let settings_44 = Settings::from_toml_str(fixed_dsd_44).unwrap();
+        let plan_44 = settings_44
             .explain_for_input_rate(PcmRateHz::PCM_44100)
             .unwrap();
         assert_eq!(
@@ -1799,13 +1820,50 @@ dsd_rate = "dsd256"
                 bit_rate: DsdBitRateHz::DSD256
             }
         );
+        let plan_44_from_48 = settings_44
+            .explain_for_input_rate(PcmRateHz::PCM_48000)
+            .unwrap();
+        assert_eq!(
+            plan_44_from_48.stream_spec.target,
+            TargetRateSpec::Dsd {
+                bit_rate: DsdBitRateHz::DSD256
+            }
+        );
 
-        // Test source-family policy with dsd_rate = "dsd256"
+        // Test fixed 48000 family with dsd_rate = "dsd256"
+        let fixed_dsd_48 = r#"
+schema_version = 1
+[target]
+format = "dsd"
+rate_family = "48000"
+dsd_rate = "dsd256"
+"#;
+        let settings_48 = Settings::from_toml_str(fixed_dsd_48).unwrap();
+        let plan_48 = settings_48
+            .explain_for_input_rate(PcmRateHz::PCM_48000)
+            .unwrap();
+        assert_eq!(
+            plan_48.stream_spec.target,
+            TargetRateSpec::Dsd {
+                bit_rate: DsdBitRateHz::DSD256_48
+            }
+        );
+        let plan_48_from_44 = settings_48
+            .explain_for_input_rate(PcmRateHz::PCM_44100)
+            .unwrap();
+        assert_eq!(
+            plan_48_from_44.stream_spec.target,
+            TargetRateSpec::Dsd {
+                bit_rate: DsdBitRateHz::DSD256_48
+            }
+        );
+
+        // Test explicit rate_family = "source" with dsd_rate = "dsd256"
         let family_dsd = r#"
 schema_version = 1
 [target]
 format = "dsd"
-rate_policy = "source-family"
+rate_family = "source"
 dsd_rate = "dsd256"
 "#;
         let family_settings = Settings::from_toml_str(family_dsd).unwrap();
@@ -1828,6 +1886,39 @@ dsd_rate = "dsd256"
             }
         );
 
+        // Test default rate_family (omitted) defaults to "source"
+        let default_dsd = r#"
+schema_version = 1
+[target]
+format = "dsd"
+dsd_rate = "dsd256"
+"#;
+        let def_settings = Settings::from_toml_str(default_dsd).unwrap();
+        assert_eq!(
+            def_settings.target.as_ref().unwrap().rate_family,
+            TargetRateFamily::Source
+        );
+        assert_eq!(
+            def_settings
+                .explain_for_input_rate(PcmRateHz::PCM_44100)
+                .unwrap()
+                .stream_spec
+                .target,
+            TargetRateSpec::Dsd {
+                bit_rate: DsdBitRateHz::DSD256
+            }
+        );
+        assert_eq!(
+            def_settings
+                .explain_for_input_rate(PcmRateHz::PCM_48000)
+                .unwrap()
+                .stream_spec
+                .target,
+            TargetRateSpec::Dsd {
+                bit_rate: DsdBitRateHz::DSD256_48
+            }
+        );
+
         // Test other multipliers
         for (rate_str, expected_44, expected_48) in [
             ("dsd64", DsdBitRateHz::DSD64, DsdBitRateHz::DSD64_48),
@@ -1839,7 +1930,7 @@ dsd_rate = "dsd256"
 schema_version = 1
 [target]
 format = "dsd"
-rate_policy = "source-family"
+rate_family = "source"
 dsd_rate = "{rate_str}"
 "#
             );
@@ -1859,6 +1950,78 @@ dsd_rate = "{rate_str}"
                 }
             );
         }
+    }
+
+    #[test]
+    fn test_pcm_rate_tier_matching_with_rate_family() {
+        // Given pcm_rate_hz = 768000 (16x 48k) with rate_family = "source":
+        let toml_source = r#"
+schema_version = 1
+[target]
+format = "pcm"
+rate_family = "source"
+pcm_rate_hz = 768000
+"#;
+        let s_source = Settings::from_toml_str(toml_source).unwrap();
+        // 44.1k input automatically resolves to 16x 44.1k = 705.6k
+        let p44 = s_source
+            .explain_for_input_rate(PcmRateHz::PCM_44100)
+            .unwrap();
+        assert_eq!(
+            p44.stream_spec.target,
+            TargetRateSpec::Pcm {
+                rate: PcmRateHz::PCM_705600,
+                sample_format: SampleFormat::S32Le,
+                valid_bits: None,
+            }
+        );
+        // 48k input automatically resolves to 16x 48k = 768k
+        let p48 = s_source
+            .explain_for_input_rate(PcmRateHz::PCM_48000)
+            .unwrap();
+        assert_eq!(
+            p48.stream_spec.target,
+            TargetRateSpec::Pcm {
+                rate: PcmRateHz::PCM_768000,
+                sample_format: SampleFormat::S32Le,
+                valid_bits: None,
+            }
+        );
+
+        // Fixed 44100 family with pcm_rate_hz = 192000 (4x):
+        // Automatically maps 4x to 176.4k and locks regardless of input rate
+        let toml_fixed_44 = r#"
+schema_version = 1
+[target]
+format = "pcm"
+rate_family = "44100"
+pcm_rate_hz = 192000
+"#;
+        let s_fixed = Settings::from_toml_str(toml_fixed_44).unwrap();
+        assert_eq!(
+            s_fixed
+                .explain_for_input_rate(PcmRateHz::PCM_48000)
+                .unwrap()
+                .stream_spec
+                .target,
+            TargetRateSpec::Pcm {
+                rate: PcmRateHz::PCM_176400,
+                sample_format: SampleFormat::S32Le,
+                valid_bits: None,
+            }
+        );
+        assert_eq!(
+            s_fixed
+                .explain_for_input_rate(PcmRateHz::PCM_44100)
+                .unwrap()
+                .stream_spec
+                .target,
+            TargetRateSpec::Pcm {
+                rate: PcmRateHz::PCM_176400,
+                sample_format: SampleFormat::S32Le,
+                valid_bits: None,
+            }
+        );
     }
 
     #[test]

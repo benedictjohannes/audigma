@@ -106,19 +106,19 @@ examples/                 # Ready-to-use TOML configs, MPD snippets, and WirePlu
    - Reads a file (`WAV`/`FLAC`) or `stdin` (`raw`), runs synchronous DSP without hardware clock tracking, and writes `.dsf`, high-rate `.wav`, or raw DoP/PCM to `stdout`.
    - Supports deterministic seeding, two-pass true-peak headroom analysis, and exact sample-count duration trimming.
 
-### 3.2 Two Rate Policies (`[target] rate_policy`) & Dynamic Multi-Rate Negotiation
+### 3.2 Clock Family Policies (`[target] rate_family`) & Dynamic Multi-Rate Negotiation
 
-Rather than an artificial "desktop vs. music mode" switch on the input, output rate switching is controlled purely by `[target] rate_policy` (or `[[rules]]`):
+Rather than an artificial "desktop vs. music mode" switch on the input, output clock switching is controlled purely by `[target] rate_family` (or `[[rules]]`):
 
-1. **`rate_policy = "fixed"` (Zero-Relock / Always-On Policy):**
-   - Keeps the output locked at one fixed rate (e.g., always `DSD256` or `PCM 192 kHz`).
-   - For DSD targets, rate is expressed symbolically via `dsd_rate = "dsd64" | "dsd128" | "dsd256" | "dsd512"`, resolving to the standard 44.1 kHz-family bit rate (e.g., `11.2896 MHz` for `dsd256`).
-   - Any input rate (`44.1 kHz` or `48 kHz` family) is seamlessly converted into that single target rate via the polyphase SRC + $2\times$ FIR cascade.
-   - Ideal when mixing desktop audio or switching between apps/tracks without triggering DAC hardware relay clicks or relock delays.
+1. **`rate_family = "44100"` or `"48000"` (Zero-Relock / Pinned Clock Policy):**
+   - Keeps the DAC hardware clock permanently locked at that family (e.g. `11.2896 MHz` for `dsd256` under `"44100"`, or `12.288 MHz` under `"48000"`; for PCM, locked to `pcm_rate_hz`).
+   - Any input rate from the other clock family is seamlessly bridged into that single target clock via polyphase rational SRC + $2\times$ FIR cascade.
+   - Ideal for general desktop listening to eliminate DAC hardware relay clicks or relock delays when switching between browser, Spotify, and videos.
 
-2. **`rate_policy = "source-family"` (Family-Preserving Policy):**
+2. **`rate_family = "source"` (Family-Preserving Dynamic Policy - Default):**
    - Dynamically switches the output rate between its `44.1 kHz`-family target (e.g., `705.6 kHz` / `DSD256-44.1`) and `48 kHz`-family target (e.g., `768 kHz` / `DSD256-48`) whenever the input stream changes rate family.
-   - For DSD targets, symbolic `dsd_rate = "dsd256"` automatically resolves to `11.2896 MHz` for 44.1 kHz-family inputs and `12.288 MHz` for 48 kHz-family inputs, eliminating raw frequency misconfiguration.
+   - For DSD targets, symbolic `dsd_rate = "dsd256"` automatically resolves to `11.2896 MHz` for 44.1 kHz-family inputs and `12.288 MHz` for 48 kHz-family inputs.
+   - For PCM targets, `pcm_rate_hz` automatically matches the oversampling tier (e.g. `768000` for 48k matches to `705600` for 44.1k via automatic tier matching).
    - Avoids cross-family rational SRC so upsampling uses pure $2^K$ half-band FIR stages (plus low-rate ASRC drift tracking when driving an independent ALSA clock).
 
 3. **Dynamic Multi-Rate PipeWire Virtual Sink (`[input] rate_mode = "dynamic"`):**
@@ -267,8 +267,8 @@ The engine state machine runs through:
 
 Configuration lives at `$XDG_CONFIG_HOME/audigma/config.toml` (default `~/.config/audigma/config.toml`). Unknown keys or invalid cross-field combinations are rejected by `audigma config check`.
 
-### 6.1 Rule-Based Selection (`[[rules]]`) vs. `rate_policy`
-`[[rules]]` evaluates in first-match order based on observed input rate/format and resolves into an explicit preset and target configuration. `rate_policy = "source-family"` is convenient shorthand that lowers into the same rule resolver:
+### 6.1 Rule-Based Selection (`[[rules]]`) vs. `rate_family`
+`[[rules]]` evaluates in first-match order based on observed input rate/format and resolves into an explicit preset and target configuration. `rate_family = "source"` is convenient shorthand that lowers into the same rule resolver:
 
 ```toml
 schema_version = 1
@@ -308,7 +308,7 @@ keep_audio_sink_ms = 5000
 
 [target]
 format = "pcm"
-rate_policy = "fixed"
+rate_family = "48000"
 pcm_rate_hz = 192000
 sample_format = "f32"
 
@@ -355,7 +355,7 @@ period_ms = 5
 
 [target]
 format = "dsd"
-rate_policy = "fixed"
+rate_family = "44100"
 dsd_rate = "dsd256"
 
 [gain]
@@ -404,9 +404,8 @@ period_ms = 5
 
 [target]
 format = "pcm"
-rate_policy = "source-family"
-pcm_rate_44100_hz = 705600
-pcm_rate_48000_hz = 768000
+rate_family = "source"
+pcm_rate_hz = 768000
 sample_format = "s32le"
 valid_bits = 24
 dither = "tpdf"
@@ -438,7 +437,7 @@ container = "dsf"
 
 [target]
 format = "dsd"
-rate_policy = "fixed"
+rate_family = "44100"
 dsd_rate = "dsd256"
 
 [gain]
@@ -480,7 +479,7 @@ sample_format = "s24_3le"
 
 [target]
 format = "dsd"
-rate_policy = "fixed"
+rate_family = "44100"
 dsd_rate = "dsd128"
 
 [gain]
@@ -521,10 +520,10 @@ audigma doctor [--fix] [--json]
 
 - **`audigma play`:** Direct file/stream playback to an exclusive ALSA hardware endpoint. Supports immediate ergonomic overrides (`-d device`, `-p preset`, `-v volume_db`) and generic ad-hoc configuration overrides (`-o key=value`, e.g. `-o output.transport=dop -o output.buffer_ms=25`) which take precedence over the specified or default `config.toml`.
 - **`audigma run` & `audigma stop`:** `run` executes the live audio pipeline in the foreground (intended for `systemd --user` service or direct terminal invocation). `audigma stop` connects to the local control socket and requests an orderly shutdown: ramping PCM gain to zero, draining filter group delays, emitting the balanced DSD idle sequence, releasing the D-Bus `ReserveDevice1` device lock so PipeWire/WirePlumber immediately reclaims the DAC, and terminating the daemon.
-- **`audigma configure` (`audigma-configurator`):** Interactive TUI (`--tui`, default) or temporary localhost Web wizard (`--web`, bound to `127.0.0.1:<port>` with a one-time session token that exits cleanly on save). Walks the user through selecting an output path (PipeWire PCM upsampler vs. Exclusive ALSA PCM/DSD), choosing a rate policy (`fixed` vs. `source-family`), running a quick CPU benchmark, previewing headroom/latency, and writing `config.toml` + optional WirePlumber/systemd user snippets.
+- **`audigma configure` (`audigma-configurator`):** Interactive TUI (`--tui`, default) or temporary localhost Web wizard (`--web`, bound to `127.0.0.1:<port>` with a one-time session token that exits cleanly on save). Walks the user through selecting an output path (PipeWire PCM upsampler vs. Exclusive ALSA PCM/DSD), choosing a rate family policy (`"source"` vs. `"44100"` / `"48000"`), running a quick CPU benchmark, previewing headroom/latency, and writing `config.toml` + optional WirePlumber/systemd user snippets.
 - **`audigma doctor [--fix]` (`audigma-doctor`):** Inspects the host OS audio stack and diagnoses runtime issues:
   1. *ALSA Device Lockouts:* Inspects `/dev/snd/pcmC*D*p` file descriptor holders. If held by WirePlumber/PipeWire, `--fix` can dynamically invoke `wpctl set-profile <id> 0` or offer to write a permanent WirePlumber drop-in rule in `~/.config/wireplumber/`. If held by a foreign user or daemon (such as MPD), `--fix` interactively prompts the user before terminating the process, escalating to `sudo` if permissions are insufficient, or printing the exact command required.
-  2. *PipeWire Multi-Rate Configuration:* Checks `default.clock.allowed-rates` in PipeWire when `rate_policy = "source-family"` is active on a PipeWire virtual sink, warning and offering to install the required multi-rate configuration drop-in if the graph is pinned to a single rate (e.g. `48000`).
+  2. *PipeWire Multi-Rate Configuration:* Checks `default.clock.allowed-rates` in PipeWire when `rate_family = "source"` is active on a PipeWire virtual sink, warning and offering to install the required multi-rate configuration drop-in if the graph is pinned to a single rate (e.g. `48000`).
   3. *Real-Time Scheduling Limits:* Verifies `RLIMIT_RTPRIO` / RTKit availability for real-time DSP threads.
 - **Control Socket & Telemetry Protocol (`audigma status`):** Operates over a local Unix domain socket at `$XDG_RUNTIME_DIR/audigma/control.sock`. Runtime telemetry exported via `status [--watch] [--json]` exposes:
   - Input negotiated format/rate, PipeWire graph rate, and active channel positions.

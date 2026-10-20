@@ -238,7 +238,7 @@ Cloned local reference repositories kept in [`references/`](references/) (ignore
 - **Scope & Tasks:**
   1. Implement `audigma-doctor` with a platform diagnostic trait (`DiagnosticProvider`):
      - Linux ALSA device lock inspection (`/dev/snd/pcm*` file descriptor queries).
-     - PipeWire multi-rate clock inspection (`default.clock.allowed-rates`) when `rate_policy = "source-family"` is active.
+     - PipeWire multi-rate clock inspection (`default.clock.allowed-rates`) when `rate_family = "source"` is active.
      - Linux `RLIMIT_RTPRIO` / RTKit real-time priority diagnostics.
   2. Implement interactive remediation (`audigma doctor --fix`):
      - If PipeWire/WirePlumber holds an ALSA device needed for exclusive DSD: dynamically call `wpctl set-profile <id> 0` or offer to write a permanent WirePlumber drop-in rule in `~/.config/wireplumber/`.

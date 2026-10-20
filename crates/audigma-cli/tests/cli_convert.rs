@@ -42,8 +42,8 @@ schema_version = 1
 
 [target]
 format = "dsd"
-rate_policy = "fixed"
-dsd_bit_rate_hz = 11289600
+rate_family = "44100"
+dsd_rate = "dsd256"
 
 [resampler]
 preset = "reference"
@@ -95,8 +95,8 @@ container = "dsf"
 
 [target]
 format = "dsd"
-rate_policy = "fixed"
-dsd_bit_rate_hz = 11289600
+rate_family = "44100"
+dsd_rate = "dsd256"
 "#;
     let mut f = File::create(&cfg_path).unwrap();
     f.write_all(toml.as_bytes()).unwrap();
