@@ -52,6 +52,30 @@ pub trait AudioInput: Send {
     /// Returns `Ok(frames_read)`. Returns `Ok(0)` when end-of-stream (EOF) is reached.
     fn read_stereo(&mut self, left: &mut [f64], right: &mut [f64]) -> Result<usize, EngineError>;
 
+    /// Reads up to `channels[0].len()` multi-channel PCM frames (normalized in `[-1.0, 1.0]`).
+    fn read_channels(&mut self, channels: &mut [&mut [f64]]) -> Result<usize, EngineError> {
+        if channels.len() == 2 {
+            let (first, second) = channels.split_at_mut(1);
+            self.read_stereo(first[0], second[0])
+        } else {
+            Err(EngineError::Pipeline(format!(
+                "audio input driver does not support {} channels",
+                channels.len()
+            )))
+        }
+    }
+
+    /// Checks if a dynamic input sample rate change has been negotiated.
+    fn check_rate_change(&self) -> Option<audigma_dsp::PcmRateHz> {
+        None
+    }
+
+    /// Sets the active generation tag for input buffer filtering.
+    fn set_generation(&mut self, _gen: u64) {}
+
+    /// Updates the active sample rate acknowledged by the pipeline.
+    fn set_active_rate(&mut self, _rate: audigma_dsp::PcmRateHz) {}
+
     /// Returns `true` if the input stream supports rewinding for two-pass processing.
     fn can_rewind(&self) -> bool;
 
@@ -237,10 +261,11 @@ impl AudioInput for DecoderInput {
 /// In-memory mock audio input stream for unit testing.
 pub struct MockAudioInput {
     info: AudioStreamInfo,
-    left: Vec<f64>,
-    right: Vec<f64>,
+    channels: Vec<Vec<f64>>,
     pos: usize,
     allow_rewind: bool,
+    pending_rate: Option<audigma_dsp::PcmRateHz>,
+    generation: u64,
 }
 
 impl MockAudioInput {
@@ -253,11 +278,39 @@ impl MockAudioInput {
         );
         Self {
             info,
-            left,
-            right,
+            channels: vec![left, right],
             pos: 0,
             allow_rewind,
+            pending_rate: None,
+            generation: 1,
         }
+    }
+
+    /// Creates a new in-memory `MockAudioInput` with arbitrary channel count.
+    pub fn new_multichannel(
+        info: AudioStreamInfo,
+        channels: Vec<Vec<f64>>,
+        allow_rewind: bool,
+    ) -> Self {
+        if !channels.is_empty() {
+            let len = channels[0].len();
+            for ch in &channels {
+                assert_eq!(ch.len(), len, "all channel lengths must match");
+            }
+        }
+        Self {
+            info,
+            channels,
+            pos: 0,
+            allow_rewind,
+            pending_rate: None,
+            generation: 1,
+        }
+    }
+
+    /// Simulates a dynamic sample rate change from upstream.
+    pub fn simulate_rate_change(&mut self, new_rate: audigma_dsp::PcmRateHz) {
+        self.pending_rate = Some(new_rate);
     }
 }
 
@@ -267,23 +320,45 @@ impl AudioInput for MockAudioInput {
     }
 
     fn read_stereo(&mut self, left: &mut [f64], right: &mut [f64]) -> Result<usize, EngineError> {
-        assert_eq!(
-            left.len(),
-            right.len(),
-            "left and right buffer lengths must match"
-        );
-        if self.pos >= self.left.len() {
+        self.read_channels(&mut [left, right])
+    }
+
+    fn read_channels(&mut self, channels: &mut [&mut [f64]]) -> Result<usize, EngineError> {
+        if channels.is_empty() || self.channels.is_empty() {
+            return Ok(0);
+        }
+        let total_available = self.channels[0].len();
+        if self.pos >= total_available {
             return Ok(0);
         }
 
-        let available = self.left.len() - self.pos;
-        let to_read = available.min(left.len());
+        let max_to_read = channels.iter().map(|s| s.len()).min().unwrap_or(0);
+        let to_read = (total_available - self.pos).min(max_to_read);
 
-        left[..to_read].copy_from_slice(&self.left[self.pos..self.pos + to_read]);
-        right[..to_read].copy_from_slice(&self.right[self.pos..self.pos + to_read]);
+        for (c, ch_slice) in channels.iter_mut().enumerate() {
+            if c < self.channels.len() {
+                ch_slice[..to_read]
+                    .copy_from_slice(&self.channels[c][self.pos..self.pos + to_read]);
+            } else {
+                ch_slice[..to_read].fill(0.0);
+            }
+        }
 
         self.pos += to_read;
         Ok(to_read)
+    }
+
+    fn check_rate_change(&self) -> Option<audigma_dsp::PcmRateHz> {
+        self.pending_rate
+    }
+
+    fn set_generation(&mut self, generation_tag: u64) {
+        self.generation = generation_tag;
+    }
+
+    fn set_active_rate(&mut self, rate: audigma_dsp::PcmRateHz) {
+        self.info.sample_rate = rate;
+        self.pending_rate = None;
     }
 
     fn can_rewind(&self) -> bool {

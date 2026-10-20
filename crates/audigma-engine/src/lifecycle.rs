@@ -247,13 +247,13 @@ impl LifecycleController {
         self.current_gain = 0.0;
     }
 
-    /// Processes a block of input PCM frames, applying smooth pre-SRC gain ramping,
-    /// muting, or tail flushing.
-    ///
-    /// Slices `left` and `right` must have equal length.
-    pub fn process_input_block(&mut self, left: &mut [f64], right: &mut [f64]) -> BlockAction {
-        assert_eq!(left.len(), right.len());
-        let num_frames = left.len();
+    /// Processes a block of multi-channel input PCM frames, applying smooth pre-SRC gain ramping,
+    /// muting, or tail flushing across all channels.
+    pub fn process_input_channels(&mut self, channels: &mut [&mut [f64]]) -> BlockAction {
+        if channels.is_empty() {
+            return BlockAction::Normal;
+        }
+        let num_frames = channels.iter().map(|s| s.len()).min().unwrap_or(0);
 
         match self.state {
             LifecycleState::Running => {
@@ -271,8 +271,9 @@ impl LifecycleController {
                             self.current_gain = 1.0;
                             self.is_fading_in = false;
                         }
-                        left[i] *= self.current_gain;
-                        right[i] *= self.current_gain;
+                        for ch in channels.iter_mut() {
+                            ch[i] *= self.current_gain;
+                        }
                     }
                     BlockAction::FadingIn {
                         current_gain: self.current_gain,
@@ -297,12 +298,14 @@ impl LifecycleController {
                             self.current_gain = 0.0;
                             self.is_fading_out = false;
                         }
-                        left[i] *= self.current_gain;
-                        right[i] *= self.current_gain;
+                        for ch in channels.iter_mut() {
+                            ch[i] *= self.current_gain;
+                        }
                     } else {
                         // After fade-out, feed absolute 0.0 into the cascade to clear the tail
-                        left[i] = 0.0;
-                        right[i] = 0.0;
+                        for ch in channels.iter_mut() {
+                            ch[i] = 0.0;
+                        }
                     }
 
                     if self.drain_frames_remaining > 0 {
@@ -322,8 +325,9 @@ impl LifecycleController {
             }
             LifecycleState::Recovering => {
                 // While recovering, zero the input PCM
-                left.fill(0.0);
-                right.fill(0.0);
+                for ch in channels.iter_mut() {
+                    ch[..num_frames].fill(0.0);
+                }
 
                 if self.recovery_timer > 0 {
                     self.recovery_timer = self.recovery_timer.saturating_sub(num_frames);
@@ -344,12 +348,22 @@ impl LifecycleController {
             | LifecycleState::Priming
             | LifecycleState::Reconfiguring
             | LifecycleState::DeviceLost => {
-                left.fill(0.0);
-                right.fill(0.0);
+                for ch in channels.iter_mut() {
+                    ch[..num_frames].fill(0.0);
+                }
                 self.current_gain = 0.0;
                 BlockAction::Muted
             }
         }
+    }
+
+    /// Processes a block of input PCM frames, applying smooth pre-SRC gain ramping,
+    /// muting, or tail flushing.
+    ///
+    /// Slices `left` and `right` must have equal length.
+    pub fn process_input_block(&mut self, left: &mut [f64], right: &mut [f64]) -> BlockAction {
+        assert_eq!(left.len(), right.len());
+        self.process_input_channels(&mut [left, right])
     }
 
     /// Generates idle / silence frames into `out_bytes` matching the active transport carrier format,

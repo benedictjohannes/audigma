@@ -13,7 +13,7 @@
 //! - Monitored live telemetry exported via shared state.
 
 use crate::asrc::{AdaptiveClockDriftController, ClockDriftConfig};
-use crate::lifecycle::{IdleCarrierFormat, LifecycleController};
+use crate::lifecycle::{BlockAction, IdleCarrierFormat, LifecycleController};
 use crate::traits::{AudioInput, AudioOutput, EngineError};
 use crate::worker::{ChannelWorkerPool, TargetDsdConfig};
 use audigma_dsp::config::{SampleFormat, TargetRateSpec};
@@ -146,6 +146,15 @@ impl DaemonControlHandle {
     }
 }
 
+/// High-level reason why `run_streaming` exited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamExitReason {
+    /// Playback was stopped via `control.stop()`.
+    Stopped,
+    /// An upstream sample rate transition was detected and filter tails have been smoothly drained.
+    RateChanged { new_rate: PcmRateHz, channels: u8 },
+}
+
 /// Prepared real-time live streaming pipeline.
 #[derive(Clone)]
 pub struct LivePipeline {
@@ -259,10 +268,11 @@ impl LivePipeline {
         input: &mut dyn AudioInput,
         output: &mut dyn AudioOutput,
         control: DaemonControlHandle,
-    ) -> Result<(), EngineError> {
+    ) -> Result<StreamExitReason, EngineError> {
         let _ftz = ScopedFtzDaz::new();
         let target_spec = self.plan.stream_spec.target;
         let preset = self.plan.dsp_config.preset;
+        let num_channels = self.plan.stream_spec.channels as usize;
 
         const TILE_BASEBAND_FRAMES: usize = 256;
         let is_dsd = matches!(target_spec, TargetRateSpec::Dsd { .. });
@@ -277,7 +287,7 @@ impl LivePipeline {
         };
 
         let mut worker_pool = ChannelWorkerPool::new(
-            2,
+            num_channels,
             preset,
             self.cascade_stages,
             TILE_BASEBAND_FRAMES,
@@ -295,7 +305,10 @@ impl LivePipeline {
             .map(|c| c.mode == audigma_settings::ClockMode::AdaptiveInput)
             .unwrap_or(false);
 
-        let mut asrc = if is_adaptive {
+        let mut asrc_resamplers: Vec<PolyphaseResampler> = Vec::new();
+        let mut asrc_drift_ctrl: Option<AdaptiveClockDriftController> = None;
+
+        if is_adaptive {
             let max_ppm = self
                 .settings
                 .clock
@@ -303,24 +316,25 @@ impl LivePipeline {
                 .and_then(|c| c.max_correction_ppm)
                 .map(|p| p as f64)
                 .unwrap_or(500.0);
-            Some((
-                PolyphaseResampler::new_asrc(self.input_rate, self.intermediate_rate),
-                PolyphaseResampler::new_asrc(self.input_rate, self.intermediate_rate),
-                AdaptiveClockDriftController::new(ClockDriftConfig {
-                    target_fill: 0.5,
-                    max_correction_ppm: max_ppm,
-                    ..Default::default()
-                }),
-            ))
+            for _ in 0..num_channels {
+                asrc_resamplers.push(PolyphaseResampler::new_asrc(
+                    self.input_rate,
+                    self.intermediate_rate,
+                ));
+            }
+            asrc_drift_ctrl = Some(AdaptiveClockDriftController::new(ClockDriftConfig {
+                target_fill: 0.5,
+                max_correction_ppm: max_ppm,
+                ..Default::default()
+            }));
         } else if self.input_rate != self.intermediate_rate {
-            Some((
-                PolyphaseResampler::new_rational(self.input_rate, self.intermediate_rate)?,
-                PolyphaseResampler::new_rational(self.input_rate, self.intermediate_rate)?,
-                AdaptiveClockDriftController::new(ClockDriftConfig::default()),
-            ))
-        } else {
-            None
-        };
+            for _ in 0..num_channels {
+                asrc_resamplers.push(PolyphaseResampler::new_rational(
+                    self.input_rate,
+                    self.intermediate_rate,
+                )?);
+            }
+        }
 
         let mut dop_packer = match self.carrier {
             IdleCarrierFormat::DoP(fmt) => Some(DopPacker::new(fmt)),
@@ -331,11 +345,14 @@ impl LivePipeline {
         let _ = lifecycle.start();
 
         let cascade_tile_len = TILE_BASEBAND_FRAMES * mult;
-        let mut in_left = vec![0.0; TILE_BASEBAND_FRAMES];
-        let mut in_right = vec![0.0; TILE_BASEBAND_FRAMES];
-        let mut src_out_left = vec![0.0; TILE_BASEBAND_FRAMES * 2];
-        let mut src_out_right = vec![0.0; TILE_BASEBAND_FRAMES * 2];
-        let staging_len = (cascade_tile_len * 4).max(16384);
+        let mut in_channels: Vec<Vec<f64>> = (0..num_channels)
+            .map(|_| vec![0.0; TILE_BASEBAND_FRAMES])
+            .collect();
+        let mut src_out_channels: Vec<Vec<f64>> = (0..num_channels)
+            .map(|_| vec![0.0; TILE_BASEBAND_FRAMES * 2])
+            .collect();
+
+        let staging_len = (cascade_tile_len * 4 * num_channels.max(2)).max(16384);
         let mut transport_staging = vec![0u8; staging_len];
 
         let start_time = Instant::now();
@@ -343,6 +360,7 @@ impl LivePipeline {
         let mut total_output_frames = 0u64;
         let mut overload_events = 0u64;
         let mut was_idle = false;
+        let mut pending_rate_switch: Option<PcmRateHz> = None;
 
         let base_preamp = self.plan.dsp_config.preamp_db;
         let profile_headroom = self.plan.dsp_config.profile_headroom_db;
@@ -353,9 +371,29 @@ impl LivePipeline {
         }
 
         while control.is_running() {
+            // Check for dynamic rate changes
+            if pending_rate_switch.is_none() {
+                if let Some(new_rate) = input.check_rate_change() {
+                    if new_rate != self.input_rate {
+                        pending_rate_switch = Some(new_rate);
+                        lifecycle.request_stop();
+                    }
+                }
+            }
+
             // Read input frames
-            let frames_read = input.read_stereo(&mut in_left, &mut in_right)?;
-            if frames_read == 0 {
+            let frames_read = if pending_rate_switch.is_some() && lifecycle.is_draining() {
+                for ch in in_channels.iter_mut() {
+                    ch.fill(0.0);
+                }
+                TILE_BASEBAND_FRAMES
+            } else {
+                let mut slices: Vec<&mut [f64]> =
+                    in_channels.iter_mut().map(|v| v.as_mut_slice()).collect();
+                input.read_channels(&mut slices)?
+            };
+
+            if frames_read == 0 && pending_rate_switch.is_none() {
                 // When input is temporarily idle or quiet in live streaming:
                 // Emit continuous idle / silence frames to keep DAC clock locked and prevent ALSA XRuns.
                 let idle_tile_frames = TILE_BASEBAND_FRAMES;
@@ -368,7 +406,7 @@ impl LivePipeline {
                         let dop_frames = (idle_tile_frames * mult) / 16;
                         dop_frames * fmt.bytes_per_stereo_frame()
                     }
-                    IdleCarrierFormat::Pcm => idle_tile_frames * mult * 8,
+                    IdleCarrierFormat::Pcm => idle_tile_frames * mult * 4 * num_channels,
                 };
 
                 let to_write = idle_bytes.min(transport_staging.len());
@@ -413,36 +451,55 @@ impl LivePipeline {
             let linear_gain = 10.0_f64.powf(total_gain_db / 20.0);
 
             // Apply pre-SRC gain and lifecycle cosine ramping
-            let _action = lifecycle
-                .process_input_block(&mut in_left[..frames_read], &mut in_right[..frames_read]);
-            for i in 0..frames_read {
-                in_left[i] *= linear_gain;
-                in_right[i] *= linear_gain;
+            let mut active_slices: Vec<&mut [f64]> = in_channels
+                .iter_mut()
+                .map(|v| &mut v[..frames_read])
+                .collect();
+            let action = lifecycle.process_input_channels(&mut active_slices);
+            for ch in in_channels.iter_mut() {
+                for sample in ch.iter_mut().take(frames_read) {
+                    *sample *= linear_gain;
+                }
             }
 
-            let left_slice = &in_left[..frames_read];
-            let right_slice = &in_right[..frames_read];
+            // Check if muting drain finished
+            if action == BlockAction::Drained {
+                if let Some(new_rate) = pending_rate_switch {
+                    return Ok(StreamExitReason::RateChanged {
+                        new_rate,
+                        channels: self.plan.stream_spec.channels,
+                    });
+                }
+                if !control.is_running() {
+                    return Ok(StreamExitReason::Stopped);
+                }
+            }
 
             // Polyphase SRC / ASRC
-            let (proc_left, proc_right, proc_len) =
-                if let Some((ref mut src_l, ref mut src_r, ref mut drift_ctrl)) = asrc {
-                    let (_, prod_l) = src_l.process(left_slice, &mut src_out_left);
-                    let (_, prod_r) = src_r.process(right_slice, &mut src_out_right);
-                    let prod = prod_l.min(prod_r);
+            let proc_len = if !asrc_resamplers.is_empty() {
+                let mut min_prod = usize::MAX;
+                for c in 0..num_channels {
+                    let in_slice = &in_channels[c][..frames_read];
+                    let (_, prod) = asrc_resamplers[c].process(in_slice, &mut src_out_channels[c]);
+                    min_prod = min_prod.min(prod);
+                }
 
-                    // Update drift controller
-                    let dt = frames_read as f64 / self.input_rate.get() as f64;
+                // Update drift controller
+                let dt = frames_read as f64 / self.input_rate.get() as f64;
+                if let Some(ref mut drift_ctrl) = asrc_drift_ctrl {
                     if let Some((fill, cap)) = input.buffer_occupancy() {
                         if let Ok(ppm) = drift_ctrl.update(fill, cap, dt) {
-                            src_l.set_drift_ppm(ppm);
-                            src_r.set_drift_ppm(ppm);
+                            for r in asrc_resamplers.iter_mut() {
+                                r.set_drift_ppm(ppm);
+                            }
                         }
                     }
+                }
 
-                    (&src_out_left[..prod], &src_out_right[..prod], prod)
-                } else {
-                    (left_slice, right_slice, frames_read)
-                };
+                min_prod
+            } else {
+                frames_read
+            };
 
             // Interpolation & Modulation in bounded tiles via ChannelWorkerPool
             let mut offset = 0;
@@ -450,11 +507,20 @@ impl LivePipeline {
                 let tile = (proc_len - offset).min(TILE_BASEBAND_FRAMES);
                 let req_out = tile * mult;
 
-                let in_l = &proc_left[offset..offset + tile];
-                let in_r = &proc_right[offset..offset + tile];
+                let tile_slices: Vec<&[f64]> = if !asrc_resamplers.is_empty() {
+                    src_out_channels
+                        .iter()
+                        .map(|ch| &ch[offset..offset + tile])
+                        .collect()
+                } else {
+                    in_channels
+                        .iter()
+                        .map(|ch| &ch[offset..offset + tile])
+                        .collect()
+                };
 
                 if is_dsd {
-                    worker_pool.process_tile_dsd(&[in_l, in_r])?;
+                    worker_pool.process_tile_dsd(&tile_slices)?;
                     let out_l = worker_pool.channel_dsd(0);
                     let out_r = worker_pool.channel_dsd(1);
 
@@ -527,17 +593,16 @@ impl LivePipeline {
                     };
                     write_res?;
                 } else {
-                    worker_pool.process_tile_pcm(&[in_l, in_r])?;
-                    let out_l = worker_pool.channel_pcm(0);
-                    let out_r = worker_pool.channel_pcm(1);
+                    worker_pool.process_tile_pcm(&tile_slices)?;
 
                     // High-rate PCM output
-                    let mut pcm_bytes = Vec::with_capacity(req_out * 8);
+                    let mut pcm_bytes = Vec::with_capacity(req_out * 4 * num_channels);
                     for i in 0..req_out {
-                        let fl = (out_l[i] as f32).to_le_bytes();
-                        let fr = (out_r[i] as f32).to_le_bytes();
-                        pcm_bytes.extend_from_slice(&fl);
-                        pcm_bytes.extend_from_slice(&fr);
+                        for c in 0..num_channels {
+                            let out_c = worker_pool.channel_pcm(c);
+                            let sample = (out_c[i] as f32).to_le_bytes();
+                            pcm_bytes.extend_from_slice(&sample);
+                        }
                     }
                     output.write_all(&pcm_bytes).map_err(|e| {
                         let code = e.raw_os_error().unwrap_or(0);
@@ -584,7 +649,7 @@ impl LivePipeline {
             * match self.carrier {
                 IdleCarrierFormat::NativeDsd => STEREO_DSD_U32_FRAME_BYTES,
                 IdleCarrierFormat::DoP(fmt) => fmt.bytes_per_stereo_frame(),
-                IdleCarrierFormat::Pcm => 8,
+                IdleCarrierFormat::Pcm => 4 * num_channels,
             };
         let mut tail_buf = vec![0u8; tail_bytes];
         lifecycle.emit_idle_frames(&mut tail_buf);
@@ -596,6 +661,6 @@ impl LivePipeline {
             telem.state = "Stopped".to_string();
         }
 
-        Ok(())
+        Ok(StreamExitReason::Stopped)
     }
 }

@@ -10,7 +10,7 @@ use audigma_engine::live::{DaemonControlHandle, LivePipeline};
 use audigma_engine::traits::{AudioInput, AudioOutput, DecoderInput, EngineError};
 use audigma_engine::{
     ChannelWorkerPool, IdleCarrierFormat, LifecycleController, MockAudioInput, OfflinePipeline,
-    StreamSink, TargetDsdConfig,
+    StreamExitReason, StreamSink, TargetDsdConfig,
 };
 use audigma_format::AudioStreamInfo;
 use audigma_format::decoder::AudioDecoder;
@@ -32,6 +32,7 @@ use serde_json::json;
 use std::f64::consts::PI;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 #[derive(Parser, Debug)]
@@ -407,14 +408,12 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
             match in_cfg.backend {
                 #[cfg(feature = "pipewire")]
                 InputBackend::Pipewire => {
-                    let node_name = in_cfg.node_name.as_deref().unwrap_or("audigma_sink");
-                    let sink =
-                        PipeWireVirtualSink::new(node_name, input_rate.get(), channels as u32, 32)
-                            .map_err(|e| {
-                                EngineError::Pipeline(format!(
-                                    "failed to bind PipeWire virtual sink: {e}"
-                                ))
-                            })?;
+                    let sink = PipeWireVirtualSink::from_input_config(in_cfg, input_rate.get(), 32)
+                        .map_err(|e| {
+                            EngineError::Pipeline(format!(
+                                "failed to bind PipeWire virtual sink: {e}"
+                            ))
+                        })?;
                     Ok(Box::new(sink))
                 }
                 InputBackend::Alsa => Err(EngineError::Pipeline(
@@ -433,51 +432,52 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
     let mut input_driver: Option<Box<dyn AudioInput>> = Some(create_input_driver(in_cfg)?);
 
     // Helper closure to create/open output backend driver
-    let create_output_driver =
-        |out_cfg: &audigma_settings::OutputConfig| -> Result<Box<dyn AudioOutput>, EngineError> {
-            match out_cfg.backend {
-                OutputBackend::Alsa => {
-                    let alsa_config = AlsaOutputConfig::from_settings(&settings, &target_spec)
-                        .map_err(|e| {
-                            EngineError::Pipeline(format!("failed to configure ALSA output: {e}"))
-                        })?;
-                    let alsa_out = AlsaAudioOutput::open(alsa_config).map_err(|e| {
-                        EngineError::Pipeline(format!("failed to open ALSA output: {e}"))
+    let create_output_driver = |out_cfg: &audigma_settings::OutputConfig,
+                                target: &TargetRateSpec|
+     -> Result<Box<dyn AudioOutput>, EngineError> {
+        match out_cfg.backend {
+            OutputBackend::Alsa => {
+                let alsa_config =
+                    AlsaOutputConfig::from_settings(&settings, target).map_err(|e| {
+                        EngineError::Pipeline(format!("failed to configure ALSA output: {e}"))
                     })?;
-                    Ok(Box::new(alsa_out))
-                }
-                #[cfg(feature = "pipewire")]
-                OutputBackend::Pipewire => {
-                    let target_node = out_cfg.target_node.as_deref();
-                    let pw_rate = match target_spec {
-                        TargetRateSpec::Pcm { rate, .. } => rate.get(),
-                        TargetRateSpec::Dsd { bit_rate } => {
-                            return Err(EngineError::Pipeline(format!(
-                                "PipeWire PCM output cannot carry DSD bit rate {bit_rate}"
-                            )));
-                        }
-                    };
-                    let pw_out = PipeWirePcmOutput::new(
-                        "audigma_pcm_out",
-                        target_node,
-                        pw_rate,
-                        channels as u32,
-                        32,
-                    )
-                    .map_err(|e| {
-                        EngineError::Pipeline(format!("failed to initialize PipeWire output: {e}"))
-                    })?;
-                    Ok(Box::new(pw_out))
-                }
-                #[cfg(not(feature = "pipewire"))]
-                OutputBackend::Pipewire => Err(EngineError::Pipeline(
-                    "PipeWire feature is disabled in this build".to_string(),
-                )),
-                OutputBackend::File | OutputBackend::Stdio => Err(EngineError::Pipeline(
-                    "File/Stdio backend is for offline mode; use 'audigma convert'".to_string(),
-                )),
+                let alsa_out = AlsaAudioOutput::open(alsa_config).map_err(|e| {
+                    EngineError::Pipeline(format!("failed to open ALSA output: {e}"))
+                })?;
+                Ok(Box::new(alsa_out))
             }
-        };
+            #[cfg(feature = "pipewire")]
+            OutputBackend::Pipewire => {
+                let target_node = out_cfg.target_node.as_deref();
+                let pw_rate = match target {
+                    TargetRateSpec::Pcm { rate, .. } => rate.get(),
+                    TargetRateSpec::Dsd { bit_rate } => {
+                        return Err(EngineError::Pipeline(format!(
+                            "PipeWire PCM output cannot carry DSD bit rate {bit_rate}"
+                        )));
+                    }
+                };
+                let pw_out = PipeWirePcmOutput::new(
+                    "audigma_pcm_out",
+                    target_node,
+                    pw_rate,
+                    channels as u32,
+                    32,
+                )
+                .map_err(|e| {
+                    EngineError::Pipeline(format!("failed to initialize PipeWire output: {e}"))
+                })?;
+                Ok(Box::new(pw_out))
+            }
+            #[cfg(not(feature = "pipewire"))]
+            OutputBackend::Pipewire => Err(EngineError::Pipeline(
+                "PipeWire feature is disabled in this build".to_string(),
+            )),
+            OutputBackend::File | OutputBackend::Stdio => Err(EngineError::Pipeline(
+                "File/Stdio backend is for offline mode; use 'audigma convert'".to_string(),
+            )),
+        }
+    };
 
     let (out_fmt_str, out_rate_hz) = match target_spec {
         TargetRateSpec::Dsd { bit_rate } => ("dsd".to_string(), bit_rate.get()),
@@ -503,7 +503,10 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
     eprintln!("  ControlSocket: {}", socket_path.display());
 
     // Prepare and Run Live Pipeline
-    let pipeline = LivePipeline::prepare(settings.clone(), input_rate)?;
+    let mut pipeline = LivePipeline::prepare(settings.clone(), input_rate)?;
+    let mut current_input_rate = input_rate;
+    let mut current_target_spec = target_spec;
+    let mut generation: u64 = 1;
     eprintln!("audigma: daemon running. Press Ctrl+C or run 'audigma stop' to exit.");
 
     let target_device = out_cfg
@@ -624,7 +627,7 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
             }
 
             // Open output device
-            match create_output_driver(out_cfg) {
+            match create_output_driver(out_cfg, &current_target_spec) {
                 Ok(out) => {
                     eprintln!(
                         "[INFO] audigma: opened output device '{target_device}'; resuming streaming."
@@ -652,7 +655,66 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
 
         // Run streaming loop
         match pipeline.run_streaming(&mut **input, &mut **output, control.clone()) {
-            Ok(()) => break,
+            Ok(StreamExitReason::Stopped) => break,
+            Ok(StreamExitReason::RateChanged {
+                new_rate,
+                channels: _,
+            }) => {
+                eprintln!(
+                    "[INFO] audigma: dynamic sample rate switch detected: {} Hz -> {} Hz",
+                    current_input_rate, new_rate
+                );
+                current_input_rate = new_rate;
+
+                // Check if output rate or ALSA configuration must change
+                let new_plan = settings.explain_for_input_rate(new_rate)?;
+                let new_target_spec = new_plan.stream_spec.target;
+
+                let need_reopen_output = match (current_target_spec, new_target_spec) {
+                    (
+                        TargetRateSpec::Dsd { bit_rate: old_br },
+                        TargetRateSpec::Dsd { bit_rate: new_br },
+                    ) => old_br != new_br,
+                    (
+                        TargetRateSpec::Pcm { rate: old_r, .. },
+                        TargetRateSpec::Pcm { rate: new_r, .. },
+                    ) => old_r != new_r,
+                    _ => true,
+                };
+
+                if need_reopen_output && out_cfg.backend == OutputBackend::Alsa {
+                    eprintln!("[INFO] audigma: re-locking ALSA device for new target rate...");
+                    current_output = None;
+                }
+
+                // Re-prepare the LivePipeline for the new input rate
+                pipeline = LivePipeline::prepare(settings.clone(), new_rate)?;
+                current_target_spec = new_target_spec;
+
+                // Bump generation and update active rate on virtual sink
+                generation += 1;
+                control.generation.store(generation, Ordering::SeqCst);
+                input.set_generation(generation);
+                input.set_active_rate(new_rate);
+
+                // Update telemetry
+                {
+                    let mut telem = control.telemetry.lock().unwrap();
+                    telem.input_rate_hz = new_rate.get();
+                    match new_target_spec {
+                        TargetRateSpec::Dsd { bit_rate } => {
+                            telem.output_format = "dsd".to_string();
+                            telem.output_rate_hz = bit_rate.get();
+                        }
+                        TargetRateSpec::Pcm { rate, .. } => {
+                            telem.output_format = "pcm".to_string();
+                            telem.output_rate_hz = rate.get();
+                        }
+                    }
+                }
+
+                continue;
+            }
             Err(EngineError::DeviceDisconnected(reason)) => {
                 eprintln!("[WARN] audigma: output device disconnected: {reason}");
                 current_output = None; // Force output driver teardown

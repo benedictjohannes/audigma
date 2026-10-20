@@ -11,7 +11,8 @@ use audigma_dsp::PcmRateHz;
 use audigma_engine::queue::TaggedChunk;
 use audigma_engine::traits::{AudioInput, AudioOutput, EngineError};
 use audigma_format::AudioStreamInfo;
-use libspa::param::audio::{AudioFormat, AudioInfoRaw, MAX_CHANNELS};
+use audigma_settings::{InputConfig, RateMode};
+use libspa::param::audio::{AudioFormat, AudioInfoRaw};
 use libspa::pod::Pod;
 use libspa::utils::Direction;
 use pipewire::properties::properties;
@@ -19,7 +20,7 @@ use pipewire::stream::{StreamBox, StreamFlags};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::io::Write;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use thiserror::Error;
 
@@ -42,22 +43,102 @@ impl From<PipeWireError> for EngineError {
     }
 }
 
-/// Helper function to build SPA EnumFormat POD for stereo F32LE audio.
-fn build_format_pod(rate_hz: u32, channels: u32) -> Result<Vec<u8>, PipeWireError> {
-    let mut audio_info = AudioInfoRaw::new();
-    audio_info.set_format(AudioFormat::F32LE);
-    audio_info.set_rate(rate_hz);
-    audio_info.set_channels(channels);
+/// Maps standard channel position strings to SPA channel position constants.
+pub fn channel_position_to_spa(pos: &str) -> u32 {
+    match pos.trim().to_ascii_uppercase().as_str() {
+        "MONO" => libspa::sys::SPA_AUDIO_CHANNEL_MONO,
+        "FL" => libspa::sys::SPA_AUDIO_CHANNEL_FL,
+        "FR" => libspa::sys::SPA_AUDIO_CHANNEL_FR,
+        "FC" => libspa::sys::SPA_AUDIO_CHANNEL_FC,
+        "LFE" => libspa::sys::SPA_AUDIO_CHANNEL_LFE,
+        "SL" => libspa::sys::SPA_AUDIO_CHANNEL_SL,
+        "SR" => libspa::sys::SPA_AUDIO_CHANNEL_SR,
+        "FLC" => libspa::sys::SPA_AUDIO_CHANNEL_FLC,
+        "FRC" => libspa::sys::SPA_AUDIO_CHANNEL_FRC,
+        "RC" => libspa::sys::SPA_AUDIO_CHANNEL_RC,
+        "RL" => libspa::sys::SPA_AUDIO_CHANNEL_RL,
+        "RR" => libspa::sys::SPA_AUDIO_CHANNEL_RR,
+        _ => libspa::sys::SPA_AUDIO_CHANNEL_UNKNOWN,
+    }
+}
 
-    let mut position = [0u32; MAX_CHANNELS];
-    position[0] = 3; // SPA_AUDIO_CHANNEL_FL
-    position[1] = 4; // SPA_AUDIO_CHANNEL_FR
-    audio_info.set_position(position);
+/// Helper function to build dynamic SPA EnumFormat POD choice objects for multi-rate and multi-channel audio.
+pub fn build_format_pod(
+    rate_hz: u32,
+    channels: u32,
+    channel_positions: &[String],
+    rate_mode: RateMode,
+    allowed_rates: &[u32],
+) -> Result<Vec<u8>, PipeWireError> {
+    let mut position_ids = Vec::with_capacity(channels as usize);
+    for pos in channel_positions.iter().take(channels as usize) {
+        position_ids.push(libspa::utils::Id(channel_position_to_spa(pos)));
+    }
+    while position_ids.len() < channels as usize {
+        position_ids.push(libspa::utils::Id(libspa::sys::SPA_AUDIO_CHANNEL_UNKNOWN));
+    }
+
+    let rate_value = if rate_mode == RateMode::Dynamic && !allowed_rates.is_empty() {
+        let (def, alternatives): (i32, Vec<i32>) = if allowed_rates.contains(&rate_hz) {
+            (
+                rate_hz as i32,
+                allowed_rates
+                    .iter()
+                    .copied()
+                    .filter(|&r| r != rate_hz)
+                    .map(|r| r as i32)
+                    .collect(),
+            )
+        } else {
+            (
+                allowed_rates[0] as i32,
+                allowed_rates[1..].iter().map(|&r| r as i32).collect(),
+            )
+        };
+
+        if alternatives.is_empty() {
+            libspa::pod::Value::Int(def)
+        } else {
+            libspa::pod::Value::Choice(libspa::pod::ChoiceValue::Int(libspa::utils::Choice(
+                libspa::utils::ChoiceFlags::empty(),
+                libspa::utils::ChoiceEnum::Enum {
+                    default: def,
+                    alternatives,
+                },
+            )))
+        }
+    } else {
+        libspa::pod::Value::Int(rate_hz as i32)
+    };
+
+    let props = vec![
+        libspa::pod::Property::new(
+            libspa::sys::SPA_FORMAT_mediaType,
+            libspa::pod::Value::Id(libspa::utils::Id(libspa::sys::SPA_MEDIA_TYPE_audio)),
+        ),
+        libspa::pod::Property::new(
+            libspa::sys::SPA_FORMAT_mediaSubtype,
+            libspa::pod::Value::Id(libspa::utils::Id(libspa::sys::SPA_MEDIA_SUBTYPE_raw)),
+        ),
+        libspa::pod::Property::new(
+            libspa::sys::SPA_FORMAT_AUDIO_format,
+            libspa::pod::Value::Id(libspa::utils::Id(AudioFormat::F32LE.as_raw())),
+        ),
+        libspa::pod::Property::new(libspa::sys::SPA_FORMAT_AUDIO_rate, rate_value),
+        libspa::pod::Property::new(
+            libspa::sys::SPA_FORMAT_AUDIO_channels,
+            libspa::pod::Value::Int(channels as i32),
+        ),
+        libspa::pod::Property::new(
+            libspa::sys::SPA_FORMAT_AUDIO_position,
+            libspa::pod::Value::ValueArray(libspa::pod::ValueArray::Id(position_ids)),
+        ),
+    ];
 
     let obj = libspa::pod::Object {
         type_: libspa::utils::SpaTypes::ObjectParamFormat.as_raw(),
         id: libspa::param::ParamType::EnumFormat.as_raw(),
-        properties: audio_info.into(),
+        properties: props,
     };
 
     libspa::pod::serialize::PodSerializer::serialize(
@@ -79,15 +160,66 @@ pub struct PipeWireVirtualSink {
     current_chunk: Option<TaggedChunk>,
     read_offset: usize,
     generation: Arc<AtomicU64>,
+    active_rate: Arc<AtomicU32>,
+    pending_rate: Arc<AtomicU32>,
     running: Arc<AtomicBool>,
 }
 
 impl PipeWireVirtualSink {
-    /// Creates and binds a new virtual sink node in the PipeWire graph.
+    /// Creates and binds a new virtual sink node in the PipeWire graph using an `InputConfig`.
+    pub fn from_input_config(
+        in_cfg: &InputConfig,
+        default_rate_hz: u32,
+        queue_chunks: usize,
+    ) -> Result<Self, PipeWireError> {
+        let node_name = in_cfg.node_name.as_deref().unwrap_or("audigma_sink");
+        let channels = in_cfg.channels.unwrap_or(2) as u32;
+        let positions = in_cfg.resolved_channel_positions();
+        let rate_mode = in_cfg.rate_mode();
+        let allowed_rates = in_cfg.resolved_allowed_rates();
+        let rate_hz = in_cfg.rate_hz.map(|r| r.get()).unwrap_or(default_rate_hz);
+
+        Self::new_internal(
+            node_name,
+            rate_hz,
+            channels,
+            positions,
+            rate_mode,
+            allowed_rates,
+            queue_chunks,
+        )
+    }
+
+    /// Creates and binds a new virtual sink node in the PipeWire graph with default stereo settings.
     pub fn new(
         node_name: &str,
         rate_hz: u32,
         channels: u32,
+        queue_chunks: usize,
+    ) -> Result<Self, PipeWireError> {
+        let dummy_cfg = InputConfig {
+            backend: audigma_settings::InputBackend::Pipewire,
+            node_name: Some(node_name.to_string()),
+            device: None,
+            sample_format: None,
+            rate_hz: PcmRateHz::new(rate_hz),
+            channels: Some(channels as u8),
+            channel_positions: None,
+            rate_mode: None,
+            allowed_rates: None,
+            allow_dsd: None,
+            dsd: None,
+        };
+        Self::from_input_config(&dummy_cfg, rate_hz, queue_chunks)
+    }
+
+    fn new_internal(
+        node_name: &str,
+        rate_hz: u32,
+        channels: u32,
+        channel_positions: Vec<String>,
+        rate_mode: RateMode,
+        allowed_rates: Vec<u32>,
         queue_chunks: usize,
     ) -> Result<Self, PipeWireError> {
         let desc = format!("Audigma Virtual Sink ({node_name})");
@@ -95,10 +227,24 @@ impl PipeWireVirtualSink {
 
         let (mut producer, consumer) = RingBuffer::new(queue_chunks);
         let generation = Arc::new(AtomicU64::new(1));
+        let active_rate = Arc::new(AtomicU32::new(rate_hz));
+        let pending_rate = Arc::new(AtomicU32::new(0));
         let running = Arc::new(AtomicBool::new(true));
 
         let gen_clone = generation.clone();
+        let active_rate_cb = active_rate.clone();
+        let pending_rate_cb = pending_rate.clone();
         let running_clone = running.clone();
+
+        let pos_str = channel_positions.join(",");
+        let allowed_rates_str = allowed_rates
+            .iter()
+            .map(|r| r.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let channel_positions_clone = channel_positions.clone();
+        let allowed_rates_clone = allowed_rates.clone();
 
         let worker = std::thread::Builder::new()
             .name("audigma-pw-in".to_string())
@@ -118,37 +264,43 @@ impl PipeWireVirtualSink {
                 };
 
                 // Create the virtual sink adapter natively in PipeWire
-                let sink_proxy = core.create_object::<pipewire::node::Node>(
-                    "adapter",
-                    &properties! {
-                        "factory.name" => "support.null-audio-sink",
-                        "node.name" => node_name_owned.as_str(),
-                        "node.description" => desc.as_str(),
-                        "media.class" => "Audio/Sink",
-                        "audio.channels" => format!("{channels}"),
-                        "audio.position" => "FL,FR",
-                        "object.linger" => "0",
-                    },
-                );
+                let mut adapter_props = properties! {
+                    "factory.name" => "support.null-audio-sink",
+                    "node.name" => node_name_owned.as_str(),
+                    "node.description" => desc.as_str(),
+                    "media.class" => "Audio/Sink",
+                    "audio.channels" => format!("{channels}"),
+                    "audio.position" => pos_str.as_str(),
+                    "object.linger" => "0",
+                };
+                if rate_mode == RateMode::Dynamic {
+                    adapter_props.insert("audio.allowed-rates", format!("[ {allowed_rates_str} ]"));
+                }
 
+                let sink_proxy =
+                    core.create_object::<pipewire::node::Node>("adapter", &adapter_props);
                 let _sink_node = match sink_proxy {
                     Ok(n) => n,
                     Err(_) => return,
                 };
 
                 let stream_name = format!("audigma-capture-{node_name_owned}");
-                let props = properties! {
+                let mut stream_props = properties! {
                     *pipewire::keys::NODE_NAME => stream_name.as_str(),
                     "target.object" => node_name_owned.as_str(),
                     *pipewire::keys::STREAM_CAPTURE_SINK => "true",
+                    *pipewire::keys::NODE_PASSIVE => "true",
                     *pipewire::keys::MEDIA_TYPE => "Audio",
                     *pipewire::keys::MEDIA_CATEGORY => "Capture",
                     *pipewire::keys::MEDIA_ROLE => "Music",
                     *pipewire::keys::AUDIO_CHANNELS => format!("{channels}"),
-                    "audio.position" => "FL,FR",
+                    "audio.position" => pos_str.as_str(),
                 };
+                if rate_mode == RateMode::Dynamic {
+                    stream_props.insert("audio.allowed-rates", format!("[ {allowed_rates_str} ]"));
+                }
 
-                let stream = match StreamBox::new(&core, &stream_name, props) {
+                let stream = match StreamBox::new(&core, &stream_name, stream_props) {
                     Ok(s) => s,
                     Err(_) => return,
                 };
@@ -156,7 +308,7 @@ impl PipeWireVirtualSink {
                 let run_cb = running_clone.clone();
                 let _listener = match stream
                     .add_local_listener_with_user_data(())
-                    .param_changed(|_, _, id, param| {
+                    .param_changed(move |_, _, id, param| {
                         let Some(param) = param else {
                             return;
                         };
@@ -164,25 +316,21 @@ impl PipeWireVirtualSink {
                             return;
                         }
 
-                        if let Ok((media_type, media_subtype)) =
-                            libspa::param::format_utils::parse_format(param)
-                        {
-                            let mut info = AudioInfoRaw::new();
-                            if info.parse(param).is_ok() {
-                                eprintln!(
-                                    "[audigma-pw-in] format negotiated: {:?}/{:?}, format={:?}, rate={}, channels={}, pos={:?}",
-                                    media_type,
-                                    media_subtype,
-                                    info.format(),
-                                    info.rate(),
-                                    info.channels(),
-                                    &info.position()[..info.channels() as usize]
-                                );
-                            } else {
-                                eprintln!(
-                                    "[audigma-pw-in] format parsed: {:?}/{:?}",
-                                    media_type, media_subtype
-                                );
+                        let mut info = AudioInfoRaw::new();
+                        if info.parse(param).is_ok() {
+                            let negotiated_rate = info.rate();
+                            let negotiated_channels = info.channels();
+                            eprintln!(
+                                "[audigma-pw-in] format negotiated: rate={}, channels={}, pos={:?}",
+                                negotiated_rate,
+                                negotiated_channels,
+                                &info.position()[..negotiated_channels as usize]
+                            );
+                            if negotiated_rate > 0 {
+                                let cur_active = active_rate_cb.load(Ordering::Relaxed);
+                                if cur_active != negotiated_rate {
+                                    pending_rate_cb.store(negotiated_rate, Ordering::SeqCst);
+                                }
                             }
                         }
                     })
@@ -199,41 +347,56 @@ impl PipeWireVirtualSink {
 
                             let cur_gen = gen_clone.load(Ordering::Relaxed);
                             let sample_size = std::mem::size_of::<f32>();
+                            let n_ch = channels as usize;
 
-                            if datas.len() >= 2 {
-                                // Planar audio: datas[0] is Left, datas[1] is Right
-                                let (first_slice, second_slice) = datas.split_at_mut(1);
-                                let d0 = &mut first_slice[0];
-                                let d1 = &mut second_slice[0];
+                            if datas.len() >= n_ch && n_ch > 1 {
+                                // Planar audio: each datas[c] holds channel c
+                                let channel_slices: Vec<&[u8]> = datas
+                                    .iter_mut()
+                                    .take(n_ch)
+                                    .map(|data| {
+                                        let chunk = data.chunk();
+                                        let off = chunk.offset() as usize;
+                                        let size = chunk.size() as usize;
+                                        if let Some(bytes) = data.data() {
+                                            let valid_len =
+                                                bytes.len().saturating_sub(off).min(size);
+                                            &bytes[off..off + valid_len]
+                                        } else {
+                                            &[]
+                                        }
+                                    })
+                                    .collect();
 
-                                let chunk0 = d0.chunk();
-                                let chunk1 = d1.chunk();
-                                let off0 = chunk0.offset() as usize;
-                                let size0 = chunk0.size() as usize;
-                                let off1 = chunk1.offset() as usize;
-                                let size1 = chunk1.size() as usize;
+                                let mut min_frames = usize::MAX;
+                                for slice in &channel_slices {
+                                    min_frames = min_frames.min(slice.len() / sample_size);
+                                }
 
-                                let bytes0 = d0.data().map(|b| &b[off0..off0 + size0]).unwrap_or(&[]);
-                                let bytes1 = d1.data().map(|b| &b[off1..off1 + size1]).unwrap_or(&[]);
-
-                                let frames = (bytes0.len() / sample_size).min(bytes1.len() / sample_size);
-                                if frames > 0 {
-                                    let total_floats = frames * 2;
+                                if min_frames > 0 && min_frames != usize::MAX {
+                                    let total_floats = min_frames * n_ch;
                                     let mut chunk = TaggedChunk::new(total_floats);
                                     let mut float_buf = Vec::with_capacity(total_floats);
 
-                                    for i in 0..frames {
-                                        let l_bytes: [u8; 4] = bytes0[i * 4..(i + 1) * 4].try_into().unwrap();
-                                        let r_bytes: [u8; 4] = bytes1[i * 4..(i + 1) * 4].try_into().unwrap();
-                                        float_buf.push(f32::from_le_bytes(l_bytes) as f64);
-                                        float_buf.push(f32::from_le_bytes(r_bytes) as f64);
+                                    for i in 0..min_frames {
+                                        let s_off = i * sample_size;
+                                        for slice in &channel_slices {
+                                            let f = if s_off + 4 <= slice.len() {
+                                                let bytes: [u8; 4] =
+                                                    slice[s_off..s_off + 4].try_into().unwrap();
+                                                f32::from_le_bytes(bytes) as f64
+                                            } else {
+                                                0.0
+                                            };
+                                            float_buf.push(f);
+                                        }
                                     }
 
-                                    chunk.set(cur_gen, 2, &float_buf);
+                                    chunk.set(cur_gen, n_ch, &float_buf);
                                     let _ = producer.push(chunk);
                                 }
                             } else {
-                                // Interleaved audio: datas[0] contains all channels
+                                // Interleaved audio: datas[0] contains samples
                                 let data = &mut datas[0];
                                 let chunk_info = data.chunk();
                                 let offset = chunk_info.offset() as usize;
@@ -246,12 +409,15 @@ impl PipeWireVirtualSink {
                                         if total_floats > 0 {
                                             let mut chunk = TaggedChunk::new(total_floats);
                                             let mut float_buf = Vec::with_capacity(total_floats);
-                                            for chunk_bytes in valid_bytes.chunks_exact(sample_size) {
-                                                let f = f32::from_le_bytes(chunk_bytes.try_into().unwrap());
+                                            for chunk_bytes in valid_bytes.chunks_exact(sample_size)
+                                            {
+                                                let f = f32::from_le_bytes(
+                                                    chunk_bytes.try_into().unwrap(),
+                                                );
                                                 float_buf.push(f as f64);
                                             }
 
-                                            chunk.set(cur_gen, channels as usize, &float_buf);
+                                            chunk.set(cur_gen, n_ch, &float_buf);
                                             let _ = producer.push(chunk);
                                         }
                                     }
@@ -265,7 +431,13 @@ impl PipeWireVirtualSink {
                     Err(_) => return,
                 };
 
-                let pod_bytes = match build_format_pod(rate_hz, channels) {
+                let pod_bytes = match build_format_pod(
+                    rate_hz,
+                    channels,
+                    &channel_positions_clone,
+                    rate_mode,
+                    &allowed_rates_clone,
+                ) {
                     Ok(b) => b,
                     Err(_) => return,
                 };
@@ -307,6 +479,8 @@ impl PipeWireVirtualSink {
             current_chunk: None,
             read_offset: 0,
             generation,
+            active_rate,
+            pending_rate,
             running,
         })
     }
@@ -333,7 +507,14 @@ impl AudioInput for PipeWireVirtualSink {
     }
 
     fn read_stereo(&mut self, left: &mut [f64], right: &mut [f64]) -> Result<usize, EngineError> {
-        let max_frames = left.len().min(right.len());
+        self.read_channels(&mut [left, right])
+    }
+
+    fn read_channels(&mut self, channels: &mut [&mut [f64]]) -> Result<usize, EngineError> {
+        if channels.is_empty() {
+            return Ok(0);
+        }
+        let max_frames = channels.iter().map(|s| s.len()).min().unwrap_or(0);
         if max_frames == 0 {
             return Ok(0);
         }
@@ -355,11 +536,25 @@ impl AudioInput for PipeWireVirtualSink {
                 if available > 0 {
                     let to_copy = (max_frames - frames_read).min(available);
                     let samples = chunk.as_slice();
+                    let chunk_ch = chunk.channels;
 
                     for i in 0..to_copy {
-                        let sample_idx = (self.read_offset + i) * 2;
-                        left[frames_read + i] = samples[sample_idx];
-                        right[frames_read + i] = samples[sample_idx + 1];
+                        let base_idx = (self.read_offset + i) * chunk_ch;
+                        if chunk_ch == 1 && channels.len() > 1 {
+                            // Mono source into multi-channel (e.g. stereo)
+                            let s = samples[self.read_offset + i];
+                            for ch_slice in channels.iter_mut() {
+                                ch_slice[frames_read + i] = s;
+                            }
+                        } else {
+                            for (c, ch_slice) in channels.iter_mut().enumerate() {
+                                if c < chunk_ch {
+                                    ch_slice[frames_read + i] = samples[base_idx + c];
+                                } else {
+                                    ch_slice[frames_read + i] = 0.0;
+                                }
+                            }
+                        }
                     }
 
                     self.read_offset += to_copy;
@@ -396,6 +591,26 @@ impl AudioInput for PipeWireVirtualSink {
         }
 
         Ok(frames_read)
+    }
+
+    fn check_rate_change(&self) -> Option<PcmRateHz> {
+        let pending = self.pending_rate.load(Ordering::SeqCst);
+        let active = self.active_rate.load(Ordering::SeqCst);
+        if pending != 0 && pending != active {
+            PcmRateHz::new(pending)
+        } else {
+            None
+        }
+    }
+
+    fn set_generation(&mut self, generation_tag: u64) {
+        self.generation.store(generation_tag, Ordering::SeqCst);
+    }
+
+    fn set_active_rate(&mut self, rate: PcmRateHz) {
+        self.active_rate.store(rate.get(), Ordering::SeqCst);
+        self.pending_rate.store(0, Ordering::SeqCst);
+        self.info.sample_rate = rate;
     }
 
     fn can_rewind(&self) -> bool {
@@ -518,7 +733,8 @@ impl PipeWirePcmOutput {
                     Err(_) => return,
                 };
 
-                let pod_bytes = match build_format_pod(rate_hz, channels) {
+                let pod_bytes = match build_format_pod(rate_hz, channels, &[], RateMode::Fixed, &[])
+                {
                     Ok(b) => b,
                     Err(_) => return,
                 };
