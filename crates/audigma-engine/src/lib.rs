@@ -27,6 +27,7 @@ pub use pipeline::{OfflinePipeline, OfflineReport};
 pub use queue::{AudioSpscQueue, DEFAULT_CHUNK_SAMPLES, TaggedChunk};
 pub use tail::TailManager;
 pub use traits::{
-    AudioInput, AudioOutput, DecoderInput, EngineError, MockAudioInput, SeekableSink, StreamSink,
+    AudioInput, AudioOutput, DecoderInput, EngineError, HardwareVolumeBridge, MockAudioInput,
+    SeekableSink, StreamSink, VolumeUpdate,
 };
 pub use worker::{ChannelWorkerPool, TargetDsdConfig};

@@ -323,6 +323,7 @@ pub struct OutputConfig {
     pub volume_control: Option<VolumeControlMode>,
     pub device_wait_ms: Option<i64>,
     pub keep_audio_sink_ms: Option<i64>,
+    pub mixer_control: Option<String>,
 }
 
 impl OutputConfig {
@@ -345,6 +346,11 @@ impl OutputConfig {
     /// Returns audio sink keep-alive duration in milliseconds (`5000` ms by default).
     pub fn keep_audio_sink_ms(&self) -> i64 {
         self.keep_audio_sink_ms.unwrap_or(5000)
+    }
+
+    /// Returns optional user-configured mixer control element name (e.g. `"Master"`, `"PCM"`).
+    pub fn mixer_control(&self) -> Option<&str> {
+        self.mixer_control.as_deref()
     }
 }
 
@@ -543,6 +549,7 @@ impl Settings {
                     volume_control: None,
                     device_wait_ms: None,
                     keep_audio_sink_ms: None,
+                    mixer_control: None,
                 }),
                 target: Some(TargetConfig {
                     format: TargetFormat::Dsd,
@@ -603,6 +610,7 @@ impl Settings {
                     volume_control: None,
                     device_wait_ms: None,
                     keep_audio_sink_ms: None,
+                    mixer_control: None,
                 }),
                 target: Some(TargetConfig {
                     format: TargetFormat::Pcm,
@@ -663,6 +671,7 @@ impl Settings {
                     volume_control: None,
                     device_wait_ms: None,
                     keep_audio_sink_ms: None,
+                    mixer_control: None,
                 }),
                 target: Some(TargetConfig {
                     format: TargetFormat::Pcm,
@@ -723,6 +732,7 @@ impl Settings {
                     volume_control: None,
                     device_wait_ms: None,
                     keep_audio_sink_ms: None,
+                    mixer_control: None,
                 }),
                 target: Some(TargetConfig {
                     format: TargetFormat::Dsd,
@@ -2044,5 +2054,24 @@ pcm_rate_hz = 96000
         let dsd = input.dsd.as_ref().unwrap();
         assert_eq!(dsd.max_intermediate_rate_hz, Some(PcmRateHz::PCM_352800));
         assert_eq!(dsd.decimation_preset, Some(FilterPreset::Reference));
+    }
+
+    #[test]
+    fn test_output_mixer_control() {
+        let toml = r#"
+schema_version = 1
+[input]
+backend = "pipewire"
+[output]
+backend = "alsa"
+device = "hw:CARD=JA11,DEV=0"
+mixer_control = "PCM"
+[target]
+format = "pcm"
+pcm_rate_hz = 96000
+"#;
+        let settings = Settings::from_toml_str(toml).unwrap();
+        let output = settings.output.as_ref().unwrap();
+        assert_eq!(output.mixer_control(), Some("PCM"));
     }
 }

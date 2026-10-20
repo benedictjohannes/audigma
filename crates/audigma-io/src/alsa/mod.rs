@@ -1,9 +1,11 @@
 //! ALSA audio interface modules (`Design.md §2`, `§7`, `Plan.md Phase 3`).
 
+pub mod mixer;
 pub mod output;
 pub mod probe;
 pub mod watcher;
 
+pub use mixer::{AlsaHardwareMixer, CANDIDATE_MIXER_CONTROLS, resolve_card_mixer_name};
 pub use output::{AlsaAudioOutput, AlsaOutputConfig, AlsaOutputError};
 pub use probe::{
     ActiveStreamStatus, AlsaCardReport, AlsaDeviceReport, AlsaProbeReport, DeviceCapabilities,

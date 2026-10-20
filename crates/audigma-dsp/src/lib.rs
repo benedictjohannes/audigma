@@ -10,6 +10,7 @@ pub mod modulator;
 pub mod presets;
 pub mod rates;
 pub mod tables;
+pub mod volume;
 
 pub use tables::{
     CrfbCoefficients, SRC_ASRC_256_PHASES, SRC_RATIONAL_160_PHASES, get_crfb_coefficients,
@@ -30,4 +31,7 @@ pub use presets::{
 pub use rates::{
     DEFAULT_AUDIO_BASEBAND_HZ, DsdBitRateHz, DsdMultiplier, PcmRateHz, RateFamily,
     TransportFrameRateHz,
+};
+pub use volume::{
+    DEFAULT_SOFTWARE_MIN_DB, alsamixer_db_to_percentage, alsamixer_percentage_to_db,
 };

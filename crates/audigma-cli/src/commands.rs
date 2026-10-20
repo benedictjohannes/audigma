@@ -16,8 +16,8 @@ use audigma_format::AudioStreamInfo;
 use audigma_format::decoder::AudioDecoder;
 use audigma_format::dop::DopContainerFormat;
 use audigma_io::alsa::{
-    AlsaAudioOutput, AlsaOutputConfig, is_alsa_device_present, resolve_card_index,
-    wait_for_alsa_device,
+    AlsaAudioOutput, AlsaHardwareMixer, AlsaOutputConfig, is_alsa_device_present,
+    resolve_card_index, wait_for_alsa_device,
 };
 
 #[cfg(feature = "dbus")]
@@ -119,12 +119,46 @@ pub struct SetArgs {
     pub socket: Option<PathBuf>,
 }
 
+/// Parses a volume argument into decibels (dB) according to confirmed rules:
+/// - Suffix `%` (e.g. `80%`, `100%`, `0%`): perceptual percentage converted via ALSA's volume_mapping.c curve.
+/// - No `%` (e.g. `-6`, `-3.2`, `0`, `0.0`, `+1.5`, `-6dB`): treated directly as decibels.
+pub fn parse_volume_to_db(arg: &str) -> Result<f64, String> {
+    let s = arg.trim();
+    if s.is_empty() {
+        return Err("volume argument cannot be empty".to_string());
+    }
+
+    if let Some(pct_str) = s.strip_suffix('%') {
+        let p: f64 = pct_str
+            .trim()
+            .parse()
+            .map_err(|e| format!("invalid percentage volume '{arg}': {e}"))?;
+        if p < 0.0 {
+            return Err("percentage volume cannot be negative".to_string());
+        }
+        Ok(audigma_dsp::alsamixer_percentage_to_db(
+            p,
+            audigma_dsp::DEFAULT_SOFTWARE_MIN_DB,
+        ))
+    } else {
+        let clean = s
+            .strip_suffix("dB")
+            .or_else(|| s.strip_suffix("db"))
+            .unwrap_or(s)
+            .trim();
+        let db: f64 = clean
+            .parse()
+            .map_err(|e| format!("invalid decibel volume '{arg}': {e}"))?;
+        Ok(db)
+    }
+}
+
 #[derive(Subcommand, Debug)]
 pub enum SetCommands {
-    /// Set live playback volume in dB (e.g. -3.0 or -- -3.0)
+    /// Set live playback volume in dB (e.g. -3.0 or 0) or percentage (e.g. 80% or 0%)
     Volume {
         #[arg(allow_hyphen_values = true)]
-        db: f64,
+        value: String,
     },
 
     /// Switch active DSP preset (balanced, reference, low-latency)
@@ -513,8 +547,53 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
         .device
         .clone()
         .unwrap_or_else(|| "default".to_string());
+    let custom_mixer_control = out_cfg.mixer_control();
+    let vol_control_mode = out_cfg.volume_control();
     let device_wait_ms = out_cfg.device_wait_ms();
     let keep_audio_sink_ms = out_cfg.keep_audio_sink_ms();
+
+    let mut hw_mixer: Option<AlsaHardwareMixer> = if out_cfg.backend == OutputBackend::Alsa {
+        match AlsaHardwareMixer::open(&target_device, custom_mixer_control) {
+            Ok(m) => {
+                eprintln!(
+                    "  HardwareMixer: Bound to ALSA mixer control '{}'",
+                    m.element_name()
+                );
+                Some(m)
+            }
+            Err(e) => {
+                eprintln!("  HardwareMixer: Note: hardware mixer unavailable ({e})");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let active_vol_mode = match vol_control_mode {
+        audigma_settings::VolumeControlMode::HardwareSoftwareFallback => {
+            if hw_mixer.is_some() {
+                "hardware"
+            } else {
+                "software"
+            }
+        }
+        audigma_settings::VolumeControlMode::Hardware => {
+            if hw_mixer.is_none() {
+                eprintln!(
+                    "  VolumeControl: Warning: 'hardware' volume requested but no mixer element found; digital gain locked at 0 dBFS"
+                );
+            }
+            "hardware"
+        }
+        audigma_settings::VolumeControlMode::Software => "software",
+        audigma_settings::VolumeControlMode::None => "none",
+    };
+    control.set_volume_mode(active_vol_mode);
+    eprintln!(
+        "  VolumeControl: {} (configured: {:?})",
+        active_vol_mode, vol_control_mode
+    );
 
     let mut current_output: Option<Box<dyn AudioOutput>> = None;
 
@@ -634,6 +713,25 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
                     );
                     current_output = Some(out);
                     control.set_disconnect_info(None, None);
+
+                    // Re-bind ALSA hardware mixer if applicable
+                    if out_cfg.backend == OutputBackend::Alsa {
+                        hw_mixer =
+                            match AlsaHardwareMixer::open(&target_device, custom_mixer_control) {
+                                Ok(mut m) => {
+                                    eprintln!(
+                                        "[INFO] audigma: re-bound ALSA hardware mixer '{}'",
+                                        m.element_name()
+                                    );
+                                    let cur_vol = control.get_volume();
+                                    let is_muted = control.is_muted();
+                                    let _ = m.set_volume_db(cur_vol);
+                                    let _ = m.set_mute(is_muted);
+                                    Some(m)
+                                }
+                                Err(_) => None,
+                            };
+                    }
                 }
                 Err(e) => {
                     eprintln!(
@@ -654,7 +752,14 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
         let output = current_output.as_mut().unwrap();
 
         // Run streaming loop
-        match pipeline.run_streaming(&mut **input, &mut **output, control.clone()) {
+        match pipeline.run_streaming_with_bridge(
+            &mut **input,
+            &mut **output,
+            control.clone(),
+            hw_mixer
+                .as_mut()
+                .map(|m| m as &mut dyn audigma_engine::HardwareVolumeBridge),
+        ) {
             Ok(StreamExitReason::Stopped) => break,
             Ok(StreamExitReason::RateChanged {
                 new_rate,
@@ -718,6 +823,7 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
             Err(EngineError::DeviceDisconnected(reason)) => {
                 eprintln!("[WARN] audigma: output device disconnected: {reason}");
                 current_output = None; // Force output driver teardown
+                hw_mixer = None;
                 #[cfg(feature = "dbus")]
                 {
                     eprintln!(
@@ -786,9 +892,11 @@ pub fn run_status(args: StatusArgs) -> Result<(), EngineError> {
                         telem.output_format, telem.output_rate_hz
                     );
                     println!("  Active Preset:       {}", telem.preset);
+                    let vol_pct = telem.volume_percent;
+                    let mute_str = if telem.is_muted { " [MUTED]" } else { "" };
                     println!(
-                        "  Volume:              {:.1} dB (preamp: {:.1} dB)",
-                        telem.volume_db, telem.preamp_db
+                        "  Volume:              {:.1} dB ({:.0}%){mute_str} (mode: {}, preamp: {:.1} dB)",
+                        telem.volume_db, vol_pct, telem.volume_mode, telem.preamp_db
                     );
                     println!(
                         "  Frames In / Out:     {} / {}",
@@ -829,7 +937,24 @@ pub fn run_status(args: StatusArgs) -> Result<(), EngineError> {
 pub fn run_set(args: SetArgs) -> Result<(), EngineError> {
     let socket_path = args.socket.unwrap_or_else(default_socket_path);
     let req = match args.command {
-        SetCommands::Volume { db } => IpcRequest::SetVolume { volume_db: db },
+        SetCommands::Volume { value } => {
+            let s = value.trim();
+            if let Some(pct_str) = s.strip_suffix('%') {
+                let p: f64 = pct_str
+                    .trim()
+                    .parse()
+                    .map_err(|e| EngineError::Pipeline(format!("invalid percentage '{value}': {e}")))?;
+                if p < 0.0 {
+                    return Err(EngineError::Pipeline(
+                        "percentage volume cannot be negative".to_string(),
+                    ));
+                }
+                IpcRequest::SetVolumePercent { percent: p }
+            } else {
+                let volume_db = parse_volume_to_db(&value).map_err(EngineError::Pipeline)?;
+                IpcRequest::SetVolume { volume_db }
+            }
+        }
         SetCommands::Preset { name } => IpcRequest::SetPreset { preset: name },
     };
 
@@ -1794,5 +1919,45 @@ fn print_alsa_probe_report(report: &audigma_io::AlsaProbeReport) {
             }
         }
         println!();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_volume_to_db_decibels() {
+        assert_eq!(parse_volume_to_db("0").unwrap(), 0.0);
+        assert_eq!(parse_volume_to_db("0.0").unwrap(), 0.0);
+        assert_eq!(parse_volume_to_db("-6").unwrap(), -6.0);
+        assert_eq!(parse_volume_to_db("-3.5").unwrap(), -3.5);
+        assert_eq!(parse_volume_to_db("+2.0").unwrap(), 2.0);
+        assert_eq!(parse_volume_to_db("-12dB").unwrap(), -12.0);
+        assert_eq!(parse_volume_to_db("-10.5 dB").unwrap(), -10.5);
+        assert_eq!(parse_volume_to_db("0dB").unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_parse_volume_to_db_percentage() {
+        assert_eq!(parse_volume_to_db("100%").unwrap(), 0.0);
+        assert_eq!(parse_volume_to_db("0%").unwrap(), -120.0);
+
+        let half = parse_volume_to_db("50%").unwrap();
+        // 50% slider => ALSA volume_mapping curve with -60 dB floor => ~= -15.58 dB
+        assert!((half - (-15.58)).abs() < 0.1);
+
+        let ten = parse_volume_to_db("10%").unwrap();
+        // 10% slider => ALSA curve => ~= -43.27 dB (audible, pleasant background)
+        assert!((ten - (-43.27)).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_parse_volume_to_db_invalid() {
+        assert!(parse_volume_to_db("").is_err());
+        assert!(parse_volume_to_db("   ").is_err());
+        assert!(parse_volume_to_db("xyz").is_err());
+        assert!(parse_volume_to_db("-5%").is_err());
+        assert!(parse_volume_to_db("abc%").is_err());
     }
 }

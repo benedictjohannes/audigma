@@ -8,19 +8,21 @@
 //!   optionally targeting a specific node (e.g. `alsa_output...`).
 
 use audigma_dsp::PcmRateHz;
+use audigma_engine::VolumeUpdate;
 use audigma_engine::queue::TaggedChunk;
 use audigma_engine::traits::{AudioInput, AudioOutput, EngineError};
 use audigma_format::AudioStreamInfo;
 use audigma_settings::{InputConfig, RateMode};
 use libspa::param::audio::{AudioFormat, AudioInfoRaw};
-use libspa::pod::Pod;
-use libspa::utils::Direction;
+use libspa::pod::deserialize::PodDeserializer;
+use libspa::pod::{ChoiceValue, Pod, Value, ValueArray};
+use libspa::utils::{ChoiceEnum, Direction};
 use pipewire::properties::properties;
 use pipewire::stream::{StreamBox, StreamFlags};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::io::Write;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use thiserror::Error;
 
@@ -149,6 +151,90 @@ pub fn build_format_pod(
     .map_err(|e| PipeWireError::FormatPod(format!("{e:?}")))
 }
 
+/// Helper function to parse SPA Props POD bytes into volume and mute updates.
+pub fn parse_props_pod(bytes: &[u8]) -> Option<VolumeUpdate> {
+    if let Ok((_, Value::Object(obj))) = PodDeserializer::deserialize_any_from(bytes) {
+        let mut vol_pct: Option<f64> = None;
+        let mut vol_db: Option<f64> = None;
+        let mut is_muted: Option<bool> = None;
+
+        let f_to_pct = |f: f32| -> f64 {
+            if f <= 1e-6 {
+                0.0
+            } else {
+                ((f as f64).cbrt() * 100.0).clamp(0.0, 150.0)
+            }
+        };
+
+        for prop in obj.properties {
+            if prop.key == libspa::sys::SPA_PROP_volume {
+                match prop.value {
+                    Value::Float(f) => {
+                        let pct = f_to_pct(f);
+                        vol_pct = Some(pct);
+                        vol_db = Some(audigma_dsp::alsamixer_percentage_to_db(
+                            pct,
+                            audigma_dsp::DEFAULT_SOFTWARE_MIN_DB,
+                        ));
+                    }
+                    Value::Choice(ChoiceValue::Float(choice)) => {
+                        let f = match choice.1 {
+                            ChoiceEnum::None(v) => v,
+                            ChoiceEnum::Range { default, .. } => default,
+                            ChoiceEnum::Step { default, .. } => default,
+                            ChoiceEnum::Enum { default, .. } => default,
+                            ChoiceEnum::Flags { default, .. } => default,
+                        };
+                        let pct = f_to_pct(f);
+                        vol_pct = Some(pct);
+                        vol_db = Some(audigma_dsp::alsamixer_percentage_to_db(
+                            pct,
+                            audigma_dsp::DEFAULT_SOFTWARE_MIN_DB,
+                        ));
+                    }
+                    _ => {}
+                }
+            } else if prop.key == libspa::sys::SPA_PROP_mute {
+                match prop.value {
+                    Value::Bool(b) => is_muted = Some(b),
+                    Value::Choice(ChoiceValue::Bool(choice)) => {
+                        let b = match choice.1 {
+                            ChoiceEnum::None(v) => v,
+                            ChoiceEnum::Range { default, .. } => default,
+                            ChoiceEnum::Step { default, .. } => default,
+                            ChoiceEnum::Enum { default, .. } => default,
+                            ChoiceEnum::Flags { default, .. } => default,
+                        };
+                        is_muted = Some(b);
+                    }
+                    _ => {}
+                }
+            } else if prop.key == libspa::sys::SPA_PROP_channelVolumes {
+                if let Value::ValueArray(ValueArray::Float(floats)) = prop.value {
+                    if !floats.is_empty() {
+                        let avg: f32 = floats.iter().sum::<f32>() / floats.len() as f32;
+                        let pct = f_to_pct(avg);
+                        vol_pct = Some(pct);
+                        vol_db = Some(audigma_dsp::alsamixer_percentage_to_db(
+                            pct,
+                            audigma_dsp::DEFAULT_SOFTWARE_MIN_DB,
+                        ));
+                    }
+                }
+            }
+        }
+
+        if vol_pct.is_some() || vol_db.is_some() || is_muted.is_some() {
+            return Some(VolumeUpdate {
+                volume_db: vol_db,
+                volume_percent: vol_pct,
+                is_muted,
+            });
+        }
+    }
+    None
+}
+
 /// PipeWire virtual audio sink node (`audigma_sink`).
 ///
 /// Desktop sound and audio players route into this virtual sink (`media.class = "Audio/Sink"`).
@@ -162,6 +248,7 @@ pub struct PipeWireVirtualSink {
     generation: Arc<AtomicU64>,
     active_rate: Arc<AtomicU32>,
     pending_rate: Arc<AtomicU32>,
+    pending_volume: Arc<Mutex<Option<VolumeUpdate>>>,
     running: Arc<AtomicBool>,
 }
 
@@ -229,11 +316,13 @@ impl PipeWireVirtualSink {
         let generation = Arc::new(AtomicU64::new(1));
         let active_rate = Arc::new(AtomicU32::new(rate_hz));
         let pending_rate = Arc::new(AtomicU32::new(0));
+        let pending_volume = Arc::new(Mutex::new(None));
         let running = Arc::new(AtomicBool::new(true));
 
         let gen_clone = generation.clone();
         let active_rate_cb = active_rate.clone();
         let pending_rate_cb = pending_rate.clone();
+        let pending_vol_cb = pending_volume.clone();
         let running_clone = running.clone();
 
         let pos_str = channel_positions.join(",");
@@ -279,10 +368,39 @@ impl PipeWireVirtualSink {
 
                 let sink_proxy =
                     core.create_object::<pipewire::node::Node>("adapter", &adapter_props);
-                let _sink_node = match sink_proxy {
+                let sink_node = match sink_proxy {
                     Ok(n) => n,
                     Err(_) => return,
                 };
+
+                let pending_vol_sink = pending_vol_cb.clone();
+                let _sink_listener = sink_node
+                    .add_listener_local()
+                    .param(move |_seq, param_type, _index, _next, param| {
+                        let Some(param) = param else {
+                            return;
+                        };
+                        if param_type == libspa::param::ParamType::Props {
+                            if let Some(vol_update) = parse_props_pod(param.as_bytes()) {
+                                eprintln!(
+                                    "[audigma-pw-in] sink volume event: pct={:?}%, vol={:?} dB, mute={:?}",
+                                    vol_update.volume_percent, vol_update.volume_db, vol_update.is_muted
+                                );
+                                let mut pending = pending_vol_sink.lock().unwrap();
+                                let prev: VolumeUpdate = pending.unwrap_or_default();
+                                *pending = Some(VolumeUpdate {
+                                    volume_db: vol_update.volume_db.or(prev.volume_db),
+                                    volume_percent: vol_update.volume_percent.or(prev.volume_percent),
+                                    is_muted: vol_update.is_muted.or(prev.is_muted),
+                                });
+                            }
+                        }
+                    })
+                    .register();
+
+                sink_node.subscribe_params(&[libspa::param::ParamType::Props]);
+                sink_node.enum_params(0, Some(libspa::param::ParamType::Props), 0, 1);
+                let _sink_node = sink_node;
 
                 let stream_name = format!("audigma-capture-{node_name_owned}");
                 let mut stream_props = properties! {
@@ -312,25 +430,38 @@ impl PipeWireVirtualSink {
                         let Some(param) = param else {
                             return;
                         };
-                        if id != libspa::param::ParamType::Format.as_raw() {
-                            return;
-                        }
-
-                        let mut info = AudioInfoRaw::new();
-                        if info.parse(param).is_ok() {
-                            let negotiated_rate = info.rate();
-                            let negotiated_channels = info.channels();
-                            eprintln!(
-                                "[audigma-pw-in] format negotiated: rate={}, channels={}, pos={:?}",
-                                negotiated_rate,
-                                negotiated_channels,
-                                &info.position()[..negotiated_channels as usize]
-                            );
-                            if negotiated_rate > 0 {
-                                let cur_active = active_rate_cb.load(Ordering::Relaxed);
-                                if cur_active != negotiated_rate {
-                                    pending_rate_cb.store(negotiated_rate, Ordering::SeqCst);
+                        if id == libspa::param::ParamType::Format.as_raw() {
+                            let mut info = AudioInfoRaw::new();
+                            if info.parse(param).is_ok() {
+                                let negotiated_rate = info.rate();
+                                let negotiated_channels = info.channels();
+                                eprintln!(
+                                    "[audigma-pw-in] format negotiated: rate={}, channels={}, pos={:?}",
+                                    negotiated_rate,
+                                    negotiated_channels,
+                                    &info.position()[..negotiated_channels as usize]
+                                );
+                                if negotiated_rate > 0 {
+                                    let cur_active = active_rate_cb.load(Ordering::Relaxed);
+                                    if cur_active != negotiated_rate {
+                                        pending_rate_cb.store(negotiated_rate, Ordering::SeqCst);
+                                    }
                                 }
+                            }
+                        } else if id == libspa::param::ParamType::Props.as_raw() {
+                            let bytes = param.as_bytes();
+                            if let Some(vol_update) = parse_props_pod(bytes) {
+                                eprintln!(
+                                    "[audigma-pw-in] stream volume event: pct={:?}%, vol={:?} dB, mute={:?}",
+                                    vol_update.volume_percent, vol_update.volume_db, vol_update.is_muted
+                                );
+                                let mut pending = pending_vol_cb.lock().unwrap();
+                                let prev: VolumeUpdate = pending.unwrap_or_default();
+                                *pending = Some(VolumeUpdate {
+                                    volume_db: vol_update.volume_db.or(prev.volume_db),
+                                    volume_percent: vol_update.volume_percent.or(prev.volume_percent),
+                                    is_muted: vol_update.is_muted.or(prev.is_muted),
+                                });
                             }
                         }
                     })
@@ -481,6 +612,7 @@ impl PipeWireVirtualSink {
             generation,
             active_rate,
             pending_rate,
+            pending_volume,
             running,
         })
     }
@@ -601,6 +733,10 @@ impl AudioInput for PipeWireVirtualSink {
         } else {
             None
         }
+    }
+
+    fn check_volume_change(&self) -> Option<VolumeUpdate> {
+        self.pending_volume.lock().unwrap().take()
     }
 
     fn set_generation(&mut self, generation_tag: u64) {

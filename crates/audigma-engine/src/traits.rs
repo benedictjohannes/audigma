@@ -41,6 +41,14 @@ pub enum EngineError {
     DeviceDisconnected(String),
 }
 
+/// Volume or mute update event received from an audio input driver (e.g. PipeWire props listener).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct VolumeUpdate {
+    pub volume_db: Option<f64>,
+    pub volume_percent: Option<f64>,
+    pub is_muted: Option<bool>,
+}
+
 /// Abstract streaming audio input trait.
 pub trait AudioInput: Send {
     /// Returns metadata describing the input audio stream.
@@ -70,6 +78,11 @@ pub trait AudioInput: Send {
         None
     }
 
+    /// Checks if a dynamic volume or mute update has been received from the environment.
+    fn check_volume_change(&self) -> Option<VolumeUpdate> {
+        None
+    }
+
     /// Sets the active generation tag for input buffer filtering.
     fn set_generation(&mut self, _gen: u64) {}
 
@@ -84,6 +97,20 @@ pub trait AudioInput: Send {
 
     /// Returns current input queue buffer fill and capacity `(current_fill, capacity)`, if supported.
     fn buffer_occupancy(&self) -> Option<(usize, usize)> {
+        None
+    }
+}
+
+/// Abstract hardware volume bridge for synchronized analog attenuation (`Design.md §1.8`).
+pub trait HardwareVolumeBridge: Send {
+    /// Sets the hardware playback volume in decibels.
+    fn set_volume_db(&mut self, db: f64) -> Result<(), EngineError>;
+
+    /// Sets the hardware mute state.
+    fn set_mute(&mut self, muted: bool) -> Result<(), EngineError>;
+
+    /// Returns the hardware volume dB range `(min_db, max_db)` if supported.
+    fn get_db_range(&self) -> Option<(f64, f64)> {
         None
     }
 }
@@ -265,6 +292,7 @@ pub struct MockAudioInput {
     pos: usize,
     allow_rewind: bool,
     pending_rate: Option<audigma_dsp::PcmRateHz>,
+    pending_volume: std::sync::Arc<std::sync::Mutex<Option<VolumeUpdate>>>,
     generation: u64,
 }
 
@@ -282,6 +310,7 @@ impl MockAudioInput {
             pos: 0,
             allow_rewind,
             pending_rate: None,
+            pending_volume: std::sync::Arc::new(std::sync::Mutex::new(None)),
             generation: 1,
         }
     }
@@ -304,6 +333,7 @@ impl MockAudioInput {
             pos: 0,
             allow_rewind,
             pending_rate: None,
+            pending_volume: std::sync::Arc::new(std::sync::Mutex::new(None)),
             generation: 1,
         }
     }
@@ -311,6 +341,11 @@ impl MockAudioInput {
     /// Simulates a dynamic sample rate change from upstream.
     pub fn simulate_rate_change(&mut self, new_rate: audigma_dsp::PcmRateHz) {
         self.pending_rate = Some(new_rate);
+    }
+
+    /// Simulates a dynamic volume or mute change from upstream.
+    pub fn simulate_volume_change(&self, update: VolumeUpdate) {
+        *self.pending_volume.lock().unwrap() = Some(update);
     }
 }
 
@@ -350,6 +385,10 @@ impl AudioInput for MockAudioInput {
 
     fn check_rate_change(&self) -> Option<audigma_dsp::PcmRateHz> {
         self.pending_rate
+    }
+
+    fn check_volume_change(&self) -> Option<VolumeUpdate> {
+        self.pending_volume.lock().unwrap().take()
     }
 
     fn set_generation(&mut self, generation_tag: u64) {

@@ -36,6 +36,9 @@ pub struct DaemonTelemetry {
     pub output_rate_hz: u32,
     pub preset: String,
     pub volume_db: f64,
+    pub volume_percent: f64,
+    pub volume_mode: String,
+    pub is_muted: bool,
     pub preamp_db: f64,
     pub total_input_frames: u64,
     pub total_output_frames: u64,
@@ -57,6 +60,9 @@ pub struct DaemonControlHandle {
     pub running: Arc<AtomicBool>,
     pub generation: Arc<AtomicU64>,
     pub volume_db: Arc<Mutex<f64>>,
+    pub volume_percent: Arc<Mutex<Option<f64>>>,
+    pub volume_mode: Arc<Mutex<String>>,
+    pub is_muted: Arc<AtomicBool>,
     pub target_preset: Arc<Mutex<Option<String>>>,
     pub telemetry: Arc<Mutex<DaemonTelemetry>>,
 }
@@ -76,6 +82,9 @@ impl DaemonControlHandle {
             output_rate_hz: output_rate,
             preset: preset.to_string(),
             volume_db: 0.0,
+            volume_percent: 100.0,
+            volume_mode: "software".to_string(),
+            is_muted: false,
             preamp_db,
             total_input_frames: 0,
             total_output_frames: 0,
@@ -93,6 +102,9 @@ impl DaemonControlHandle {
             running: Arc::new(AtomicBool::new(true)),
             generation: Arc::new(AtomicU64::new(1)),
             volume_db: Arc::new(Mutex::new(0.0)),
+            volume_percent: Arc::new(Mutex::new(Some(100.0))),
+            volume_mode: Arc::new(Mutex::new("software".to_string())),
+            is_muted: Arc::new(AtomicBool::new(false)),
             target_preset: Arc::new(Mutex::new(None)),
             telemetry: Arc::new(Mutex::new(telemetry)),
         }
@@ -114,11 +126,58 @@ impl DaemonControlHandle {
     }
 
     #[inline]
+    pub fn get_volume_percent(&self) -> Option<f64> {
+        *self.volume_percent.lock().unwrap()
+    }
+
+    #[inline]
     pub fn set_volume(&self, db: f64) {
         let mut vol = self.volume_db.lock().unwrap();
         *vol = db;
+        let mut p = self.volume_percent.lock().unwrap();
+        *p = None;
         let mut telem = self.telemetry.lock().unwrap();
         telem.volume_db = db;
+    }
+
+    #[inline]
+    pub fn set_volume_percent(&self, pct: f64) {
+        let mut p = self.volume_percent.lock().unwrap();
+        *p = Some(pct);
+        let mut telem = self.telemetry.lock().unwrap();
+        telem.volume_percent = pct;
+    }
+
+    #[inline]
+    pub fn sync_telemetry(&self, db: f64, pct: f64) {
+        let mut telem = self.telemetry.lock().unwrap();
+        telem.volume_db = db;
+        telem.volume_percent = pct;
+    }
+
+    #[inline]
+    pub fn get_volume_mode(&self) -> String {
+        self.volume_mode.lock().unwrap().clone()
+    }
+
+    #[inline]
+    pub fn set_volume_mode(&self, mode: &str) {
+        let mut m = self.volume_mode.lock().unwrap();
+        *m = mode.to_string();
+        let mut telem = self.telemetry.lock().unwrap();
+        telem.volume_mode = mode.to_string();
+    }
+
+    #[inline]
+    pub fn is_muted(&self) -> bool {
+        self.is_muted.load(Ordering::SeqCst)
+    }
+
+    #[inline]
+    pub fn set_muted(&self, muted: bool) {
+        self.is_muted.store(muted, Ordering::SeqCst);
+        let mut telem = self.telemetry.lock().unwrap();
+        telem.is_muted = muted;
     }
 
     #[inline]
@@ -269,6 +328,17 @@ impl LivePipeline {
         output: &mut dyn AudioOutput,
         control: DaemonControlHandle,
     ) -> Result<StreamExitReason, EngineError> {
+        self.run_streaming_with_bridge(input, output, control, None)
+    }
+
+    /// Runs the streaming loop with an optional hardware volume bridge (`Design.md §1.8`).
+    pub fn run_streaming_with_bridge(
+        &self,
+        input: &mut dyn AudioInput,
+        output: &mut dyn AudioOutput,
+        control: DaemonControlHandle,
+        mut hw_bridge: Option<&mut dyn crate::traits::HardwareVolumeBridge>,
+    ) -> Result<StreamExitReason, EngineError> {
         let _ftz = ScopedFtzDaz::new();
         let target_spec = self.plan.stream_spec.target;
         let preset = self.plan.dsp_config.preset;
@@ -370,6 +440,9 @@ impl LivePipeline {
             telem.state = format!("{:?}", lifecycle.state());
         }
 
+        let mut last_hw_vol: Option<f64> = None;
+        let mut last_hw_mute: Option<bool> = None;
+
         while control.is_running() {
             // Check for dynamic rate changes
             if pending_rate_switch.is_none() {
@@ -378,6 +451,18 @@ impl LivePipeline {
                         pending_rate_switch = Some(new_rate);
                         lifecycle.request_stop();
                     }
+                }
+            }
+
+            // Check dynamic volume / mute updates from input driver
+            if let Some(vol_upd) = input.check_volume_change() {
+                if let Some(pct) = vol_upd.volume_percent {
+                    control.set_volume_percent(pct);
+                } else if let Some(db) = vol_upd.volume_db {
+                    control.set_volume(db);
+                }
+                if let Some(muted) = vol_upd.is_muted {
+                    control.set_muted(muted);
                 }
             }
 
@@ -445,10 +530,66 @@ impl LivePipeline {
             }
             total_input_frames += frames_read as u64;
 
-            // Compute current dynamic gain
-            let user_vol = control.get_volume();
-            let total_gain_db = base_preamp + profile_headroom + user_vol;
-            let linear_gain = 10.0_f64.powf(total_gain_db / 20.0);
+            // Compute current dynamic gain based on active volume mode
+            let is_muted = control.is_muted();
+            let vol_mode = control.get_volume_mode();
+            let cur_pct = control.get_volume_percent();
+
+            let (target_db, resolved_pct) = match cur_pct {
+                Some(pct) => {
+                    let min_db = if vol_mode.as_str() == "hardware" {
+                        hw_bridge
+                            .as_ref()
+                            .and_then(|b| b.get_db_range())
+                            .map(|(min, _)| min)
+                            .unwrap_or(-50.0)
+                    } else {
+                        audigma_dsp::DEFAULT_SOFTWARE_MIN_DB
+                    };
+                    let db = audigma_dsp::alsamixer_percentage_to_db(pct, min_db);
+                    (db, pct)
+                }
+                None => {
+                    let db = control.get_volume();
+                    let min_db = if vol_mode.as_str() == "hardware" {
+                        hw_bridge
+                            .as_ref()
+                            .and_then(|b| b.get_db_range())
+                            .map(|(min, _)| min)
+                            .unwrap_or(-50.0)
+                    } else {
+                        audigma_dsp::DEFAULT_SOFTWARE_MIN_DB
+                    };
+                    let pct = audigma_dsp::alsamixer_db_to_percentage(db, min_db);
+                    (db, pct)
+                }
+            };
+            control.sync_telemetry(target_db, resolved_pct);
+
+            // Synchronize hardware volume if bridge is present and mode is hardware
+            if vol_mode.as_str() == "hardware" {
+                if let Some(ref mut bridge) = hw_bridge {
+                    if last_hw_vol != Some(target_db) {
+                        let _ = bridge.set_volume_db(target_db);
+                        last_hw_vol = Some(target_db);
+                    }
+                    if last_hw_mute != Some(is_muted) {
+                        let _ = bridge.set_mute(is_muted);
+                        last_hw_mute = Some(is_muted);
+                    }
+                }
+            }
+
+            let user_vol = match vol_mode.as_str() {
+                "hardware" | "none" => 0.0,
+                _ => target_db,
+            };
+            let linear_gain = if (is_muted && vol_mode.as_str() != "hardware") || target_db <= -119.0 {
+                0.0
+            } else {
+                let total_gain_db = base_preamp + profile_headroom + user_vol;
+                10.0_f64.powf(total_gain_db / 20.0)
+            };
 
             // Apply pre-SRC gain and lifecycle cosine ramping
             let mut active_slices: Vec<&mut [f64]> = in_channels

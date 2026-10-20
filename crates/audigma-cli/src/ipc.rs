@@ -24,7 +24,9 @@ use thiserror::Error;
 pub enum IpcRequest {
     GetStatus,
     SetVolume { volume_db: f64 },
+    SetVolumePercent { percent: f64 },
     SetPreset { preset: String },
+    SetMute { muted: bool },
     Stop,
 }
 
@@ -144,8 +146,16 @@ fn handle_client(mut stream: UnixStream, control: &DaemonControlHandle) {
                 control.set_volume(volume_db);
                 IpcResponse::Ok
             }
+            Ok(IpcRequest::SetVolumePercent { percent }) => {
+                control.set_volume_percent(percent);
+                IpcResponse::Ok
+            }
             Ok(IpcRequest::SetPreset { preset }) => {
                 control.set_preset(&preset);
+                IpcResponse::Ok
+            }
+            Ok(IpcRequest::SetMute { muted }) => {
+                control.set_muted(muted);
                 IpcResponse::Ok
             }
             Ok(IpcRequest::Stop) => {

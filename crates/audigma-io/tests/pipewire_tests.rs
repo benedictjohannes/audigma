@@ -231,3 +231,17 @@ fn test_pipewire_virtual_sink_and_pcm_output_lifecycle() {
         }
     }
 }
+
+#[test]
+#[cfg(feature = "pipewire")]
+fn test_pipewire_virtual_sink_initial_volume_state() {
+    match PipeWireVirtualSink::new("audigma_test_sink_vol", 48000, 2, 8) {
+        Ok(sink) => {
+            assert_eq!(sink.check_volume_change(), None);
+        }
+        Err(e) => {
+            let msg = format!("{e}");
+            assert!(!msg.is_empty());
+        }
+    }
+}
