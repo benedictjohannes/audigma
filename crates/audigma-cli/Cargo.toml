@@ -31,3 +31,5 @@ toml = { workspace = true }
 
 [dev-dependencies]
 hound = { workspace = true }
+tempfile = { workspace = true }
+

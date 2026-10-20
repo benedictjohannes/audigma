@@ -14,7 +14,11 @@ use audigma_engine::{
 use audigma_format::AudioStreamInfo;
 use audigma_format::decoder::AudioDecoder;
 use audigma_format::dop::DopContainerFormat;
-use audigma_io::alsa::{AlsaAudioOutput, AlsaOutputConfig};
+use audigma_io::alsa::{
+    AlsaAudioOutput, AlsaOutputConfig, is_alsa_device_present, resolve_card_index,
+    wait_for_alsa_device,
+};
+
 #[cfg(feature = "dbus")]
 use audigma_io::dbus::{DeviceReservation, request_realtime_priority};
 use audigma_io::file::{FileAudioInput, FileAudioOutput};
@@ -27,7 +31,7 @@ use serde_json::json;
 use std::f64::consts::PI;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -357,51 +361,30 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
 
     // D-Bus device reservation if exclusive ALSA output is selected
     #[cfg(feature = "dbus")]
-    let _reservation = if out_cfg.backend == OutputBackend::Alsa
-        && out_cfg.reserve_device.unwrap_or(true)
-    {
-        let card_idx = out_cfg
-            .device
-            .as_deref()
-            .and_then(|dev| {
-                if let Some(card_part) = dev.strip_prefix("hw:CARD=") {
-                    let card_name = card_part.split(',').next().unwrap_or("");
-                    // Check /proc/asound/cards or symlinks like /proc/asound/<name>
-                    if let Ok(target) = std::fs::read_link(format!("/proc/asound/{card_name}")) {
-                        if let Some(file_name) = target.file_name().and_then(|f| f.to_str()) {
-                            if let Some(idx_str) = file_name.strip_prefix("card") {
-                                return idx_str.parse::<u32>().ok();
-                            }
-                        }
-                    }
-                    None
-                } else if let Some(stripped) = dev.strip_prefix("hw:") {
-                    stripped
-                        .split(',')
-                        .next()
-                        .and_then(|s| s.parse::<u32>().ok())
-                } else {
+    let mut _reservation: Option<DeviceReservation> =
+        if out_cfg.backend == OutputBackend::Alsa && out_cfg.reserve_device.unwrap_or(true) {
+            let card_idx = out_cfg
+                .device
+                .as_deref()
+                .and_then(resolve_card_index)
+                .unwrap_or(0);
+
+            match DeviceReservation::acquire(card_idx, "audigma", 100) {
+                Ok(res) => {
+                    eprintln!(
+                        "  DeviceLock:    Acquired {} via D-Bus org.freedesktop.ReserveDevice1",
+                        res.well_known_name()
+                    );
+                    Some(res)
+                }
+                Err(e) => {
+                    eprintln!("  DeviceLock:    Warning: failed to acquire D-Bus reservation: {e}");
                     None
                 }
-            })
-            .unwrap_or(0);
-
-        match DeviceReservation::acquire(card_idx, "audigma", 100) {
-            Ok(res) => {
-                eprintln!(
-                    "  DeviceLock:    Acquired {} via D-Bus org.freedesktop.ReserveDevice1",
-                    res.well_known_name()
-                );
-                Some(res)
             }
-            Err(e) => {
-                eprintln!("  DeviceLock:    Warning: failed to acquire D-Bus reservation: {e}");
-                None
-            }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
 
     // Real-time thread priority
     #[cfg(feature = "dbus")]
@@ -413,81 +396,83 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
         }
     }
 
-    // Set up Input Backend
-    let mut input_driver: Box<dyn AudioInput> = match in_cfg.backend {
-        #[cfg(feature = "pipewire")]
-        InputBackend::Pipewire => {
-            let node_name = in_cfg.node_name.as_deref().unwrap_or("audigma_sink");
-            let sink = PipeWireVirtualSink::new(node_name, input_rate.get(), channels as u32, 32)
-                .map_err(|e| {
-                EngineError::Pipeline(format!("failed to bind PipeWire virtual sink: {e}"))
-            })?;
-            Box::new(sink)
-        }
-        InputBackend::Alsa => {
-            return Err(EngineError::Pipeline(
-                "ALSA live capture input not yet configured".to_string(),
-            ));
-        }
-        InputBackend::File | InputBackend::Stdio => {
-            return Err(EngineError::Pipeline(
-                "File/Stdio backend is for offline mode; use 'audigma convert'".to_string(),
-            ));
-        }
-        #[cfg(not(feature = "pipewire"))]
-        InputBackend::Pipewire => {
-            return Err(EngineError::Pipeline(
-                "PipeWire feature is disabled in this build".to_string(),
-            ));
-        }
-    };
-
-    // Set up Output Backend
-    let mut output_driver: Box<dyn AudioOutput> = match out_cfg.backend {
-        OutputBackend::Alsa => {
-            let alsa_config =
-                AlsaOutputConfig::from_settings(&settings, &target_spec).map_err(|e| {
-                    EngineError::Pipeline(format!("failed to configure ALSA output: {e}"))
-                })?;
-            let alsa_out = AlsaAudioOutput::open(alsa_config)
-                .map_err(|e| EngineError::Pipeline(format!("failed to open ALSA output: {e}")))?;
-            Box::new(alsa_out)
-        }
-        #[cfg(feature = "pipewire")]
-        OutputBackend::Pipewire => {
-            let target_node = out_cfg.target_node.as_deref();
-            let pw_rate = match target_spec {
-                TargetRateSpec::Pcm { rate, .. } => rate.get(),
-                TargetRateSpec::Dsd { bit_rate } => {
-                    return Err(EngineError::Pipeline(format!(
-                        "PipeWire PCM output cannot carry DSD bit rate {bit_rate}"
-                    )));
+    // Set up Input Backend helper closure
+    let create_input_driver =
+        |in_cfg: &audigma_settings::InputConfig| -> Result<Box<dyn AudioInput>, EngineError> {
+            match in_cfg.backend {
+                #[cfg(feature = "pipewire")]
+                InputBackend::Pipewire => {
+                    let node_name = in_cfg.node_name.as_deref().unwrap_or("audigma_sink");
+                    let sink =
+                        PipeWireVirtualSink::new(node_name, input_rate.get(), channels as u32, 32)
+                            .map_err(|e| {
+                                EngineError::Pipeline(format!(
+                                    "failed to bind PipeWire virtual sink: {e}"
+                                ))
+                            })?;
+                    Ok(Box::new(sink))
                 }
-            };
-            let pw_out = PipeWirePcmOutput::new(
-                "audigma_pcm_out",
-                target_node,
-                pw_rate,
-                channels as u32,
-                32,
-            )
-            .map_err(|e| {
-                EngineError::Pipeline(format!("failed to initialize PipeWire output: {e}"))
-            })?;
-            Box::new(pw_out)
-        }
-        #[cfg(not(feature = "pipewire"))]
-        OutputBackend::Pipewire => {
-            return Err(EngineError::Pipeline(
-                "PipeWire feature is disabled in this build".to_string(),
-            ));
-        }
-        OutputBackend::File | OutputBackend::Stdio => {
-            return Err(EngineError::Pipeline(
-                "File/Stdio backend is for offline mode; use 'audigma convert'".to_string(),
-            ));
-        }
-    };
+                InputBackend::Alsa => Err(EngineError::Pipeline(
+                    "ALSA live capture input not yet configured".to_string(),
+                )),
+                InputBackend::File | InputBackend::Stdio => Err(EngineError::Pipeline(
+                    "File/Stdio backend is for offline mode; use 'audigma convert'".to_string(),
+                )),
+                #[cfg(not(feature = "pipewire"))]
+                InputBackend::Pipewire => Err(EngineError::Pipeline(
+                    "PipeWire feature is disabled in this build".to_string(),
+                )),
+            }
+        };
+
+    let mut input_driver: Option<Box<dyn AudioInput>> = Some(create_input_driver(in_cfg)?);
+
+    // Helper closure to create/open output backend driver
+    let create_output_driver =
+        |out_cfg: &audigma_settings::OutputConfig| -> Result<Box<dyn AudioOutput>, EngineError> {
+            match out_cfg.backend {
+                OutputBackend::Alsa => {
+                    let alsa_config = AlsaOutputConfig::from_settings(&settings, &target_spec)
+                        .map_err(|e| {
+                            EngineError::Pipeline(format!("failed to configure ALSA output: {e}"))
+                        })?;
+                    let alsa_out = AlsaAudioOutput::open(alsa_config).map_err(|e| {
+                        EngineError::Pipeline(format!("failed to open ALSA output: {e}"))
+                    })?;
+                    Ok(Box::new(alsa_out))
+                }
+                #[cfg(feature = "pipewire")]
+                OutputBackend::Pipewire => {
+                    let target_node = out_cfg.target_node.as_deref();
+                    let pw_rate = match target_spec {
+                        TargetRateSpec::Pcm { rate, .. } => rate.get(),
+                        TargetRateSpec::Dsd { bit_rate } => {
+                            return Err(EngineError::Pipeline(format!(
+                                "PipeWire PCM output cannot carry DSD bit rate {bit_rate}"
+                            )));
+                        }
+                    };
+                    let pw_out = PipeWirePcmOutput::new(
+                        "audigma_pcm_out",
+                        target_node,
+                        pw_rate,
+                        channels as u32,
+                        32,
+                    )
+                    .map_err(|e| {
+                        EngineError::Pipeline(format!("failed to initialize PipeWire output: {e}"))
+                    })?;
+                    Ok(Box::new(pw_out))
+                }
+                #[cfg(not(feature = "pipewire"))]
+                OutputBackend::Pipewire => Err(EngineError::Pipeline(
+                    "PipeWire feature is disabled in this build".to_string(),
+                )),
+                OutputBackend::File | OutputBackend::Stdio => Err(EngineError::Pipeline(
+                    "File/Stdio backend is for offline mode; use 'audigma convert'".to_string(),
+                )),
+            }
+        };
 
     let (out_fmt_str, out_rate_hz) = match target_spec {
         TargetRateSpec::Dsd { bit_rate } => ("dsd".to_string(), bit_rate.get()),
@@ -513,10 +498,176 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
     eprintln!("  ControlSocket: {}", socket_path.display());
 
     // Prepare and Run Live Pipeline
-    let pipeline = LivePipeline::prepare(settings, input_rate)?;
+    let pipeline = LivePipeline::prepare(settings.clone(), input_rate)?;
     eprintln!("audigma: daemon running. Press Ctrl+C or run 'audigma stop' to exit.");
 
-    pipeline.run_streaming(&mut *input_driver, &mut *output_driver, control)?;
+    let target_device = out_cfg
+        .device
+        .clone()
+        .unwrap_or_else(|| "default".to_string());
+    let device_wait_ms = out_cfg.device_wait_ms();
+    let keep_audio_sink_ms = out_cfg.keep_audio_sink_ms();
+
+    let mut current_output: Option<Box<dyn AudioOutput>> = None;
+
+    // Resilient daemon loop
+    while control.is_running() {
+        // Step 1: Ensure output device is connected and opened
+        if current_output.is_none() {
+            if out_cfg.backend == OutputBackend::Alsa && !is_alsa_device_present(&target_device) {
+                if device_wait_ms == 0 {
+                    return Err(EngineError::DeviceDisconnected(format!(
+                        "target ALSA device '{target_device}' is not present at startup"
+                    )));
+                }
+
+                eprintln!(
+                    "[INFO] audigma: waiting for output device '{target_device}' (device_wait_ms: {device_wait_ms}, keep_audio_sink_ms: {keep_audio_sink_ms})..."
+                );
+                control.set_state("WaitingForDevice");
+                control.set_disconnect_info(Some(target_device.clone()), Some(0));
+
+                let wait_start = Instant::now();
+                let mut sink_dropped = false;
+                let mut last_log_secs = 0u64;
+
+                while control.is_running() {
+                    let elapsed_ms = wait_start.elapsed().as_millis() as u64;
+                    let elapsed_secs = elapsed_ms / 1000;
+                    control.set_disconnect_info(Some(target_device.clone()), Some(elapsed_ms));
+
+                    // Periodic waiting heartbeat every 5 seconds
+                    if elapsed_secs >= last_log_secs + 5 {
+                        last_log_secs = elapsed_secs;
+                        eprintln!(
+                            "[INFO] audigma: still waiting for '{target_device}'... ({elapsed_secs}s elapsed, sink_active: {})",
+                            !sink_dropped
+                        );
+                    }
+
+                    // Check device_wait_ms timeout
+                    if device_wait_ms > 0 && elapsed_ms >= device_wait_ms as u64 {
+                        eprintln!(
+                            "[ERROR] audigma: device_wait_ms timeout ({device_wait_ms} ms) reached; exiting."
+                        );
+                        return Err(EngineError::DeviceDisconnected(format!(
+                            "timed out waiting for device '{target_device}' after {device_wait_ms} ms"
+                        )));
+                    }
+
+                    // Check keep_audio_sink_ms grace period
+                    if !sink_dropped
+                        && keep_audio_sink_ms >= 0
+                        && elapsed_ms >= keep_audio_sink_ms as u64
+                    {
+                        eprintln!(
+                            "[WARN] audigma: keep_audio_sink_ms ({keep_audio_sink_ms} ms) expired; unregistering virtual sink from PipeWire graph."
+                        );
+                        input_driver = None; // Drop virtual sink to unregister from PipeWire
+                        sink_dropped = true;
+                    }
+
+                    // If virtual sink is still registered, bit-bucket drain incoming frames pacingly
+                    if let Some(ref mut input) = input_driver {
+                        let mut drain_left = [0.0; 256];
+                        let mut drain_right = [0.0; 256];
+                        let _ = input.read_stereo(&mut drain_left, &mut drain_right);
+                    }
+
+                    // Wait for inotify event or slice
+                    if wait_for_alsa_device(&target_device, 200, &control.running).unwrap_or(false)
+                    {
+                        eprintln!(
+                            "[INFO] audigma: hotplug event detected: output device '{target_device}' is present!"
+                        );
+                        break;
+                    }
+                }
+
+                if !control.is_running() {
+                    break;
+                }
+
+                // Re-register input virtual sink if it was dropped
+                if input_driver.is_none() {
+                    eprintln!("[INFO] audigma: re-registering virtual sink in PipeWire graph...");
+                    input_driver = Some(create_input_driver(in_cfg)?);
+                }
+
+                // Re-acquire D-Bus device reservation if needed
+                #[cfg(feature = "dbus")]
+                if out_cfg.reserve_device.unwrap_or(true) {
+                    let card_idx = resolve_card_index(&target_device).unwrap_or(0);
+                    eprintln!(
+                        "[INFO] audigma: re-acquiring D-Bus reservation for card {card_idx}..."
+                    );
+                    match DeviceReservation::acquire(card_idx, "audigma", 100) {
+                        Ok(res) => {
+                            eprintln!(
+                                "[INFO] audigma: acquired {} via D-Bus org.freedesktop.ReserveDevice1",
+                                res.well_known_name()
+                            );
+                            _reservation = Some(res);
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[WARN] audigma: failed to re-acquire D-Bus reservation: {e}"
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Open output device
+            match create_output_driver(out_cfg) {
+                Ok(out) => {
+                    eprintln!(
+                        "[INFO] audigma: opened output device '{target_device}'; resuming streaming."
+                    );
+                    current_output = Some(out);
+                    control.set_disconnect_info(None, None);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[WARN] audigma: failed to open output device '{target_device}': {e}; retrying in 500ms..."
+                    );
+                    std::thread::sleep(Duration::from_millis(500));
+                    continue;
+                }
+            }
+        }
+
+        // Ensure input driver is active
+        if input_driver.is_none() {
+            input_driver = Some(create_input_driver(in_cfg)?);
+        }
+
+        let input = input_driver.as_mut().unwrap();
+        let output = current_output.as_mut().unwrap();
+
+        // Run streaming loop
+        match pipeline.run_streaming(&mut **input, &mut **output, control.clone()) {
+            Ok(()) => break,
+            Err(EngineError::DeviceDisconnected(reason)) => {
+                eprintln!("[WARN] audigma: output device disconnected: {reason}");
+                current_output = None; // Force output driver teardown
+                #[cfg(feature = "dbus")]
+                {
+                    eprintln!(
+                        "[INFO] audigma: releasing D-Bus reservation for disconnected device."
+                    );
+                    _reservation = None; // Release D-Bus reservation while device is gone
+                }
+                control.set_state("WaitingForDevice");
+                control.set_disconnect_info(Some(target_device.clone()), Some(0));
+            }
+
+            Err(e) => {
+                eprintln!("[ERROR] audigma: runtime streaming error: {e}");
+                return Err(e);
+            }
+        }
+    }
 
     eprintln!("audigma: daemon stopped cleanly.");
     Ok(())
@@ -554,7 +705,14 @@ pub fn run_status(args: StatusArgs) -> Result<(), EngineError> {
                 } else {
                     println!("Audigma Daemon Status:");
                     println!("  State:               {}", telem.state);
+                    if let Some(ref target) = telem.device_target {
+                        println!("  Device Target:       {}", target);
+                    }
+                    if let Some(dur) = telem.disconnect_duration_ms {
+                        println!("  Disconnected For:    {} ms", dur);
+                    }
                     println!("  Uptime:              {}s", telem.uptime_secs);
+
                     println!("  Input Rate:          {} Hz", telem.input_rate_hz);
                     println!(
                         "  Output Target:       {} @ {} Hz",

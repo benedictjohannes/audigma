@@ -9,9 +9,11 @@ pub mod stdio;
 #[cfg(feature = "pipewire")]
 pub use self::pipewire::{PipeWireError, PipeWirePcmOutput, PipeWireVirtualSink};
 pub use alsa::{
-    AlsaAudioOutput, AlsaCardReport, AlsaDeviceReport, AlsaOutputConfig, AlsaOutputError,
-    AlsaProbeReport, probe_alsa_devices,
+    AlsaAudioOutput, AlsaCardReport, AlsaDeviceReport, AlsaDeviceWatcher, AlsaOutputConfig,
+    AlsaOutputError, AlsaProbeReport, is_alsa_device_present, probe_alsa_devices,
+    resolve_card_index, wait_for_alsa_device,
 };
+
 #[cfg(feature = "dbus")]
 pub use dbus::{DBusError, DeviceReservation, request_realtime_priority};
 pub use file::{FileAudioInput, FileAudioOutput};

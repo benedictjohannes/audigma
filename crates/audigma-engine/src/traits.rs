@@ -36,6 +36,9 @@ pub enum EngineError {
 
     #[error("pipeline error: {0}")]
     Pipeline(String),
+
+    #[error("output device disconnected: {0}")]
+    DeviceDisconnected(String),
 }
 
 /// Abstract streaming audio input trait.

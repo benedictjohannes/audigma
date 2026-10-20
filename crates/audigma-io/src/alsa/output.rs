@@ -41,6 +41,9 @@ pub enum AlsaOutputError {
 
     #[error("failed to configure software parameters: {0}")]
     SwParamsFailed(String),
+
+    #[error("ALSA device disconnected: {0}")]
+    DeviceDisconnected(String),
 }
 
 /// Parameters for configuring an ALSA output stream.
@@ -361,9 +364,14 @@ impl AlsaAudioOutput {
             self.bytes_written += pad_len as u64;
         }
 
-        self.pcm
-            .drain()
-            .map_err(|e| AlsaOutputError::Alsa(format!("failed to drain PCM stream: {e}")))?;
+        self.pcm.drain().map_err(|e| {
+            let code = e.errno();
+            if code == libc::ENODEV || code == libc::EBADFD || code == libc::EIO {
+                AlsaOutputError::DeviceDisconnected(format!("{e}"))
+            } else {
+                AlsaOutputError::Alsa(format!("failed to drain PCM stream: {e}"))
+            }
+        })?;
         Ok(())
     }
 
@@ -396,6 +404,16 @@ impl AlsaAudioOutput {
                     if self.pcm.state() == State::XRun || e.kind() == ErrorKind::WouldBlock {
                         self.xrun_count += 1;
                         if let Err(prep_err) = self.pcm.prepare() {
+                            let prep_code = prep_err.errno();
+                            if prep_code == libc::ENODEV
+                                || prep_code == libc::EBADFD
+                                || prep_code == libc::EIO
+                            {
+                                return Err(std::io::Error::new(
+                                    ErrorKind::BrokenPipe,
+                                    format!("ALSA device disconnected during recovery: {prep_err}"),
+                                ));
+                            }
                             return Err(std::io::Error::other(format!(
                                 "ALSA XRun recovery failed (prepare error: {prep_err})"
                             )));
@@ -403,6 +421,22 @@ impl AlsaAudioOutput {
                         // Retry writing remainder after prepare
                         continue;
                     } else {
+                        // Check for device disconnect / removal errors
+                        if let Some(code) = e.raw_os_error() {
+                            if code == libc::ENODEV
+                                || code == -libc::ENODEV
+                                || code == libc::EBADFD
+                                || code == -libc::EBADFD
+                                || code == libc::EIO
+                                || code == -libc::EIO
+                            {
+                                return Err(std::io::Error::new(
+                                    ErrorKind::BrokenPipe,
+                                    format!("ALSA device disconnected: {e}"),
+                                ));
+                            }
+                        }
+
                         return Err(e);
                     }
                 }
@@ -529,6 +563,9 @@ mod tests {
             transport: Some(OutputTransport::Native),
             container: None,
             sample_format: None,
+            volume_control: None,
+            device_wait_ms: None,
+            keep_audio_sink_ms: None,
             reserve_device: Some(true),
             buffer_ms: Some(50),
             period_ms: Some(10),
@@ -558,6 +595,9 @@ mod tests {
             transport: Some(OutputTransport::Dop),
             container: None,
             sample_format: Some(SampleFormat::S24_3Le),
+            volume_control: None,
+            device_wait_ms: None,
+            keep_audio_sink_ms: None,
             reserve_device: Some(true),
             buffer_ms: Some(40),
             period_ms: Some(5),
@@ -585,6 +625,9 @@ mod tests {
             transport: Some(OutputTransport::Pcm),
             container: None,
             sample_format: Some(SampleFormat::S32Le),
+            volume_control: None,
+            device_wait_ms: None,
+            keep_audio_sink_ms: None,
             reserve_device: None,
             buffer_ms: None,
             period_ms: None,

@@ -41,6 +41,7 @@ impl RateFamily {
 
 /// Standard DSD rate multiplier relative to its base PCM rate (`44.1 kHz` or `48 kHz`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 #[repr(u32)]
 pub enum DsdMultiplier {
     /// `64x` (`2.8224 MHz` for 44.1k family, `3.072 MHz` for 48k family)
@@ -58,6 +59,23 @@ impl DsdMultiplier {
     #[inline]
     pub const fn factor(self) -> u32 {
         self as u32
+    }
+
+    /// Resolves this multiplier to an explicit 1-bit `DsdBitRateHz` for the given clock family.
+    #[inline]
+    pub const fn to_bit_rate(self, family: RateFamily) -> Option<DsdBitRateHz> {
+        DsdBitRateHz::from_family_and_multiplier(family, self)
+    }
+}
+
+impl fmt::Display for DsdMultiplier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Dsd64 => write!(f, "dsd64"),
+            Self::Dsd128 => write!(f, "dsd128"),
+            Self::Dsd256 => write!(f, "dsd256"),
+            Self::Dsd512 => write!(f, "dsd512"),
+        }
     }
 }
 

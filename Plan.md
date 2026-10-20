@@ -199,10 +199,10 @@ Cloned local reference repositories kept in [`references/`](references/) (ignore
 ---
 
 ### Phase 5: Dynamic Multi-Rate, Multi-Channel Threading, Volume Strategy, Resilience & DSD Ingestion Engine
-**Maps to:** `Design.md §1.1–§1.6`, `§3.2–§3.4`, `§4.3–§4.5`.
+**Maps to:** [`Design.md §1.1–§1.6`](Design.md), [`§3.2–§3.4`](Design.md), [`§4.3–§4.5`](Design.md).
 
 - **Goal:** Transform `audigma` into an agile, multi-channel, multi-rate Linux audio daemon and high-fidelity DSD processor:
-  1. **Step 5.1:** Specification formalization in `Design.md` & configuration schema expansion in `audigma-settings` (explicit `channel_positions`, `rate_mode`, `volume_control`, `device_wait_ms`, `keep_audio_sink_ms`, `allow_dsd`, and symbolic `dsd_rate`).
+  1. **Step 5.1:** Specification formalization in `Design.md` & configuration schema expansion in `audigma-settings` (explicit `channel_positions`, `rate_mode`, `volume_control`, `device_wait_ms`, `keep_audio_sink_ms`, `allow_dsd`, and symbolic `dsd_rate`). [Completed]
   2. **Step 5.2:** Output device resilience, event-driven hotplug & sink lifecycle in `audigma-engine`, `audigma-io`, and `audigma-cli` (event-driven inotify `/dev/snd` watcher, ALSA `ENODEV` disconnect handling, `WaitingForDevice` state, bit-bucket silent draining, and PipeWire graph sink visibility).
   3. **Step 5.3:** Persistent real-time channel worker pool in `audigma-engine` (1 dedicated RT worker thread per channel, lock-free barrier, zero-copy shared memory, accelerating offline conversion and enabling multi-channel/low-power live playback).
   4. **Step 5.4:** Dynamic multi-rate PipeWire negotiation and dynamic channel mapping in `audigma-io` (SPA `Choice::Enum` POD, `audio.allowed-rates`, dynamic `channel_positions` mapping, and seamless rate renegotiation).
@@ -214,13 +214,13 @@ Cloned local reference repositories kept in [`references/`](references/) (ignore
 ---
 
 ### Phase 6: Interactive Configurator (`audigma-configurator`) & WirePlumber Templates
-**Maps to:** `Design.md §2`, `§6.1`, and `§7`.
+**Maps to:** [`Design.md §2`](Design.md), [`§6.1`](Design.md), and [`§7`](Design.md).
 
 - **Goal:** Implement `audigma-configurator` to provide an interactive TUI (`audigma configure --tui`) and optional one-shot localhost Web wizard (`audigma configure --web`), complete rule-based selection (`[[rules]]`), and ship the `systemd --user` service and WirePlumber templates.
 - **Scope & Tasks:**
-  1. In `audigma-configurator`, implement `audigma configure --tui` (and optional `--web` on `127.0.0.1:<random_port>` with session token that terminates on save, per `Design.md §7`):
+  1. In `audigma-configurator`, implement `audigma configure --tui` (and optional `--web` on `127.0.0.1:<random_port>` with session token that terminates on save, per [`Design.md §7`](Design.md)):
       - Guided flow: select Output Path (`PipeWire High-Rate PCM` vs. `Exclusive ALSA PCM` vs. `Exclusive ALSA DSD`) $\to$ probe DAC capabilities (`audigma-io`) $\to$ choose Rate Policy (`fixed` zero-relock vs. `source-family`) $\to$ choose Volume Policy (`software` vs. `hardware` vs. `none`) $\to$ run quick CPU benchmark (`audigma-engine`) $\to$ preview headroom/latency (`audigma-settings` / `audigma-dsp`) $\to$ write `~/.config/audigma/config.toml`.
-  2. Complete full `[[rules]]` evaluation and `audigma config explain` output (`Design.md §6.1`).
+  2. Complete full `[[rules]]` evaluation and `audigma config explain` output ([`Design.md §6.1`](Design.md)).
   3. Package the `systemd --user` unit file, WirePlumber templates, shell completions, and manpage (`examples/`).
 - **`[User-Led]` Actions:**
   - Run `audigma configure`, generate a personalized config for `FiiO K17` and/or `JadeAudio JA11`, and optionally enable the `systemd --user` service.
@@ -232,7 +232,7 @@ Cloned local reference repositories kept in [`references/`](references/) (ignore
 ---
 
 ### Phase 7: Host Audio Doctor (`audigma-doctor`), Interactive Remediation (`--fix`) & Polish
-**Maps to:** `Design.md §2` and `§7`.
+**Maps to:** [`Design.md §2`](Design.md) and [`§7`](Design.md).
 
 - **Goal:** Implement the dedicated `audigma-doctor` crate to inspect the host audio environment, verify PipeWire multi-rate setup and real-time scheduling limits, diagnose ALSA device lockouts, and provide interactive remediation (`audigma doctor --fix`), keeping platform-specific OS plumbing cleanly isolated.
 - **Scope & Tasks:**
@@ -257,28 +257,9 @@ Cloned local reference repositories kept in [`references/`](references/) (ignore
 
 # Handoff Brief
 
-- **Current Phase:** Phase 4 (PipeWire Virtual Sink, Shared-Graph PCM, D-Bus Device Reservation & Adaptive Clock Bridge) — [Completed]
-- **Next Phase:** Phase 5 (Volume Control Strategy, PipeWire Sink Props & Hardware UAC2 Mixer Bridge)
+- **Current Phase:** Phase 5 [In Progress]
+- **Next Phase:** Phase 5 Step 3
 - **What was done in this session:**
-  - **PipeWire Format Negotiation Resolution:**
-    - Diagnosed that `build_format_pod` was passing `id: 1` instead of `libspa::param::ParamType::EnumFormat.as_raw()` (3), causing PipeWire to reject the format enumeration and fall back to single-port generic DSP format (`F32P`).
-    - Fixed the POD object serialization in `PipeWireVirtualSink` using standard `libspa` types, and added `STREAM_CAPTURE_SINK => "true"` with `MEDIA_ROLE => "Music"`.
-    - Confirmed PipeWire automatically creates discrete stereo ports (`input_FL`, `input_FR`) and auto-links them to the sink monitor (`audigma_k17_sink:monitor_FL/FR`).
-  - **Chunk Slicing & Frame Preservation:**
-    - Discovered that `read_stereo` was popping full 1024-frame chunks from the SPSC ring buffer, copying only the requested 256-frame tile, and discarding the remaining 768 frames (dropping 75% of incoming audio and causing the garbled "musical beat without notes").
-    - Added persistent cursor buffering (`current_chunk: Option<TaggedChunk>`, `read_offset: usize`) to `PipeWireVirtualSink` so unread frames are seamlessly preserved and consumed on consecutive calls.
-  - **Hardware Listening Tests Verified:**
-    - **FiiO K17:** Verified clean, musical Native DSD256 playback from desktop applications (Edge/KDE) with zero XRuns and zero overloads.
-    - **JadeAudio JA11:** Verified clean, musical DoP64 playback in `S24_3LE` container format with zero XRuns.
-    - **Software Digital Volume Control:** Verified real-time software attenuation via Unix control socket (`audigma set volume -6`, `-10`, `0`) operating cleanly on floating-point PCM before modulation, preserving DSD marker and bitstream integrity.
-  - **Workspace Quality Gate:**
-    - `cargo test --workspace` passed 100% (all unit and integration tests across all crates).
-    - `cargo clippy --workspace --all-targets -- -D warnings` passed with 0 warnings.
-    - `cargo fmt --check` passed cleanly.
-- **Action Items for Next Session (Phase 5 — Step 5.1):**
-  1. Update `Design.md` to canonically formalize multi-channel topology (`channel_positions`), output device resilience (`device_wait_ms`, `keep_audio_sink_ms`), persistent real-time worker pool, dynamic multi-rate PipeWire negotiation, unified volume control (`software`/`hardware`/`none`), and DSD decimation remodulation.
-  2. Implement configuration schema additions in `crates/audigma-settings/src/lib.rs` per `Phase5.Plan.md` Step 5.1.
-  3. Write comprehensive unit tests in `audigma-settings` for new schema fields and cross-field validation rules.
-
-
-
+  - Updated Design.md
+  - Updated configuration struct to reflect enhancements planned in Phase 5
+  - Implemented event driven device and pipewire sink lifecycle handling

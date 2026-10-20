@@ -46,6 +46,10 @@ pub struct DaemonTelemetry {
     pub xrun_count: u64,
     pub generation: u64,
     pub uptime_secs: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disconnect_duration_ms: Option<u64>,
 }
 
 /// Shared control and telemetry state handle for the live daemon.
@@ -82,6 +86,8 @@ impl DaemonControlHandle {
             xrun_count: 0,
             generation: 1,
             uptime_secs: 0,
+            device_target: None,
+            disconnect_duration_ms: None,
         };
 
         Self {
@@ -126,9 +132,23 @@ impl DaemonControlHandle {
     pub fn get_telemetry(&self) -> DaemonTelemetry {
         self.telemetry.lock().unwrap().clone()
     }
+
+    #[inline]
+    pub fn set_state(&self, state: &str) {
+        let mut telem = self.telemetry.lock().unwrap();
+        telem.state = state.to_string();
+    }
+
+    #[inline]
+    pub fn set_disconnect_info(&self, target: Option<String>, duration_ms: Option<u64>) {
+        let mut telem = self.telemetry.lock().unwrap();
+        telem.device_target = target;
+        telem.disconnect_duration_ms = duration_ms;
+    }
 }
 
 /// Prepared real-time live streaming pipeline.
+#[derive(Clone)]
 pub struct LivePipeline {
     settings: Settings,
     plan: ResolvedPipelinePlan,
@@ -236,7 +256,7 @@ impl LivePipeline {
 
     /// Runs the streaming loop reading from `input`, converting, and writing to `output`.
     pub fn run_streaming(
-        self,
+        &self,
         input: &mut dyn AudioInput,
         output: &mut dyn AudioOutput,
         control: DaemonControlHandle,
@@ -430,7 +450,7 @@ impl LivePipeline {
                         }
 
                         // Pack and emit
-                        match self.carrier {
+                        let write_res: Result<(), EngineError> = match self.carrier {
                             IdleCarrierFormat::NativeDsd => {
                                 let packed_bytes = pack_stereo_dsd_u32_be(
                                     out_l,
@@ -438,8 +458,26 @@ impl LivePipeline {
                                     false,
                                     &mut transport_staging,
                                 )?;
-                                output.write_all(&transport_staging[..packed_bytes])?;
+                                output
+                                    .write_all(&transport_staging[..packed_bytes])
+                                    .map_err(|e| {
+                                        let code = e.raw_os_error().unwrap_or(0);
+                                        if e.kind() == std::io::ErrorKind::BrokenPipe
+                                            || code == libc::ENODEV
+                                            || code == -libc::ENODEV
+                                            || code == libc::EBADFD
+                                            || code == -libc::EBADFD
+                                            || code == libc::EIO
+                                            || code == -libc::EIO
+                                        {
+                                            EngineError::DeviceDisconnected(e.to_string())
+                                        } else {
+                                            EngineError::Io(e)
+                                        }
+                                    })?;
+
                                 total_output_frames += req_out as u64;
+                                Ok(())
                             }
                             IdleCarrierFormat::DoP(_) => {
                                 if let Some(ref mut packer) = dop_packer {
@@ -448,12 +486,31 @@ impl LivePipeline {
                                         out_r,
                                         &mut transport_staging,
                                     )?;
-                                    output.write_all(&transport_staging[..packed_bytes])?;
+                                    output
+                                        .write_all(&transport_staging[..packed_bytes])
+                                        .map_err(|e| {
+                                            let code = e.raw_os_error().unwrap_or(0);
+                                            if e.kind() == std::io::ErrorKind::BrokenPipe
+                                                || code == libc::ENODEV
+                                                || code == -libc::ENODEV
+                                                || code == libc::EBADFD
+                                                || code == -libc::EBADFD
+                                                || code == libc::EIO
+                                                || code == -libc::EIO
+                                            {
+                                                EngineError::DeviceDisconnected(e.to_string())
+                                            } else {
+                                                EngineError::Io(e)
+                                            }
+                                        })?;
+
                                     total_output_frames += req_out as u64;
                                 }
+                                Ok(())
                             }
-                            IdleCarrierFormat::Pcm => {}
-                        }
+                            IdleCarrierFormat::Pcm => Ok(()),
+                        };
+                        write_res?;
                     }
                     _ => {
                         // High-rate PCM output
@@ -464,7 +521,22 @@ impl LivePipeline {
                             pcm_bytes.extend_from_slice(&fl);
                             pcm_bytes.extend_from_slice(&fr);
                         }
-                        output.write_all(&pcm_bytes)?;
+                        output.write_all(&pcm_bytes).map_err(|e| {
+                            let code = e.raw_os_error().unwrap_or(0);
+                            if e.kind() == std::io::ErrorKind::BrokenPipe
+                                || code == libc::ENODEV
+                                || code == -libc::ENODEV
+                                || code == libc::EBADFD
+                                || code == -libc::EBADFD
+                                || code == libc::EIO
+                                || code == -libc::EIO
+                            {
+                                EngineError::DeviceDisconnected(e.to_string())
+                            } else {
+                                EngineError::Io(e)
+                            }
+                        })?;
+
                         total_output_frames += req_out as u64;
                     }
                 }
