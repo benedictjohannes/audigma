@@ -709,7 +709,6 @@ impl PipeWireVirtualSink {
                 let is_dsd_process_cb = is_dsd_cb.clone();
                 let is_lsb_process_cb = is_lsb_cb.clone();
                 let interleave_process_cb = interleave_cb.clone();
-                let mut last_negotiated_clock: Option<(u32, u32)> = None;
                 let _listener = match stream
                     .add_local_listener_with_user_data(())
                     .param_changed(move |stream, _, id, param| {
@@ -793,25 +792,6 @@ impl PipeWireVirtualSink {
                                     if let Some(buf_pod) = Pod::from_bytes(&buf_bytes) {
                                         let mut params = [buf_pod];
                                         let _ = stream.update_params(&mut params);
-                                    }
-                                }
-                                if last_negotiated_clock != Some((stream_rate, quantum_frames)) {
-                                    last_negotiated_clock = Some((stream_rate, quantum_frames));
-                                    let rate_str = format!("1/{stream_rate}");
-                                    let force_rate_str = format!("{stream_rate}");
-                                    let latency_str = format!("{quantum_frames}/{stream_rate}");
-                                    let force_quantum_str = format!("{quantum_frames}");
-                                    let update_props = properties! {
-                                        "node.rate" => rate_str.as_str(),
-                                        "node.force-rate" => force_rate_str.as_str(),
-                                        *pipewire::keys::NODE_LATENCY => latency_str.as_str(),
-                                        "node.force-quantum" => force_quantum_str.as_str(),
-                                    };
-                                    unsafe {
-                                        pipewire::sys::pw_stream_update_properties(
-                                            stream.as_raw_ptr(),
-                                            update_props.dict().as_raw_ptr(),
-                                        );
                                     }
                                 }
                             }
