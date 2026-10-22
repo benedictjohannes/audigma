@@ -59,12 +59,7 @@ fn test_volume_hardware_mode_routes_to_bridge() {
     let pipeline = LivePipeline::prepare(settings, input_rate).unwrap();
 
     let frames = 44100;
-    let info = AudioStreamInfo {
-        sample_rate: input_rate,
-        original_channels: 2,
-        total_frames: Some(frames as u64),
-        bits_per_sample: Some(32),
-    };
+    let info = AudioStreamInfo::new_pcm(input_rate, 2, Some(frames as u64), Some(32));
     let mut mock_in = MockAudioInput::new(info, vec![0.1; frames], vec![0.1; frames], false);
     let mut mock_out = TestOutputSink::default();
 
@@ -110,12 +105,7 @@ fn test_dynamic_volume_from_input_driver_interception() {
     let pipeline = LivePipeline::prepare(settings, input_rate).unwrap();
 
     let frames = 44100;
-    let info = AudioStreamInfo {
-        sample_rate: input_rate,
-        original_channels: 2,
-        total_frames: Some(frames as u64),
-        bits_per_sample: Some(32),
-    };
+    let info = AudioStreamInfo::new_pcm(input_rate, 2, Some(frames as u64), Some(32));
     let mock_in = MockAudioInput::new(info, vec![0.1; frames], vec![0.1; frames], false);
     let mut mock_out = TestOutputSink::default();
 
@@ -161,12 +151,7 @@ fn test_software_volume_mode_does_not_call_hardware_bridge() {
     let pipeline = LivePipeline::prepare(settings, input_rate).unwrap();
 
     let frames = 44100;
-    let info = AudioStreamInfo {
-        sample_rate: input_rate,
-        original_channels: 2,
-        total_frames: Some(frames as u64),
-        bits_per_sample: Some(32),
-    };
+    let info = AudioStreamInfo::new_pcm(input_rate, 2, Some(frames as u64), Some(32));
     let mut mock_in = MockAudioInput::new(info, vec![0.1; frames], vec![0.1; frames], false);
     let mut mock_out = TestOutputSink::default();
 
@@ -203,12 +188,7 @@ fn test_none_volume_mode_ignores_volume() {
     let pipeline = LivePipeline::prepare(settings, input_rate).unwrap();
 
     let frames = 44100;
-    let info = AudioStreamInfo {
-        sample_rate: input_rate,
-        original_channels: 2,
-        total_frames: Some(frames as u64),
-        bits_per_sample: Some(32),
-    };
+    let info = AudioStreamInfo::new_pcm(input_rate, 2, Some(frames as u64), Some(32));
     let mut mock_in = MockAudioInput::new(info, vec![0.1; frames], vec![0.1; frames], false);
     let mut mock_out = TestOutputSink::default();
 
@@ -245,12 +225,7 @@ fn test_volume_percentage_alsamixer_curve_on_hardware_bridge() {
     let pipeline = LivePipeline::prepare(settings, input_rate).unwrap();
 
     let frames = 44100;
-    let info = AudioStreamInfo {
-        sample_rate: input_rate,
-        original_channels: 2,
-        total_frames: Some(frames as u64),
-        bits_per_sample: Some(32),
-    };
+    let info = AudioStreamInfo::new_pcm(input_rate, 2, Some(frames as u64), Some(32));
     let mock_in = MockAudioInput::new(info, vec![0.1; frames], vec![0.1; frames], false);
     let mut mock_out = TestOutputSink::default();
 

@@ -34,12 +34,12 @@ impl StdioAudioInput {
             _ => 2,
         };
 
-        let info = AudioStreamInfo {
+        let info = AudioStreamInfo::new_pcm(
             sample_rate,
-            original_channels: channels,
-            total_frames: None,
-            bits_per_sample: Some(bytes_per_sample as u32 * 8),
-        };
+            channels,
+            None,
+            Some(bytes_per_sample as u32 * 8),
+        );
 
         Self {
             stdin: std::io::stdin(),

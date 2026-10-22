@@ -10,7 +10,6 @@ use alsa::Round;
 use alsa::mixer::{MilliBel, Mixer, Selem, SelemChannelId, SelemId};
 use audigma_engine::EngineError;
 
-
 /// Standard candidate mixer controls probed in priority order (first match wins).
 pub const CANDIDATE_MIXER_CONTROLS: &[&str] =
     &["Master", "PCM", "Playback", "Headphone", "Speaker"];

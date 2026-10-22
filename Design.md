@@ -34,10 +34,9 @@ In `audigma`, architectural decisions are enforced directly by the Rust type sys
    - The continuously variable fractional-phase stage ($R_{\text{asrc}}(t)$) **always executes at the low baseband/intermediate PCM rate ($1\times$ or $2\times$)** *before* the fixed-coefficient $2\times$ half-band FIR cascade—never at the final MHz DSD bit rate, and never by dropping/duplicating DSD bits.
    - **ASRC Drift Bounds & Recovery:** The drift loop operates within a bounded correction range (e.g. `max_correction_ppm = 500`). When measured drift or queue fill exceeds safety thresholds, the engine invokes a controlled fault/recovery sequence rather than silently dropping or duplicating samples.
 
-6. **DSD Ingestion, Passthrough & Bounded Decimation Remodulation (`audigma-engine` / `audigma-dsp`):**
-   - Bit-exact DSD passthrough is a dedicated, typed signal path with zero intermediate float conversions.
-   - DSD passthrough is only valid across shared-clock or backpressured links where input and output rates match. It **cannot** reconcile independent live clock domains (which require PCM ASRC) without losing bit-exactness.
-   - Any volume change, EQ, or sample-rate conversion on an incoming DSD stream requires explicit remodulation:
+6. **DSD Ingestion, Automatic Passthrough & Bounded Decimation Remodulation (`audigma-engine` / `audigma-dsp`):**
+   - **Automatic Opportunistic Passthrough:** Bit-exact DSD passthrough is an automatic, opportunistic signal path: whenever the input format is DSD (via SPA `audio/dsd`, Sony `.dsf` file, or auto-detected DoP), the input bit rate matches the target output DSD rate, digital software volume attenuation is at unity ($0\text{ dBFS}$ / 100% or routed to hardware UAC2 mixer / line-out), and the link is clock-locked or backpressured (file conversion, shared PipeWire graph clock, or synchronized stream), the stream bypasses intermediate float decimation and modulation completely, copying DSD bytes directly into the target transport packet with zero intermediate float conversions.
+   - If any condition is violated (rate mismatch, software digital volume active, or asynchronous clock drift reconciliation required via ASRC across independent ALSA clock domains), the engine automatically remodulates:
      $$\text{DSD}_{\text{in}} \xrightarrow{\text{decimate}} \text{PCM}_{\text{intermediate}} \xrightarrow{\text{gain / ASRC / EQ}} \text{PCM}_{\text{intermediate}} \xrightarrow{2^K \text{ FIR cascade}} \text{DSM} \xrightarrow{} \text{DSD}_{\text{out}}$$
    - **Intermediate Rate Formula:**
      $$\text{Rate}_{\text{intermediate}} = \min\Big(\text{Rate}_{\text{in\_useful}},\; \text{Rate}_{\text{out\_useful}},\; \text{max\_intermediate\_rate\_hz}\Big)$$
@@ -243,12 +242,13 @@ The engine state machine runs through:
 
 1. **ALSA Native `DSD_U32_BE` / `DSD_U32_LE`:**
    - Packs 32 consecutive 1-bit DSD samples per channel into each 32-bit ALSA container word (`f_frame = f_bit / 32`), MSB-first bit ordering (`bitrev=0` unless device quirks specify LSB-first).
-2. **DoP (DSD over PCM v1.1) — Three ALSA Container Alignments:**
+2. **DoP (DSD over PCM v1.1) — Three ALSA Container Alignments & Auto-Detection:**
    - Carries 16 DSD bits (2 bytes: `HI`, `LO`, oldest bit in MSB) per channel per PCM frame, with an 8-bit marker alternating `0x05` and `0xFA` on consecutive frames (synchronized across stereo channels).
    - Because USB Audio Class 2.0 DACs expose different 24/32-bit integer formats over ALSA, `audigma-format` implements and tests all three alignments:
      - **`s32le` (32-bit container, MSB-justified):** 24-bit DoP word shifted left by 8 (`0xMM_HI_LO_00`, written little-endian as `[0x00, LO, HI, MM]`).
      - **`s24le` (32-bit container, LSB-justified):** 24-bit DoP word in the lower 24 bits (`0x00_MM_HI_LO`, written little-endian as `[LO, HI, MM, 0x00]`).
      - **`s24_3le` (Packed 24-bit container, 3 bytes/sample):** Written little-endian as `[LO, HI, MM]`.
+   - **DoP Ingestion via Auto-Detection (128 Alternating Frames):** `audigma-format` automatically identifies incoming DoP streams inside PCM carriers by observing 128 consecutive alternating `0x05`/`0xFA` marker frames across all active channels ($\approx 0.72\text{ ms}$ at DoP64). This provides zero false positives on natural PCM, requires no manual transport declaration, and automatically unpacks the 16-bit DSD payload per channel.
 3. **Sony DSF Container (`.dsf`):**
    - Little-endian `DSD `, `fmt `, and `data` chunks; interleaves channels in fixed **4096-byte blocks per channel** (`L[4096], R[4096]`), with declared bit ordering (`1` = LSB-first per Sony DSF v1.01, `8` = MSB-first) and exact per-channel `sample_count` in bits.
    - **Final Block Padding (`dsf_pad_mode`):** Sony DSF v1.01 §4 specifies `0x00` fill for unused trailing bytes in the final 4096-byte block. However, naive players that ignore `sample_count` play those trailing `0x00` bytes as full-negative DC (~11.6 ms pop at DSD64). `audigma` supports:

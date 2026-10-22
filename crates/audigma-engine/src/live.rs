@@ -17,6 +17,7 @@ use crate::lifecycle::{BlockAction, IdleCarrierFormat, LifecycleController};
 use crate::traits::{AudioInput, AudioOutput, EngineError};
 use crate::worker::{ChannelWorkerPool, TargetDsdConfig};
 use audigma_dsp::config::{SampleFormat, TargetRateSpec};
+use audigma_dsp::modulator::TpdfDither;
 use audigma_dsp::fir::PolyphaseResampler;
 use audigma_dsp::ftz::ScopedFtzDaz;
 use audigma_dsp::rates::PcmRateHz;
@@ -367,6 +368,23 @@ impl LivePipeline {
         )?;
         let mult = worker_pool.rate_multiplier();
 
+        let pcm_sample_format = match target_spec {
+            TargetRateSpec::Pcm { sample_format, .. } => sample_format,
+            _ => SampleFormat::F32,
+        };
+        let mut pcm_dithers: Vec<TpdfDither> = if matches!(
+            pcm_sample_format,
+            SampleFormat::S16Le
+                | SampleFormat::S24Le
+                | SampleFormat::S24_3Le
+                | SampleFormat::S32Le
+        ) {
+            (0..num_channels)
+                .map(|c| TpdfDither::new(0x1234_5678_9abc_def0 + c as u64, 0.5))
+                .collect()
+        } else {
+            Vec::new()
+        };
         // Clock mode & low-rate ASRC
         let is_adaptive = self
             .settings
@@ -429,7 +447,12 @@ impl LivePipeline {
         let mut total_input_frames = 0u64;
         let mut total_output_frames = 0u64;
         let mut overload_events = 0u64;
-        let mut was_idle = false;
+        let mut consecutive_empty_tiles = 0usize;
+        let mut is_idle = false;
+        // Require at least ~70-100 ms of continuous zero frames before declaring the stream stopped/idle.
+        let idle_threshold_tiles =
+            (self.intermediate_rate.get() as usize / (TILE_BASEBAND_FRAMES * 10)).max(20);
+        let mut consecutive_empty_polls = 0usize;
         let mut pending_rate_switch: Option<PcmRateHz> = None;
 
         let base_preamp = self.plan.dsp_config.preamp_db;
@@ -479,6 +502,15 @@ impl LivePipeline {
             };
 
             if frames_read == 0 && pending_rate_switch.is_none() {
+                consecutive_empty_polls = consecutive_empty_polls.saturating_add(1);
+                // During active streaming, allow a brief grace window (~15 ms, well within the
+                // ALSA hardware buffer cushion) for the next PipeWire quantum to arrive before
+                // synthesizing and writing idle silence tiles into the middle of the stream.
+                if total_input_frames > 0 && !is_idle && consecutive_empty_polls <= 30 {
+                    std::thread::sleep(Duration::from_micros(500));
+                    continue;
+                }
+
                 // When input is temporarily idle or quiet in live streaming:
                 // Emit continuous idle / silence frames to keep DAC clock locked and prevent ALSA XRuns.
                 let idle_tile_frames = TILE_BASEBAND_FRAMES;
@@ -515,7 +547,10 @@ impl LivePipeline {
                             }
                         })?;
                 }
-                was_idle = true;
+                consecutive_empty_tiles = consecutive_empty_tiles.saturating_add(1);
+                if consecutive_empty_tiles >= idle_threshold_tiles {
+                    is_idle = true;
+                }
                 let chunk_dur = Duration::from_secs_f64(
                     idle_tile_frames as f64 / self.intermediate_rate.get() as f64,
                 );
@@ -523,11 +558,13 @@ impl LivePipeline {
                 continue;
             }
 
-            if was_idle {
-                was_idle = false;
+            if is_idle {
+                is_idle = false;
                 let _ = worker_pool.reset();
                 let _ = lifecycle.start();
             }
+            consecutive_empty_polls = 0;
+            consecutive_empty_tiles = 0;
             total_input_frames += frames_read as u64;
 
             // Compute current dynamic gain based on active volume mode
@@ -584,12 +621,13 @@ impl LivePipeline {
                 "hardware" | "none" => 0.0,
                 _ => target_db,
             };
-            let linear_gain = if (is_muted && vol_mode.as_str() != "hardware") || target_db <= -119.0 {
-                0.0
-            } else {
-                let total_gain_db = base_preamp + profile_headroom + user_vol;
-                10.0_f64.powf(total_gain_db / 20.0)
-            };
+            let linear_gain =
+                if (is_muted && vol_mode.as_str() != "hardware") || target_db <= -119.0 {
+                    0.0
+                } else {
+                    let total_gain_db = base_preamp + profile_headroom + user_vol;
+                    10.0_f64.powf(total_gain_db / 20.0)
+                };
 
             // Apply pre-SRC gain and lifecycle cosine ramping
             let mut active_slices: Vec<&mut [f64]> = in_channels
@@ -736,13 +774,85 @@ impl LivePipeline {
                 } else {
                     worker_pool.process_tile_pcm(&tile_slices)?;
 
-                    // High-rate PCM output
-                    let mut pcm_bytes = Vec::with_capacity(req_out * 4 * num_channels);
+                    // High-rate PCM output. Quantize to the configured target sample
+                    // format. Writing f32 bit patterns into an integer ALSA stream
+                    // previously caused extreme clipping.
+                    let bytes_per_sample = match pcm_sample_format {
+                        SampleFormat::S16Le => 2,
+                        SampleFormat::S24Le | SampleFormat::S24_3Le | SampleFormat::S32Le => {
+                            if pcm_sample_format == SampleFormat::S24_3Le {
+                                3
+                            } else {
+                                4
+                            }
+                        }
+                        SampleFormat::F32 => 4,
+                        SampleFormat::F64 => 8,
+                        _ => 4,
+                    };
+                    let mut pcm_bytes =
+                        Vec::with_capacity(req_out * bytes_per_sample * num_channels);
                     for i in 0..req_out {
                         for c in 0..num_channels {
                             let out_c = worker_pool.channel_pcm(c);
-                            let sample = (out_c[i] as f32).to_le_bytes();
-                            pcm_bytes.extend_from_slice(&sample);
+                            let sample = out_c[i];
+                            match pcm_sample_format {
+                                SampleFormat::F32 => {
+                                    pcm_bytes.extend_from_slice(&(sample as f32).to_le_bytes());
+                                }
+                                SampleFormat::F64 => {
+                                    pcm_bytes.extend_from_slice(&sample.to_le_bytes());
+                                }
+                                SampleFormat::S16Le => {
+                                    let d = if c < pcm_dithers.len() {
+                                        pcm_dithers[c].next_sample()
+                                    } else {
+                                        0.0
+                                    };
+                                    let q = (sample * 32767.0 + d)
+                                        .clamp(-32768.0, 32767.0)
+                                        .round() as i16;
+                                    pcm_bytes.extend_from_slice(&q.to_le_bytes());
+                                }
+                                SampleFormat::S24Le => {
+                                    let d = if c < pcm_dithers.len() {
+                                        pcm_dithers[c].next_sample()
+                                    } else {
+                                        0.0
+                                    };
+                                    let q = (sample * 8388607.0 + d)
+                                        .clamp(-8388608.0, 8388607.0)
+                                        .round() as i32;
+                                    pcm_bytes.extend_from_slice(&q.to_le_bytes());
+                                }
+                                SampleFormat::S24_3Le => {
+                                    let d = if c < pcm_dithers.len() {
+                                        pcm_dithers[c].next_sample()
+                                    } else {
+                                        0.0
+                                    };
+                                    let q = (sample * 8388607.0 + d)
+                                        .clamp(-8388608.0, 8388607.0)
+                                        .round() as i32;
+                                    pcm_bytes.push((q & 0xFF) as u8);
+                                    pcm_bytes.push(((q >> 8) & 0xFF) as u8);
+                                    pcm_bytes.push(((q >> 16) & 0xFF) as u8);
+                                }
+                                SampleFormat::S32Le => {
+                                    let d = if c < pcm_dithers.len() {
+                                        pcm_dithers[c].next_sample()
+                                    } else {
+                                        0.0
+                                    };
+                                    let q = (sample * 2147483647.0 + d)
+                                        .clamp(-2147483648.0, 2147483647.0)
+                                        .round() as i32;
+                                    pcm_bytes.extend_from_slice(&q.to_le_bytes());
+                                }
+                                _ => {
+                                    pcm_bytes.extend_from_slice(&(sample as f32).to_le_bytes());
+                                }
+                            }
                         }
                     }
                     output.write_all(&pcm_bytes).map_err(|e| {
@@ -775,6 +885,11 @@ impl LivePipeline {
                 telem.total_output_frames = total_output_frames;
                 telem.overload_count = overload_events;
                 telem.uptime_secs = start_time.elapsed().as_secs();
+                if let Some((fill, cap)) = input.buffer_occupancy() {
+                    if cap > 0 {
+                        telem.queue_fill_pct = fill as f64 / cap as f64 * 100.0;
+                    }
+                }
             }
         }
 

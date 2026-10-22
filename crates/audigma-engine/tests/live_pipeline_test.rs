@@ -32,12 +32,7 @@ fn test_live_pipeline_streaming_lifecycle() {
     let pipeline = LivePipeline::prepare(settings, input_rate).unwrap();
 
     let frames = 44100;
-    let info = AudioStreamInfo {
-        sample_rate: input_rate,
-        original_channels: 2,
-        total_frames: Some(frames as u64),
-        bits_per_sample: Some(32),
-    };
+    let info = AudioStreamInfo::new_pcm(input_rate, 2, Some(frames as u64), Some(32));
     let mut mock_in = MockAudioInput::new(info, vec![0.1; frames], vec![0.1; frames], false);
     let mut mock_out = TestOutputSink::default();
 
@@ -75,12 +70,7 @@ fn test_live_pipeline_dynamic_sample_rate_switch() {
     let mut pipeline = LivePipeline::prepare(settings.clone(), r44).unwrap();
 
     let frames = 44100;
-    let info = AudioStreamInfo {
-        sample_rate: r44,
-        original_channels: 2,
-        total_frames: Some(frames as u64),
-        bits_per_sample: Some(32),
-    };
+    let info = AudioStreamInfo::new_pcm(r44, 2, Some(frames as u64), Some(32));
     let mut mock_in = MockAudioInput::new(info, vec![0.1; frames], vec![0.1; frames], false);
     let mut mock_out = TestOutputSink::default();
 
@@ -142,12 +132,7 @@ pcm_rate_hz = 96000
 
     let frames = 4800;
     let ch_data = vec![vec![0.05; frames]; 6];
-    let info = AudioStreamInfo {
-        sample_rate: r48,
-        original_channels: 6,
-        total_frames: Some(frames as u64),
-        bits_per_sample: Some(32),
-    };
+    let info = AudioStreamInfo::new_pcm(r48, 6, Some(frames as u64), Some(32));
     let mut mock_in = MockAudioInput::new_multichannel(info, ch_data, false);
     let mut mock_out = TestOutputSink::default();
 

@@ -18,10 +18,14 @@ pub struct TaggedChunk {
     pub generation: u64,
     /// Number of channels in this block (e.g. 2 for stereo).
     pub channels: usize,
-    /// Number of valid samples in `samples` (channels * frames).
+    /// Whether this chunk holds packed 1-bit DSD byte stream payload.
+    pub is_dsd: bool,
+    /// Number of valid samples in `samples` (channels * frames) or valid bytes in `dsd_bytes`.
     pub len: usize,
     /// Preallocated sample buffer.
     pub samples: Vec<f64>,
+    /// Preallocated DSD bytes buffer.
+    pub dsd_bytes: Vec<u8>,
 }
 
 impl TaggedChunk {
@@ -30,19 +34,39 @@ impl TaggedChunk {
         Self {
             generation: 0,
             channels: 2,
+            is_dsd: false,
             len: 0,
             samples: vec![0.0; capacity],
+            dsd_bytes: vec![0; capacity * 4],
         }
     }
 
-    /// Resets this chunk for reuse without reallocating.
+    /// Resets this chunk for reuse with floating point PCM samples.
     #[inline]
     pub fn set(&mut self, generation: u64, channels: usize, data: &[f64]) {
         self.generation = generation;
         self.channels = channels;
+        self.is_dsd = false;
         let count = data.len().min(self.samples.len());
         self.samples[..count].copy_from_slice(&data[..count]);
         self.len = count;
+    }
+
+    /// Resets this chunk for reuse with raw 1-bit DSD bytes.
+    #[inline]
+    pub fn set_dsd(&mut self, generation: u64, channels: usize, data: &[u8]) {
+        self.generation = generation;
+        self.channels = channels;
+        self.is_dsd = true;
+        let count = data.len().min(self.dsd_bytes.len());
+        self.dsd_bytes[..count].copy_from_slice(&data[..count]);
+        self.len = count;
+    }
+
+    /// Returns valid DSD bytes as a slice.
+    #[inline]
+    pub fn dsd_slice(&self) -> &[u8] {
+        &self.dsd_bytes[..self.len]
     }
 
     /// Returns the number of audio frames (`len / channels`).

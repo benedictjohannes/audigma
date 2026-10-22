@@ -21,7 +21,11 @@ pub use config::{
     Apodization, DitherType, DspConfiguration, FilterPhase, FilterPreset, OverloadPolicy,
     SampleFormat, StreamSpec, TargetFormat, TargetRateSpec,
 };
-pub use fir::{FirError, HalfBandCascade, HalfBandStage, PolyphaseMode, PolyphaseResampler};
+pub use fir::{
+    DSD_BYTE_TO_FLOATS, FirError, HalfBandCascade, HalfBandDecimationCascade,
+    HalfBandDecimationStage, HalfBandStage, PolyphaseMode, PolyphaseResampler,
+    unpack_dsd_bytes_to_floats,
+};
 pub use ftz::ScopedFtzDaz;
 pub use modulator::{CrfbModulator, ModulatorError, TpdfDither};
 pub use presets::{
@@ -30,8 +34,6 @@ pub use presets::{
 };
 pub use rates::{
     DEFAULT_AUDIO_BASEBAND_HZ, DsdBitRateHz, DsdMultiplier, PcmRateHz, RateFamily,
-    TransportFrameRateHz,
+    TransportFrameRateHz, select_dsd_intermediate_rate,
 };
-pub use volume::{
-    DEFAULT_SOFTWARE_MIN_DB, alsamixer_db_to_percentage, alsamixer_percentage_to_db,
-};
+pub use volume::{DEFAULT_SOFTWARE_MIN_DB, alsamixer_db_to_percentage, alsamixer_percentage_to_db};

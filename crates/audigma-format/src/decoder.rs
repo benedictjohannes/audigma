@@ -3,7 +3,7 @@
 
 use crate::FormatError;
 use crate::topology::downmix_interleaved_to_stereo;
-use audigma_dsp::PcmRateHz;
+use audigma_dsp::{DsdBitRateHz, PcmRateHz};
 use symphonia::core::codecs::audio::{
     AudioDecoder as SymphoniaAudioDecoder, AudioDecoderOptions, CODEC_ID_NULL_AUDIO,
 };
@@ -20,6 +20,69 @@ pub struct AudioStreamInfo {
     pub original_channels: u8,
     pub total_frames: Option<u64>,
     pub bits_per_sample: Option<u32>,
+    pub dsd_bit_rate: Option<DsdBitRateHz>,
+}
+
+impl AudioStreamInfo {
+    /// Constructs PCM audio stream info.
+    pub const fn new_pcm(
+        sample_rate: PcmRateHz,
+        channels: u8,
+        total_frames: Option<u64>,
+        bits_per_sample: Option<u32>,
+    ) -> Self {
+        Self {
+            sample_rate,
+            original_channels: channels,
+            total_frames,
+            bits_per_sample,
+            dsd_bit_rate: None,
+        }
+    }
+
+    /// Constructs native DSD audio stream info.
+    pub const fn new_dsd(
+        dsd_bit_rate: DsdBitRateHz,
+        channels: u8,
+        total_samples: Option<u64>,
+    ) -> Self {
+        let intermediate_pcm = match dsd_bit_rate.rate_family() {
+            audigma_dsp::RateFamily::Hz44100 => match dsd_bit_rate.dsd_multiplier() {
+                Some(audigma_dsp::DsdMultiplier::Dsd64) => PcmRateHz::PCM_176400,
+                _ => PcmRateHz::PCM_352800,
+            },
+            audigma_dsp::RateFamily::Hz48000 => match dsd_bit_rate.dsd_multiplier() {
+                Some(audigma_dsp::DsdMultiplier::Dsd64) => PcmRateHz::PCM_192000,
+                _ => PcmRateHz::PCM_384000,
+            },
+            audigma_dsp::RateFamily::Other => PcmRateHz::PCM_44100,
+        };
+        let stages = match dsd_bit_rate.dsd_multiplier() {
+            Some(audigma_dsp::DsdMultiplier::Dsd64) => 4,
+            Some(audigma_dsp::DsdMultiplier::Dsd128) => 4,
+            Some(audigma_dsp::DsdMultiplier::Dsd256) => 5,
+            Some(audigma_dsp::DsdMultiplier::Dsd512) => 6,
+            None => 5,
+        };
+        let divider = 1u64 << stages;
+        let total_frames = match total_samples {
+            Some(s) => Some(s / divider),
+            None => None,
+        };
+        Self {
+            sample_rate: intermediate_pcm,
+            original_channels: channels,
+            total_frames,
+            bits_per_sample: Some(1),
+            dsd_bit_rate: Some(dsd_bit_rate),
+        }
+    }
+
+    /// Returns `true` if this audio stream carries 1-bit DSD audio.
+    #[inline]
+    pub const fn is_dsd(&self) -> bool {
+        self.dsd_bit_rate.is_some()
+    }
 }
 
 /// A streaming audio decoder that reads and decodes audio files into stereo `f64` PCM.
@@ -94,12 +157,8 @@ impl AudioDecoder {
             .make_audio_decoder(&audio_params, &decoder_opts)
             .map_err(|e| FormatError::DecoderError(format!("failed to initialize decoder: {e}")))?;
 
-        let info = AudioStreamInfo {
-            sample_rate,
-            original_channels: channels as u8,
-            total_frames,
-            bits_per_sample,
-        };
+        let info =
+            AudioStreamInfo::new_pcm(sample_rate, channels as u8, total_frames, bits_per_sample);
 
         Ok(Self {
             format,

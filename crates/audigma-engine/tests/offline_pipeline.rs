@@ -1,6 +1,6 @@
-use audigma_dsp::PcmRateHz;
 use audigma_dsp::config::TargetFormat;
-use audigma_engine::traits::{MockAudioInput, SeekableSink, StreamSink};
+use audigma_dsp::{DsdBitRateHz, PcmRateHz};
+use audigma_engine::traits::{AudioInput, MockAudioInput, SeekableSink, StreamSink};
 use audigma_engine::{EngineError, OfflinePipeline};
 use audigma_format::AudioStreamInfo;
 use audigma_settings::{OutputContainer, PeakAnalysisMode, Settings};
@@ -35,12 +35,7 @@ fn test_offline_pipeline_dsf_conversion_trim_to_duration() {
     let (left, right) = generate_synthetic_stereo_sine(in_rate, 0.1, 1000.0, 0.5);
     let total_frames = left.len() as u64;
 
-    let info = AudioStreamInfo {
-        sample_rate: in_rate,
-        original_channels: 2,
-        total_frames: Some(total_frames),
-        bits_per_sample: Some(16),
-    };
+    let info = AudioStreamInfo::new_pcm(in_rate, 2, Some(total_frames), Some(16));
 
     let mut input = MockAudioInput::new(info, left, right, true);
     let mut out_buffer = Cursor::new(Vec::new());
@@ -79,12 +74,7 @@ fn test_offline_pipeline_wav_conversion_two_pass() {
     let (left, right) = generate_synthetic_stereo_sine(in_rate, 0.05, 1000.0, 0.95);
     let total_frames = left.len() as u64;
 
-    let info = AudioStreamInfo {
-        sample_rate: in_rate,
-        original_channels: 2,
-        total_frames: Some(total_frames),
-        bits_per_sample: Some(16),
-    };
+    let info = AudioStreamInfo::new_pcm(in_rate, 2, Some(total_frames), Some(16));
 
     let mut input = MockAudioInput::new(info, left, right, true);
     let mut out_buffer = Cursor::new(Vec::new());
@@ -123,12 +113,7 @@ fn test_offline_pipeline_flac_conversion() {
     let (left, right) = generate_synthetic_stereo_sine(in_rate, 0.05, 440.0, 0.7);
     let total_frames = left.len() as u64;
 
-    let info = AudioStreamInfo {
-        sample_rate: in_rate,
-        original_channels: 2,
-        total_frames: Some(total_frames),
-        bits_per_sample: Some(16),
-    };
+    let info = AudioStreamInfo::new_pcm(in_rate, 2, Some(total_frames), Some(16));
 
     let mut input = MockAudioInput::new(info, left, right, true);
     let mut out_buffer = Cursor::new(Vec::new());
@@ -151,12 +136,7 @@ fn test_offline_pipeline_rejects_nonseekable_output_for_dsf() {
     let in_rate = PcmRateHz::PCM_44100;
     let (left, right) = generate_synthetic_stereo_sine(in_rate, 0.01, 1000.0, 0.5);
 
-    let info = AudioStreamInfo {
-        sample_rate: in_rate,
-        original_channels: 2,
-        total_frames: Some(left.len() as u64),
-        bits_per_sample: Some(16),
-    };
+    let info = AudioStreamInfo::new_pcm(in_rate, 2, Some(left.len() as u64), Some(16));
 
     let mut input = MockAudioInput::new(info, left, right, true);
     let dummy_sink = StreamSink(Vec::new()); // Non-seekable stream (e.g. stdout)
@@ -181,12 +161,7 @@ fn test_offline_pipeline_rejects_unseekable_input_for_two_pass() {
     let in_rate = PcmRateHz::PCM_44100;
     let (left, right) = generate_synthetic_stereo_sine(in_rate, 0.01, 1000.0, 0.5);
 
-    let info = AudioStreamInfo {
-        sample_rate: in_rate,
-        original_channels: 2,
-        total_frames: Some(left.len() as u64),
-        bits_per_sample: Some(16),
-    };
+    let info = AudioStreamInfo::new_pcm(in_rate, 2, Some(left.len() as u64), Some(16));
 
     // allow_rewind = false (simulates unseekable stdin stream)
     let mut input = MockAudioInput::new(info, left, right, false);
@@ -214,12 +189,7 @@ fn test_offline_pipeline_cross_family_48k_to_dsd256() {
     let (left, right) = generate_synthetic_stereo_sine(in_rate, 0.05, 1000.0, 0.5);
     let total_frames = left.len() as u64;
 
-    let info = AudioStreamInfo {
-        sample_rate: in_rate,
-        original_channels: 2,
-        total_frames: Some(total_frames),
-        bits_per_sample: Some(16),
-    };
+    let info = AudioStreamInfo::new_pcm(in_rate, 2, Some(total_frames), Some(16));
 
     let mut input = MockAudioInput::new(info, left, right, true);
     let mut out_buffer = Cursor::new(Vec::new());
@@ -248,12 +218,7 @@ fn test_offline_pipeline_cross_family_192k_to_dsd256() {
     let (left, right) = generate_synthetic_stereo_sine(in_rate, 0.05, 1000.0, 0.5);
     let total_frames = left.len() as u64;
 
-    let info = AudioStreamInfo {
-        sample_rate: in_rate,
-        original_channels: 2,
-        total_frames: Some(total_frames),
-        bits_per_sample: Some(24),
-    };
+    let info = AudioStreamInfo::new_pcm(in_rate, 2, Some(total_frames), Some(24));
 
     let mut input = MockAudioInput::new(info, left, right, true);
     let mut out_buffer = Cursor::new(Vec::new());
@@ -274,4 +239,41 @@ fn test_offline_pipeline_cross_family_192k_to_dsd256() {
     let (header, _, _) =
         audigma_format::dsf::parse_stereo_dsf_file(&dsf_bytes).expect("valid DSF file");
     assert_eq!(header.bit_rate.get(), 11_289_600);
+}
+
+#[test]
+fn test_offline_pipeline_dsd_automatic_passthrough_bit_exact() {
+    let dsd_rate = DsdBitRateHz::new(11_289_600).unwrap(); // DSD256
+    let num_bytes = 8192; // 2 blocks of 4096
+    let left_bytes: Vec<u8> = (0..num_bytes).map(|i| (i % 256) as u8).collect();
+    let right_bytes: Vec<u8> = (0..num_bytes).map(|i| ((i + 42) % 256) as u8).collect();
+
+    let info = AudioStreamInfo::new_dsd(dsd_rate, 2, Some((num_bytes * 8) as u64));
+    let mut input = MockAudioInput::new_dsd(info, left_bytes.clone(), right_bytes.clone(), true);
+    let mut out_buffer = Cursor::new(Vec::new());
+
+    let settings = Settings::default_offline(OutputContainer::Dsf);
+    let in_pcm_rate = input.info().sample_rate;
+    let pipeline = OfflinePipeline::prepare(settings, in_pcm_rate).expect("prepare failed");
+
+    let report = pipeline
+        .run(&mut input, Box::new(SeekableSink(&mut out_buffer)))
+        .expect("passthrough run failed");
+
+    assert_eq!(report.target_format, TargetFormat::Dsd);
+    assert_eq!(report.total_input_frames, (num_bytes * 8) as u64);
+    assert_eq!(report.total_output_frames, (num_bytes * 8) as u64);
+    assert_eq!(report.overload_count, 0);
+
+    let dsf_bytes = out_buffer.into_inner();
+    let (header, out_l, out_r) =
+        audigma_format::dsf::parse_stereo_dsf_file(&dsf_bytes).expect("valid DSF file");
+    assert_eq!(header.bit_rate, dsd_rate);
+    assert_eq!(header.sample_count_per_channel, (num_bytes * 8) as u64);
+
+    // Verify bit-exact payload match!
+    assert_eq!(out_l.len(), left_bytes.len());
+    assert_eq!(out_r.len(), right_bytes.len());
+    assert_eq!(out_l, left_bytes);
+    assert_eq!(out_r, right_bytes);
 }

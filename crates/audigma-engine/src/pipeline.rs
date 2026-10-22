@@ -608,6 +608,50 @@ impl OfflinePipeline {
         let input_rate = input.info().sample_rate;
         let target_spec = self.plan.stream_spec.target;
         let is_dsd = matches!(target_spec, TargetRateSpec::Dsd { .. });
+
+        let is_input_dsd = input.info().is_dsd();
+        let is_target_matching_dsd = match target_spec {
+            TargetRateSpec::Dsd { bit_rate } => input.info().dsd_bit_rate == Some(bit_rate),
+            _ => false,
+        };
+        let is_volume_unity = self.plan.dsp_config.user_volume_db.abs() < 1e-6
+            && self.plan.dsp_config.preamp_db.abs() < 1e-6;
+
+        if is_input_dsd && is_target_matching_dsd && is_volume_unity {
+            // Automatic Opportunistic Bit-Exact DSD Passthrough (Design.md §1.6):
+            // The input is DSD, target matches input rate, and software volume attenuation is unity (100%).
+            // Direct bit-exact transfer bypassing decimation, filtering, and remodulation.
+            let mut container_writer = ContainerWriter::new(&self.settings, &target_spec, output)?;
+            let chunk_bytes = 4096;
+            let mut dsd_l = vec![0u8; chunk_bytes];
+            let mut dsd_r = vec![0u8; chunk_bytes];
+            let mut total_input_frames = 0u64;
+
+            loop {
+                let bytes_read = input.read_dsd_bytes(&mut [&mut dsd_l, &mut dsd_r])?;
+                if bytes_read == 0 {
+                    break;
+                }
+                total_input_frames += (bytes_read * 8) as u64;
+                container_writer.write_stereo_dsd(&dsd_l[..bytes_read], &dsd_r[..bytes_read])?;
+            }
+
+            let (total_output_frames, total_bytes_written) = container_writer.finalize()?;
+            let elapsed_ms = start_time.elapsed().as_millis() as u64;
+
+            return Ok(OfflineReport {
+                input_rate,
+                target_format: TargetFormat::Dsd,
+                total_input_frames,
+                total_output_frames,
+                total_bytes_written,
+                overload_count: 0,
+                applied_gain_db: 0.0,
+                measured_peak_dbfs: None,
+                elapsed_ms,
+            });
+        }
+
         let peak_mode = self
             .settings
             .gain

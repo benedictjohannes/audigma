@@ -7,6 +7,7 @@ pub mod decoder;
 pub mod dop;
 pub mod dsd_u32;
 pub mod dsf;
+pub mod dsf_reader;
 pub mod dsf_writer;
 pub mod flac_writer;
 pub mod topology;
@@ -14,7 +15,8 @@ pub mod wav_writer;
 
 pub use decoder::{AudioDecoder, AudioStreamInfo};
 pub use dop::{
-    DOP_MARKER_EVEN, DOP_MARKER_ODD, DSD_BYTES_PER_DOP_FRAME, DopContainerFormat, DopPacker,
+    DOP_DETECTION_THRESHOLD_FRAMES, DOP_MARKER_EVEN, DOP_MARKER_ODD, DSD_BYTES_PER_DOP_FRAME,
+    DopContainerFormat, DopDetector, DopPacker, detect_dop_format_in_pcm_buffer,
     unpack_stereo_dop_frames,
 };
 pub use dsd_u32::{
@@ -25,6 +27,7 @@ pub use dsf::{
     DSF_BLOCK_SIZE_PER_CHANNEL, DSF_HEADER_TOTAL_BYTES, DsfBitOrder, DsfHeader, DsfPadMode,
     pack_stereo_dsf_blocks, pack_stereo_dsf_file, parse_stereo_dsf_file,
 };
+pub use dsf_reader::DsfReader;
 pub use dsf_writer::DsfFileWriter;
 pub use flac_writer::FlacEncoder;
 pub use topology::downmix_interleaved_to_stereo;

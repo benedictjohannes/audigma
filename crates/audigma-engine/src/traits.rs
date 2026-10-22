@@ -73,6 +73,17 @@ pub trait AudioInput: Send {
         }
     }
 
+    /// Reads up to `channels[0].len()` DSD bytes for each channel when `info().is_dsd()`.
+    ///
+    /// Slices in `channels` must have equal lengths.
+    /// Returns `Ok(bytes_read)`. Returns `Ok(0)` when end-of-stream (EOF) is reached.
+    fn read_dsd_bytes(&mut self, channels: &mut [&mut [u8]]) -> Result<usize, EngineError> {
+        let _ = channels;
+        Err(EngineError::Pipeline(
+            "audio input driver does not support raw DSD reading".into(),
+        ))
+    }
+
     /// Checks if a dynamic input sample rate change has been negotiated.
     fn check_rate_change(&self) -> Option<audigma_dsp::PcmRateHz> {
         None
@@ -289,7 +300,9 @@ impl AudioInput for DecoderInput {
 pub struct MockAudioInput {
     info: AudioStreamInfo,
     channels: Vec<Vec<f64>>,
+    dsd_channels: Vec<Vec<u8>>,
     pos: usize,
+    dsd_pos: usize,
     allow_rewind: bool,
     pending_rate: Option<audigma_dsp::PcmRateHz>,
     pending_volume: std::sync::Arc<std::sync::Mutex<Option<VolumeUpdate>>>,
@@ -307,7 +320,34 @@ impl MockAudioInput {
         Self {
             info,
             channels: vec![left, right],
+            dsd_channels: Vec::new(),
             pos: 0,
+            dsd_pos: 0,
+            allow_rewind,
+            pending_rate: None,
+            pending_volume: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            generation: 1,
+        }
+    }
+
+    /// Creates a new in-memory `MockAudioInput` carrying raw DSD byte streams.
+    pub fn new_dsd(
+        info: AudioStreamInfo,
+        left_bytes: Vec<u8>,
+        right_bytes: Vec<u8>,
+        allow_rewind: bool,
+    ) -> Self {
+        assert_eq!(
+            left_bytes.len(),
+            right_bytes.len(),
+            "left and right DSD channel byte lengths must match"
+        );
+        Self {
+            info,
+            channels: Vec::new(),
+            dsd_channels: vec![left_bytes, right_bytes],
+            pos: 0,
+            dsd_pos: 0,
             allow_rewind,
             pending_rate: None,
             pending_volume: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -330,7 +370,9 @@ impl MockAudioInput {
         Self {
             info,
             channels,
+            dsd_channels: Vec::new(),
             pos: 0,
+            dsd_pos: 0,
             allow_rewind,
             pending_rate: None,
             pending_volume: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -383,6 +425,31 @@ impl AudioInput for MockAudioInput {
         Ok(to_read)
     }
 
+    fn read_dsd_bytes(&mut self, channels: &mut [&mut [u8]]) -> Result<usize, EngineError> {
+        if self.dsd_channels.is_empty() {
+            return Err(EngineError::Pipeline(
+                "mock audio input has no DSD channels".into(),
+            ));
+        }
+        let total = self.dsd_channels[0].len();
+        let remaining = total.saturating_sub(self.dsd_pos);
+        if remaining == 0 {
+            return Ok(0);
+        }
+        let max_bytes = channels.iter().map(|s| s.len()).min().unwrap_or(0);
+        let to_copy = max_bytes.min(remaining);
+        for (c, ch_slice) in channels.iter_mut().enumerate() {
+            if c < self.dsd_channels.len() {
+                ch_slice[..to_copy]
+                    .copy_from_slice(&self.dsd_channels[c][self.dsd_pos..self.dsd_pos + to_copy]);
+            } else {
+                ch_slice[..to_copy].fill(0);
+            }
+        }
+        self.dsd_pos += to_copy;
+        Ok(to_copy)
+    }
+
     fn check_rate_change(&self) -> Option<audigma_dsp::PcmRateHz> {
         self.pending_rate
     }
@@ -411,6 +478,7 @@ impl AudioInput for MockAudioInput {
             ));
         }
         self.pos = 0;
+        self.dsd_pos = 0;
         Ok(())
     }
 }
@@ -422,12 +490,7 @@ mod tests {
 
     #[test]
     fn test_mock_audio_input_chunked_reads_and_rewind() {
-        let info = AudioStreamInfo {
-            sample_rate: PcmRateHz::PCM_44100,
-            original_channels: 2,
-            total_frames: Some(10),
-            bits_per_sample: Some(16),
-        };
+        let info = AudioStreamInfo::new_pcm(PcmRateHz::PCM_44100, 2, Some(10), Some(16));
         let left = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
         let right = vec![-1.0, -2.0, -3.0, -4.0, -5.0, -6.0, -7.0, -8.0, -9.0, -10.0];
 
@@ -458,6 +521,36 @@ mod tests {
         let n5 = input.read_stereo(&mut b_l, &mut b_r).unwrap();
         assert_eq!(n5, 4);
         assert_eq!(b_l, [1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn test_mock_audio_input_dsd_reads_and_rewind() {
+        let dsd_rate = audigma_dsp::DsdBitRateHz::DSD64;
+        let info = AudioStreamInfo::new_dsd(dsd_rate, 2, Some(32));
+        let left_bytes = vec![0x05, 0xFA, 0x69, 0x69];
+        let right_bytes = vec![0x05, 0xFA, 0x69, 0x69];
+
+        let mut input =
+            MockAudioInput::new_dsd(info, left_bytes.clone(), right_bytes.clone(), true);
+        assert!(input.info().is_dsd());
+
+        let mut b_l = [0u8; 2];
+        let mut b_r = [0u8; 2];
+
+        let n1 = input.read_dsd_bytes(&mut [&mut b_l, &mut b_r]).unwrap();
+        assert_eq!(n1, 2);
+        assert_eq!(&b_l[..2], &[0x05, 0xFA]);
+        assert_eq!(&b_r[..2], &[0x05, 0xFA]);
+
+        input.rewind().unwrap();
+        let mut b_all_l = [0u8; 4];
+        let mut b_all_r = [0u8; 4];
+        let n2 = input
+            .read_dsd_bytes(&mut [&mut b_all_l, &mut b_all_r])
+            .unwrap();
+        assert_eq!(n2, 4);
+        assert_eq!(&b_all_l[..], &left_bytes[..]);
+        assert_eq!(&b_all_r[..], &right_bytes[..]);
     }
 
     #[test]

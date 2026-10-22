@@ -311,6 +311,182 @@ pub fn unpack_stereo_dop_frames(
     Ok((left, right))
 }
 
+/// Required consecutive strictly alternating DoP marker frames before locking (`Design.md §5.2`).
+pub const DOP_DETECTION_THRESHOLD_FRAMES: usize = 128;
+
+/// Streaming detector and unwrapper for DoP (DSD over PCM v1.1) in raw PCM streams.
+///
+/// Observes consecutive frames looking for 128 strictly alternating `0x05`/`0xFA`
+/// marker frames synchronized across stereo channels before locking (`Design.md §5.2`).
+#[derive(Debug, Clone)]
+pub struct DopDetector {
+    format: DopContainerFormat,
+    consecutive_alternates: usize,
+    next_expected: Option<u8>,
+    locked: bool,
+}
+
+impl DopDetector {
+    /// Creates a new `DopDetector` targeting a specific container alignment.
+    pub fn new(format: DopContainerFormat) -> Self {
+        Self {
+            format,
+            consecutive_alternates: 0,
+            next_expected: None,
+            locked: false,
+        }
+    }
+
+    /// Returns the container alignment format being monitored.
+    #[inline]
+    pub const fn format(&self) -> DopContainerFormat {
+        self.format
+    }
+
+    /// Returns `true` if DoP framing has been positively detected and locked.
+    #[inline]
+    pub const fn is_locked(&self) -> bool {
+        self.locked
+    }
+
+    /// Returns the number of consecutive alternating marker frames observed so far.
+    #[inline]
+    pub const fn consecutive_alternates(&self) -> usize {
+        self.consecutive_alternates
+    }
+
+    /// Resets the detector state back to searching.
+    pub fn reset(&mut self) {
+        self.consecutive_alternates = 0;
+        self.next_expected = None;
+        self.locked = false;
+    }
+
+    /// Observes a slice of interleaved stereo PCM frames.
+    ///
+    /// Updates the internal marker state machine. Returns `true` if locked on DoP framing.
+    pub fn observe_stereo_frames(&mut self, in_frames: &[u8]) -> bool {
+        let frame_bytes = self.format.bytes_per_stereo_frame();
+        let sample_bytes = self.format.bytes_per_sample();
+
+        for frame in in_frames.chunks_exact(frame_bytes) {
+            let l_sample = self.format.read_sample(&frame[..sample_bytes]);
+            let r_sample = self.format.read_sample(&frame[sample_bytes..frame_bytes]);
+
+            let (l_marker, r_marker) = match (l_sample, r_sample) {
+                (Ok((lm, _, _)), Ok((rm, _, _))) => (lm, rm),
+                _ => {
+                    self.reset();
+                    continue;
+                }
+            };
+
+            if l_marker != r_marker || (l_marker != DOP_MARKER_EVEN && l_marker != DOP_MARKER_ODD) {
+                self.reset();
+                continue;
+            }
+
+            if let Some(exp) = self.next_expected {
+                if l_marker == exp {
+                    self.consecutive_alternates += 1;
+                } else {
+                    self.consecutive_alternates = 1;
+                }
+            } else {
+                self.consecutive_alternates = 1;
+            }
+
+            self.next_expected = Some(if l_marker == DOP_MARKER_EVEN {
+                DOP_MARKER_ODD
+            } else {
+                DOP_MARKER_EVEN
+            });
+
+            if self.consecutive_alternates >= DOP_DETECTION_THRESHOLD_FRAMES {
+                self.locked = true;
+            }
+        }
+
+        self.locked
+    }
+
+    /// Unpacks interleaved stereo DoP frames into Left and Right MSB-first DSD bytes.
+    ///
+    /// Requires that DoP framing is locked (`is_locked() == true`).
+    /// Returns the number of DSD bytes appended to each channel slice.
+    pub fn unwrap_stereo_frames(
+        &mut self,
+        in_frames: &[u8],
+        out_left: &mut Vec<u8>,
+        out_right: &mut Vec<u8>,
+    ) -> Result<usize, FormatError> {
+        let frame_bytes = self.format.bytes_per_stereo_frame();
+        let sample_bytes = self.format.bytes_per_sample();
+        let mut dsd_bytes_written = 0;
+
+        for (frame_idx, frame) in in_frames.chunks_exact(frame_bytes).enumerate() {
+            let (l_marker, l_hi, l_lo) = self.format.read_sample(&frame[..sample_bytes])?;
+            let (r_marker, r_hi, r_lo) =
+                self.format.read_sample(&frame[sample_bytes..frame_bytes])?;
+
+            if l_marker != r_marker || (l_marker != DOP_MARKER_EVEN && l_marker != DOP_MARKER_ODD) {
+                self.reset();
+                return Err(FormatError::InvalidDopMarker {
+                    frame_index: frame_idx,
+                    left_marker: l_marker,
+                    right_marker: r_marker,
+                });
+            }
+
+            if let Some(exp) = self.next_expected {
+                if l_marker == exp {
+                    self.consecutive_alternates += 1;
+                } else {
+                    self.reset();
+                    return Err(FormatError::InvalidDopMarker {
+                        frame_index: frame_idx,
+                        left_marker: l_marker,
+                        right_marker: r_marker,
+                    });
+                }
+            } else {
+                self.consecutive_alternates = 1;
+            }
+
+            self.next_expected = Some(if l_marker == DOP_MARKER_EVEN {
+                DOP_MARKER_ODD
+            } else {
+                DOP_MARKER_EVEN
+            });
+
+            out_left.push(l_hi);
+            out_left.push(l_lo);
+            out_right.push(r_hi);
+            out_right.push(r_lo);
+            dsd_bytes_written += DSD_BYTES_PER_DOP_FRAME;
+        }
+
+        Ok(dsd_bytes_written)
+    }
+}
+
+/// Heuristically probes a buffer of PCM bytes across all three DoP container alignments
+/// (`s32le`, `s24le`, `s24_3le`) to detect whether it contains a valid DoP stream (`Design.md §5.2`).
+pub fn detect_dop_format_in_pcm_buffer(bytes: &[u8]) -> Option<DopContainerFormat> {
+    const FORMATS: [DopContainerFormat; 3] = [
+        DopContainerFormat::S32Le,
+        DopContainerFormat::S24Le,
+        DopContainerFormat::S24_3Le,
+    ];
+    for &fmt in &FORMATS {
+        let mut detector = DopDetector::new(fmt);
+        if detector.observe_stereo_frames(bytes) {
+            return Some(fmt);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,5 +644,52 @@ mod tests {
         let (l, r) = unpack_stereo_dop_frames(DopContainerFormat::S24_3Le, &stream).unwrap();
         assert_eq!(l, [0xAA, 0xBB, 0x69, 0x69, 0x69, 0x69, 0x11, 0x22]);
         assert_eq!(r, [0xCC, 0xDD, 0x69, 0x69, 0x69, 0x69, 0x33, 0x44]);
+    }
+
+    #[test]
+    fn test_dop_detector_128_frames_lock_and_unwrap() {
+        // Generate 130 frames of DoP in S32Le
+        let mut packer = DopPacker::new(DopContainerFormat::S32Le);
+        let left_dsd: Vec<u8> = (0..260).map(|i| (i % 256) as u8).collect();
+        let right_dsd: Vec<u8> = (0..260).map(|i| ((i * 3 + 1) % 256) as u8).collect();
+
+        let mut dop_bytes = vec![0u8; 130 * 8];
+        packer
+            .pack_stereo_frames(&left_dsd, &right_dsd, &mut dop_bytes)
+            .unwrap();
+
+        // Feed first 100 frames: detector should not be locked yet (threshold = 128)
+        let mut detector = DopDetector::new(DopContainerFormat::S32Le);
+        assert!(!detector.observe_stereo_frames(&dop_bytes[..100 * 8]));
+        assert_eq!(detector.consecutive_alternates(), 100);
+        assert!(!detector.is_locked());
+
+        // Feed next 30 frames: crosses 128 threshold -> locks!
+        assert!(detector.observe_stereo_frames(&dop_bytes[100 * 8..]));
+        assert!(detector.is_locked());
+
+        // Probe helper auto-detects S32Le
+        assert_eq!(
+            detect_dop_format_in_pcm_buffer(&dop_bytes),
+            Some(DopContainerFormat::S32Le)
+        );
+
+        // Unwrap all 130 frames
+        let mut unwrap_detector = DopDetector::new(DopContainerFormat::S32Le);
+        let mut out_l = Vec::new();
+        let mut out_r = Vec::new();
+        let written = unwrap_detector
+            .unwrap_stereo_frames(&dop_bytes, &mut out_l, &mut out_r)
+            .unwrap();
+        assert_eq!(written, 260);
+        assert_eq!(out_l, left_dsd);
+        assert_eq!(out_r, right_dsd);
+    }
+
+    #[test]
+    fn test_dop_detector_rejects_pcm_random_data() {
+        // Plain PCM data with pseudo-random bytes
+        let pcm_data: Vec<u8> = (0..2048).map(|i| ((i * 101 + 43) % 256) as u8).collect();
+        assert_eq!(detect_dop_format_in_pcm_buffer(&pcm_data), None);
     }
 }

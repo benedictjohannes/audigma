@@ -27,6 +27,9 @@ pub enum FirError {
 
     #[error("Unsupported resampling ratio from {in_rate_hz} Hz to {out_rate_hz} Hz")]
     UnsupportedRatio { in_rate_hz: u32, out_rate_hz: u32 },
+
+    #[error("Input buffer length {len} is not a multiple of decimation factor {factor}")]
+    UnalignedDecimationInput { len: usize, factor: usize },
 }
 
 /// Single-stage 2x linear-phase half-band FIR interpolation stage.
@@ -264,6 +267,366 @@ impl HalfBandCascade {
         } else {
             self.stages[last_stage_idx]
                 .process_tile(&self.scratch_b[..cur_len], &mut output[..required_out])?;
+        }
+
+        Ok(required_out)
+    }
+}
+
+/// Precomputed table mapping each byte (8 bits MSB-first) to 8 `f64` samples in `{-1.0, +1.0}`.
+/// Bit 1 maps to `+1.0`, bit 0 maps to `-1.0` (`Design.md §4.1`).
+pub static DSD_BYTE_TO_FLOATS: [[f64; 8]; 256] = {
+    let mut table = [[0.0; 8]; 256];
+    let mut b = 0;
+    while b < 256 {
+        let mut i = 0;
+        while i < 8 {
+            let bit = (b >> (7 - i)) & 1;
+            table[b][i] = if bit == 1 { 1.0 } else { -1.0 };
+            i += 1;
+        }
+        b += 1;
+    }
+    table
+};
+
+/// Fast zero-copy conversion of chronological MSB-first DSD bytes into normalized `f64` samples.
+#[inline]
+pub fn unpack_dsd_bytes_to_floats(bytes: &[u8], out: &mut [f64]) -> Result<usize, FirError> {
+    let required = bytes.len() * 8;
+    if out.len() < required {
+        return Err(FirError::OutputBufferTooSmall {
+            required,
+            provided: out.len(),
+        });
+    }
+    for (i, &byte) in bytes.iter().enumerate() {
+        let floats = &DSD_BYTE_TO_FLOATS[byte as usize];
+        out[i * 8..(i + 1) * 8].copy_from_slice(floats);
+    }
+    Ok(required)
+}
+
+/// Single-stage 2x linear-phase half-band FIR decimation stage (`Design.md §1.6`, `§4.2`).
+///
+/// Takes $2N$ input samples at rate $2 F_s$ and produces $N$ output samples at rate $F_s$.
+/// Exploits half-band structural symmetry:
+/// - Even non-center taps are identically 0.0.
+/// - Center tap is 0.5 (scaled by 1.0 at DC).
+/// - Odd taps are symmetric ($h[-k] = h[k]$), allowing paired sample addition before multiplication.
+#[derive(Debug, Clone)]
+pub struct HalfBandDecimationStage {
+    /// Positive-offset odd taps ($h[1], h[3], \dots$).
+    taps: &'static [f64],
+    /// Number of odd taps ($K$).
+    num_odd_taps: usize,
+    /// Circular double-buffer history line.
+    history: Vec<f64>,
+    /// Head write pointer in circular buffer.
+    head: usize,
+}
+
+impl HalfBandDecimationStage {
+    /// Creates a new 2x half-band decimation stage initialized to digital silence.
+    pub fn new(taps: &'static [f64]) -> Self {
+        let num_odd_taps = taps.len();
+        let window_len = 4 * num_odd_taps;
+        Self {
+            taps,
+            num_odd_taps,
+            history: vec![0.0; window_len * 2 + 4],
+            head: 0,
+        }
+    }
+
+    /// Resets all internal delay lines to zero.
+    pub fn reset(&mut self) {
+        self.history.fill(0.0);
+        self.head = 0;
+    }
+
+    /// Returns the group delay of this stage in input sample periods ($2K - 1$).
+    #[inline]
+    pub const fn group_delay_input_samples(&self) -> usize {
+        2 * self.num_odd_taps - 1
+    }
+
+    /// Processes a slice of input samples, writing exactly `input.len() / 2` samples into `output`.
+    pub fn process_tile(&mut self, input: &[f64], output: &mut [f64]) -> Result<usize, FirError> {
+        let out_len = input.len() / 2;
+        if output.len() < out_len {
+            return Err(FirError::OutputBufferTooSmall {
+                required: out_len,
+                provided: output.len(),
+            });
+        }
+
+        let k = self.num_odd_taps;
+        let window_len = 4 * k;
+        let center_offset = 2 * k - 1;
+
+        for (out_idx, pair) in input.chunks_exact(2).enumerate() {
+            // Push 2 chronological samples into circular double buffer
+            self.history[self.head] = pair[0];
+            self.history[self.head + 1] = pair[1];
+            self.history[self.head + window_len] = pair[0];
+            self.history[self.head + 1 + window_len] = pair[1];
+
+            // Window of 4K samples from oldest to newest
+            let window_start = self.head + 2;
+            let window = &self.history[window_start..window_start + window_len];
+
+            // Center tap is at index center_offset (2K - 1)
+            let center_sample = window[center_offset];
+
+            // Odd taps are symmetric around center_offset:
+            // offsets are 1, 3, ..., 2K - 1 (step 2)
+            let mut odd_acc = 0.0;
+            for (i, &tap) in self.taps.iter().enumerate() {
+                let delta = 2 * i + 1;
+                let s_pre = window[center_offset - delta];
+                let s_post = window[center_offset + delta];
+                odd_acc += tap * (s_pre + s_post);
+            }
+
+            output[out_idx] = 0.5 * center_sample + odd_acc;
+
+            self.head += 2;
+            if self.head >= window_len {
+                self.head = 0;
+            }
+        }
+
+        Ok(out_len)
+    }
+}
+
+/// Multistage power-of-two ($2^M$) decimation cascade using bounded tile streaming (`Design.md §1.6`, `§4.2`).
+///
+/// Early stages use relaxed transition taps (`Stage 1+`), while the final stage into baseband
+/// uses steep transition taps (`Stage 0`), protecting the audio baseband from ultrasonic noise aliasing.
+#[derive(Debug, Clone)]
+pub struct HalfBandDecimationCascade {
+    stages: Vec<HalfBandDecimationStage>,
+    num_stages: usize,
+    max_input_frames: usize,
+    scratch_a: Vec<f64>,
+    scratch_b: Vec<f64>,
+}
+
+impl HalfBandDecimationCascade {
+    /// Creates a new multistage decimation cascade.
+    ///
+    /// - `preset`: Filter preset determining Stage 0 and Stage 1+ coefficients.
+    /// - `stages`: Number of 2x decimation stages (e.g. 5 stages for 32x decimation from DSD256 to 352.8k DXD).
+    /// - `max_input_frames`: Maximum high-rate samples or unpacked DSD bits processed in a single tile.
+    pub fn new(preset: FilterPreset, stages: usize, max_input_frames: usize) -> Self {
+        let mut stage_vec = Vec::with_capacity(stages);
+        if stages == 1 {
+            // Single stage: steep transition
+            stage_vec.push(HalfBandDecimationStage::new(get_halfband_stage0_taps(
+                preset,
+            )));
+        } else if stages > 1 {
+            // Early stages (0..stages-1): relaxed transition
+            let s1_taps = get_halfband_stage1_taps(preset);
+            for _ in 0..(stages - 1) {
+                stage_vec.push(HalfBandDecimationStage::new(s1_taps));
+            }
+            // Final stage: steep transition into baseband
+            stage_vec.push(HalfBandDecimationStage::new(get_halfband_stage0_taps(
+                preset,
+            )));
+        }
+
+        Self {
+            stages: stage_vec,
+            num_stages: stages,
+            max_input_frames,
+            scratch_a: vec![0.0; max_input_frames],
+            scratch_b: vec![0.0; max_input_frames],
+        }
+    }
+
+    /// Resets all stages and internal buffers to digital silence.
+    pub fn reset(&mut self) {
+        for stage in &mut self.stages {
+            stage.reset();
+        }
+        self.scratch_a.fill(0.0);
+        self.scratch_b.fill(0.0);
+    }
+
+    /// Returns the total decimation rate divider ($2^{\text{stages}}$).
+    #[inline]
+    pub const fn rate_divider(&self) -> usize {
+        1 << self.num_stages
+    }
+
+    /// Returns the number of stages in the cascade.
+    #[inline]
+    pub const fn num_stages(&self) -> usize {
+        self.num_stages
+    }
+
+    /// Returns the total group delay of the cascade expressed in input samples.
+    pub fn total_group_delay_input_samples(&self) -> usize {
+        if self.num_stages == 0 {
+            return 0;
+        }
+        let mut total_delay = 0;
+        for (i, stage) in self.stages.iter().enumerate() {
+            let scale_from_input = 1 << i;
+            total_delay += stage.group_delay_input_samples() * scale_from_input;
+        }
+        total_delay
+    }
+
+    /// Processes an input tile of high-rate samples through the full decimation cascade.
+    ///
+    /// Writes `input.len() / (1 << stages)` samples into `output`.
+    /// Zero heap allocation is performed during execution.
+    pub fn process_tile(&mut self, input: &[f64], output: &mut [f64]) -> Result<usize, FirError> {
+        if input.len() > self.max_input_frames {
+            return Err(FirError::TileSizeExceeded {
+                provided: input.len(),
+                max: self.max_input_frames,
+            });
+        }
+        let total_divider = 1 << self.num_stages;
+        if input.len() % total_divider != 0 {
+            return Err(FirError::UnalignedDecimationInput {
+                len: input.len(),
+                factor: total_divider,
+            });
+        }
+        let required_out = input.len() / total_divider;
+        if output.len() < required_out {
+            return Err(FirError::OutputBufferTooSmall {
+                required: required_out,
+                provided: output.len(),
+            });
+        }
+
+        if self.num_stages == 0 {
+            output[..input.len()].copy_from_slice(input);
+            return Ok(input.len());
+        }
+
+        if self.num_stages == 1 {
+            self.stages[0].process_tile(input, &mut output[..required_out])?;
+            return Ok(required_out);
+        }
+
+        // Stage 0: input -> scratch_a
+        let mut cur_len = input.len() / 2;
+        self.stages[0].process_tile(input, &mut self.scratch_a[..cur_len])?;
+
+        // Stages 1 to num_stages - 2: ping-pong between scratch_a and scratch_b
+        let mut in_scratch_a = true;
+        for stage_idx in 1..(self.num_stages - 1) {
+            let next_len = cur_len / 2;
+            if in_scratch_a {
+                let (src, dst) = (&self.scratch_a[..cur_len], &mut self.scratch_b[..next_len]);
+                self.stages[stage_idx].process_tile(src, dst)?;
+            } else {
+                let (src, dst) = (&self.scratch_b[..cur_len], &mut self.scratch_a[..next_len]);
+                self.stages[stage_idx].process_tile(src, dst)?;
+            }
+            cur_len = next_len;
+            in_scratch_a = !in_scratch_a;
+        }
+
+        // Final stage: from current scratch directly into output
+        let last_stage_idx = self.num_stages - 1;
+        if in_scratch_a {
+            self.stages[last_stage_idx]
+                .process_tile(&self.scratch_a[..cur_len], &mut output[..required_out])?;
+        } else {
+            self.stages[last_stage_idx]
+                .process_tile(&self.scratch_b[..cur_len], &mut output[..required_out])?;
+        }
+
+        Ok(required_out)
+    }
+
+    /// Decimates packed 1-bit DSD bytes (MSB first, 8 bits/byte) into multi-bit PCM output.
+    ///
+    /// The number of DSD bits (`bytes.len() * 8`) must be a multiple of the total decimation factor.
+    /// Zero heap allocation is performed during execution.
+    pub fn process_dsd_bytes(
+        &mut self,
+        bytes: &[u8],
+        output: &mut [f64],
+    ) -> Result<usize, FirError> {
+        let total_samples = bytes.len() * 8;
+        if total_samples > self.max_input_frames {
+            return Err(FirError::TileSizeExceeded {
+                provided: total_samples,
+                max: self.max_input_frames,
+            });
+        }
+        let total_divider = 1 << self.num_stages;
+        if total_samples % total_divider != 0 {
+            return Err(FirError::UnalignedDecimationInput {
+                len: total_samples,
+                factor: total_divider,
+            });
+        }
+        let required_out = total_samples / total_divider;
+        if output.len() < required_out {
+            return Err(FirError::OutputBufferTooSmall {
+                required: required_out,
+                provided: output.len(),
+            });
+        }
+
+        if self.num_stages == 0 {
+            unpack_dsd_bytes_to_floats(bytes, &mut output[..total_samples])?;
+            return Ok(total_samples);
+        }
+
+        // Unpack into scratch_a
+        unpack_dsd_bytes_to_floats(bytes, &mut self.scratch_a[..total_samples])?;
+
+        if self.num_stages == 1 {
+            self.stages[0].process_tile(
+                &self.scratch_a[..total_samples],
+                &mut output[..required_out],
+            )?;
+            return Ok(required_out);
+        }
+
+        // Stage 0: scratch_a -> scratch_b
+        let mut cur_len = total_samples / 2;
+        self.stages[0].process_tile(
+            &self.scratch_a[..total_samples],
+            &mut self.scratch_b[..cur_len],
+        )?;
+
+        // Stages 1 to num_stages - 2: ping-pong between scratch_b and scratch_a
+        let mut in_scratch_b = true;
+        for stage_idx in 1..(self.num_stages - 1) {
+            let next_len = cur_len / 2;
+            if in_scratch_b {
+                let (src, dst) = (&self.scratch_b[..cur_len], &mut self.scratch_a[..next_len]);
+                self.stages[stage_idx].process_tile(src, dst)?;
+            } else {
+                let (src, dst) = (&self.scratch_a[..cur_len], &mut self.scratch_b[..next_len]);
+                self.stages[stage_idx].process_tile(src, dst)?;
+            }
+            cur_len = next_len;
+            in_scratch_b = !in_scratch_b;
+        }
+
+        // Final stage directly into output
+        let last_stage_idx = self.num_stages - 1;
+        if in_scratch_b {
+            self.stages[last_stage_idx]
+                .process_tile(&self.scratch_b[..cur_len], &mut output[..required_out])?;
+        } else {
+            self.stages[last_stage_idx]
+                .process_tile(&self.scratch_a[..cur_len], &mut output[..required_out])?;
         }
 
         Ok(required_out)
@@ -532,6 +895,72 @@ mod tests {
             assert!(
                 (s - 0.75).abs() < 1e-3,
                 "ASRC sample {s} deviates from DC level 0.75"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dsd_byte_to_floats_unpacking() {
+        let mut out = [0.0; 8];
+        // 0xFF -> all +1.0
+        unpack_dsd_bytes_to_floats(&[0xFF], &mut out).unwrap();
+        assert_eq!(out, [1.0; 8]);
+
+        // 0x00 -> all -1.0
+        unpack_dsd_bytes_to_floats(&[0x00], &mut out).unwrap();
+        assert_eq!(out, [-1.0; 8]);
+
+        // 0x69 -> [ -1, 1, 1, -1, 1, -1, -1, 1 ] (balanced silence)
+        unpack_dsd_bytes_to_floats(&[0x69], &mut out).unwrap();
+        assert_eq!(out, [-1.0, 1.0, 1.0, -1.0, 1.0, -1.0, -1.0, 1.0]);
+        assert_eq!(out.iter().sum::<f64>(), 0.0);
+    }
+
+    #[test]
+    fn test_halfband_decimation_stage_dc_gain() {
+        let taps = get_halfband_stage0_taps(FilterPreset::Balanced);
+        let mut stage = HalfBandDecimationStage::new(taps);
+
+        // Constant DC input: DC gain must be exactly 1.0
+        let dc_in = [1.0; 512];
+        let mut dc_out = [0.0; 256];
+        let written = stage.process_tile(&dc_in, &mut dc_out).unwrap();
+        assert_eq!(written, 256);
+
+        // Discard initial warm-up delay line fill
+        let steady = &dc_out[100..250];
+        for &s in steady {
+            assert!(
+                (s - 1.0).abs() < 1e-6,
+                "Decimator sample {s} deviates from unity gain 1.0"
+            );
+        }
+    }
+
+    #[test]
+    fn test_halfband_decimation_cascade_dsd_bytes() {
+        // 5 stages = 32x decimation (e.g. DSD256 at 11.2896 MHz -> 352.8 kHz DXD)
+        let mut cascade = HalfBandDecimationCascade::new(FilterPreset::Balanced, 5, 8192);
+        assert_eq!(cascade.rate_divider(), 32);
+        assert_eq!(cascade.num_stages(), 5);
+
+        // Group delay is around 1587 input samples (approx 50 decimated output samples)
+        let delay_inputs = cascade.total_group_delay_input_samples();
+        assert!(delay_inputs > 1000);
+
+        // Feed full positive DC (0xFF bytes -> +1.0 floats)
+        // 512 bytes * 8 = 4096 DSD bits -> 4096 / 32 = 128 PCM frames
+        let dc_bytes = [0xFF; 512];
+        let mut pcm_out = [0.0; 128];
+        let written = cascade.process_dsd_bytes(&dc_bytes, &mut pcm_out).unwrap();
+        assert_eq!(written, 128);
+
+        // After filter delay clears (> 60 decimated samples), output should equal 1.0
+        let tail = &pcm_out[80..128];
+        for &s in tail {
+            assert!(
+                (s - 1.0).abs() < 1e-4,
+                "Decimated DSD DC sample {s} deviates from 1.0"
             );
         }
     }

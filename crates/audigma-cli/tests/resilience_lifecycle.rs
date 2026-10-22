@@ -67,12 +67,7 @@ fn test_disconnecting_output_sink_triggers_device_disconnected_error() {
     let pipeline = LivePipeline::prepare(settings, input_rate).unwrap();
 
     let frames = 44100;
-    let info = AudioStreamInfo {
-        sample_rate: input_rate,
-        original_channels: 2,
-        total_frames: Some(frames as u64),
-        bits_per_sample: Some(32),
-    };
+    let info = AudioStreamInfo::new_pcm(input_rate, 2, Some(frames as u64), Some(32));
     let mut mock_in = MockAudioInput::new(info, vec![0.1; frames], vec![0.1; frames], false);
 
     // Output will disconnect after ~2048 bytes

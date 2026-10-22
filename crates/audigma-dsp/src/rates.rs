@@ -7,6 +7,7 @@
 //! - Hardware container frame rates (`TransportFrameRateHz`, e.g., `176_400` for DoP64 or `88_200` for `DSD_U32`)
 //! - PipeWire SPA DSD byte rates (`f_bit / 8`, e.g., `1_411_200` for DSD256)
 
+use crate::config::TargetRateSpec;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -331,6 +332,75 @@ impl DsdBitRateHz {
             _ => None,
         }
     }
+
+    /// If `target` PCM rate is an exact power-of-two decimation submultiple (`f_bit / 2^M`), returns `Some(M)`.
+    #[inline]
+    pub const fn power_of_two_decimation_stages_to(self, target: PcmRateHz) -> Option<u32> {
+        if target.0 == 0 || self.0 < target.0 || self.0 % target.0 != 0 {
+            return None;
+        }
+        let ratio = self.0 / target.0;
+        if ratio.is_power_of_two() {
+            Some(ratio.trailing_zeros())
+        } else {
+            None
+        }
+    }
+}
+
+/// Selects the optimal intermediate PCM rate for DSD decimation remodulation
+/// according to the formula in `Design.md §1.6`:
+/// `Rate_intermediate = min(Rate_in_useful, Rate_out_useful, max_intermediate_rate_hz)`.
+pub fn select_dsd_intermediate_rate(
+    in_rate: DsdBitRateHz,
+    target_spec: Option<&TargetRateSpec>,
+    max_intermediate_rate_hz: Option<PcmRateHz>,
+) -> PcmRateHz {
+    let in_family = in_rate.rate_family();
+    let base_in_rate = in_family.base_pcm_rate().unwrap_or(PcmRateHz::PCM_44100);
+
+    // in_useful: 176.4k/192k for DSD64, 352.8k/384k for DSD128+
+    let in_useful = match in_rate.dsd_multiplier() {
+        Some(DsdMultiplier::Dsd64) => base_in_rate.0 * 4, // 176.4k / 192k
+        _ => base_in_rate.0 * 8,                          // 352.8k / 384k (DXD)
+    };
+
+    // out_useful: target rate if PCM, or corresponding DSD useful baseband
+    let out_useful = match target_spec {
+        Some(TargetRateSpec::Pcm { rate, .. }) => rate.get(),
+        Some(TargetRateSpec::Dsd { bit_rate }) => {
+            let out_base = bit_rate
+                .rate_family()
+                .base_pcm_rate()
+                .unwrap_or(PcmRateHz::PCM_44100);
+            match bit_rate.dsd_multiplier() {
+                Some(DsdMultiplier::Dsd64) => out_base.0 * 4,
+                _ => out_base.0 * 8,
+            }
+        }
+        None => in_useful,
+    };
+
+    // max_intermediate: user limit or default 352.8k / 384k
+    let default_max = base_in_rate.0 * 8;
+    let max_intermediate = max_intermediate_rate_hz
+        .map(|r| r.get())
+        .unwrap_or(default_max);
+
+    // Apply min formula: min(in_useful, out_useful, max_intermediate)
+    let selected_hz = in_useful.min(out_useful).min(max_intermediate);
+
+    // Candidate power-of-two rates in in_family: 4x (176.4k/192k) or 8x (352.8k/384k)
+    let rate_4x = base_in_rate.0 * 4;
+    let rate_8x = base_in_rate.0 * 8;
+
+    let final_hz = if selected_hz <= rate_4x {
+        rate_4x
+    } else {
+        rate_8x
+    };
+
+    PcmRateHz::new(final_hz).unwrap_or(PcmRateHz::PCM_352800)
 }
 
 impl fmt::Display for DsdBitRateHz {
@@ -449,6 +519,59 @@ mod tests {
         assert_eq!(
             PcmRateHz::PCM_44100.power_of_two_stages_to(PcmRateHz::PCM_48000),
             None
+        );
+
+        // Test DsdBitRateHz decimation stages
+        assert_eq!(
+            DsdBitRateHz::DSD64.power_of_two_decimation_stages_to(PcmRateHz::PCM_176400),
+            Some(4) // 2.8224M / 176.4k = 16 = 2^4
+        );
+        assert_eq!(
+            DsdBitRateHz::DSD256.power_of_two_decimation_stages_to(PcmRateHz::PCM_352800),
+            Some(5) // 11.2896M / 352.8k = 32 = 2^5
+        );
+        assert_eq!(
+            DsdBitRateHz::DSD256.power_of_two_decimation_stages_to(PcmRateHz::PCM_176400),
+            Some(6) // 11.2896M / 176.4k = 64 = 2^6
+        );
+        assert_eq!(
+            DsdBitRateHz::DSD256.power_of_two_decimation_stages_to(PcmRateHz::PCM_48000),
+            None
+        );
+
+        // Test intermediate rate selection formula
+        let dsd256_spec = TargetRateSpec::Dsd {
+            bit_rate: DsdBitRateHz::DSD256,
+        };
+        let pcm96_spec = TargetRateSpec::Pcm {
+            rate: PcmRateHz::PCM_96000,
+            sample_format: crate::config::SampleFormat::F32,
+            valid_bits: None,
+        };
+
+        // DSD64 -> DSD256: in_useful is 176.4k -> selects 176.4k
+        assert_eq!(
+            select_dsd_intermediate_rate(DsdBitRateHz::DSD64, Some(&dsd256_spec), None),
+            PcmRateHz::PCM_176400
+        );
+        // DSD256 -> DSD256: in_useful=352.8k, out_useful=352.8k -> selects 352.8k
+        assert_eq!(
+            select_dsd_intermediate_rate(DsdBitRateHz::DSD256, Some(&dsd256_spec), None),
+            PcmRateHz::PCM_352800
+        );
+        // DSD256 -> PCM 96k: out_useful=96k <= 176.4k -> selects 176.4k
+        assert_eq!(
+            select_dsd_intermediate_rate(DsdBitRateHz::DSD256, Some(&pcm96_spec), None),
+            PcmRateHz::PCM_176400
+        );
+        // DSD256 with max_intermediate=176.4k -> selects 176.4k
+        assert_eq!(
+            select_dsd_intermediate_rate(
+                DsdBitRateHz::DSD256,
+                Some(&dsd256_spec),
+                Some(PcmRateHz::PCM_176400)
+            ),
+            PcmRateHz::PCM_176400
         );
     }
 }

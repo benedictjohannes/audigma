@@ -234,6 +234,20 @@ fn test_pipewire_virtual_sink_and_pcm_output_lifecycle() {
 
 #[test]
 #[cfg(feature = "pipewire")]
+fn test_build_and_parse_dsd_format_pod() {
+    let positions = vec!["FL".to_string(), "FR".to_string()];
+    let allowed_rates = [352_800, 705_600, 1_411_200, 2_822_400];
+    let pod_bytes =
+        audigma_io::pipewire::build_dsd_format_pod(2, &positions, 352_800, &allowed_rates)
+            .expect("build dsd format pod");
+    let parsed = audigma_io::pipewire::parse_format_pod(&pod_bytes).expect("parse dsd format pod");
+    assert!(parsed.is_dsd);
+    assert_eq!(parsed.rate, 352_800);
+    assert_eq!(parsed.channels, 2);
+}
+
+#[test]
+#[cfg(feature = "pipewire")]
 fn test_pipewire_virtual_sink_initial_volume_state() {
     match PipeWireVirtualSink::new("audigma_test_sink_vol", 48000, 2, 8) {
         Ok(sink) => {

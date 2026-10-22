@@ -442,12 +442,13 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
             match in_cfg.backend {
                 #[cfg(feature = "pipewire")]
                 InputBackend::Pipewire => {
-                    let sink = PipeWireVirtualSink::from_input_config(in_cfg, input_rate.get(), 32)
-                        .map_err(|e| {
-                            EngineError::Pipeline(format!(
-                                "failed to bind PipeWire virtual sink: {e}"
-                            ))
-                        })?;
+                    let sink =
+                        PipeWireVirtualSink::from_input_config(in_cfg, input_rate.get(), 128)
+                            .map_err(|e| {
+                                EngineError::Pipeline(format!(
+                                    "failed to bind PipeWire virtual sink: {e}"
+                                ))
+                            })?;
                     Ok(Box::new(sink))
                 }
                 InputBackend::Alsa => Err(EngineError::Pipeline(
@@ -940,10 +941,9 @@ pub fn run_set(args: SetArgs) -> Result<(), EngineError> {
         SetCommands::Volume { value } => {
             let s = value.trim();
             if let Some(pct_str) = s.strip_suffix('%') {
-                let p: f64 = pct_str
-                    .trim()
-                    .parse()
-                    .map_err(|e| EngineError::Pipeline(format!("invalid percentage '{value}': {e}")))?;
+                let p: f64 = pct_str.trim().parse().map_err(|e| {
+                    EngineError::Pipeline(format!("invalid percentage '{value}': {e}"))
+                })?;
                 if p < 0.0 {
                     return Err(EngineError::Pipeline(
                         "percentage volume cannot be negative".to_string(),
@@ -1385,12 +1385,8 @@ pub fn run_benchmark(args: BenchmarkArgs) -> Result<(), EngineError> {
             left.push(s);
             right.push(s);
         }
-        let info = AudioStreamInfo {
-            sample_rate: PcmRateHz::PCM_44100,
-            original_channels: 2,
-            total_frames: Some(total_frames as u64),
-            bits_per_sample: Some(24),
-        };
+        let info =
+            AudioStreamInfo::new_pcm(PcmRateHz::PCM_44100, 2, Some(total_frames as u64), Some(24));
         (
             Box::new(MockAudioInput::new(info, left, right, true)),
             PcmRateHz::PCM_44100,
