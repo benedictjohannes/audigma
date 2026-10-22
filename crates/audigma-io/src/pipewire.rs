@@ -551,6 +551,7 @@ pub struct PipeWireVirtualSink {
     running: Arc<AtomicBool>,
     dropped_chunks: Arc<AtomicU64>,
     processed_chunks: Arc<AtomicU64>,
+    dsd_gain_db: f64,
     decimators: Vec<audigma_dsp::fir::HalfBandDecimationCascade>,
     dsd_scratch: Vec<Vec<u8>>,
     dsd_residue: Vec<Vec<u8>>,
@@ -572,6 +573,7 @@ impl PipeWireVirtualSink {
         let allowed_rates = in_cfg.resolved_allowed_rates();
         let rate_hz = in_cfg.rate_hz.map(|r| r.get()).unwrap_or(default_rate_hz);
         let allow_dsd = in_cfg.allow_dsd();
+        let dsd_gain_db = in_cfg.dsd_gain_db();
 
         Self::new_internal(
             node_name,
@@ -581,6 +583,7 @@ impl PipeWireVirtualSink {
             rate_mode,
             allowed_rates,
             allow_dsd,
+            dsd_gain_db,
             queue_chunks,
         )
     }
@@ -617,6 +620,7 @@ impl PipeWireVirtualSink {
         rate_mode: RateMode,
         allowed_rates: Vec<u32>,
         allow_dsd: bool,
+        dsd_gain_db: f64,
         queue_chunks: usize,
     ) -> Result<Self, PipeWireError> {
         let desc = format!("Audigma Virtual Sink ({node_name})");
@@ -1121,6 +1125,7 @@ impl PipeWireVirtualSink {
             running,
             dropped_chunks,
             processed_chunks,
+            dsd_gain_db,
             decimators: Vec::new(),
             dsd_scratch: Vec::new(),
             dsd_residue: Vec::new(),
@@ -1488,6 +1493,7 @@ impl AudioInput for PipeWireVirtualSink {
                             stages,
                             65536,
                         )
+                        .with_gain_db(self.dsd_gain_db)
                     })
                     .collect();
                 return;

@@ -224,6 +224,20 @@ pub fn is_valid_channel_position(token: &str) -> bool {
 pub struct DsdInputConfig {
     pub max_intermediate_rate_hz: Option<PcmRateHz>,
     pub decimation_preset: Option<FilterPreset>,
+    pub gain_db: Option<f64>,
+}
+
+impl DsdInputConfig {
+    /// Resolved decimation normalization gain in decibels (default: +6.0 dB,
+    /// restoring Scarlet Book 50% modulation / 0 dB SACD to 0 dBFS PCM).
+    pub fn resolved_gain_db(&self) -> f64 {
+        self.gain_db.unwrap_or(6.0)
+    }
+
+    /// Resolved linear gain multiplier corresponding to `resolved_gain_db`.
+    pub fn resolved_linear_gain(&self) -> f64 {
+        10.0_f64.powf(self.resolved_gain_db() / 20.0)
+    }
 }
 
 /// `[input]` section (`Design.md §6.2`).
@@ -304,6 +318,19 @@ impl InputConfig {
     /// Returns whether DSD format ingestion is allowed (defaults to false).
     pub fn allow_dsd(&self) -> bool {
         self.allow_dsd.unwrap_or(false)
+    }
+
+    /// Returns the resolved DSD decimation gain in dB (defaults to +6.0 dB).
+    pub fn dsd_gain_db(&self) -> f64 {
+        self.dsd
+            .as_ref()
+            .map(|d| d.resolved_gain_db())
+            .unwrap_or(6.0)
+    }
+
+    /// Returns the resolved DSD decimation linear gain multiplier (defaults to 10^(6/20) ~= 1.99526).
+    pub fn dsd_linear_gain(&self) -> f64 {
+        10.0_f64.powf(self.dsd_gain_db() / 20.0)
     }
 }
 
@@ -812,6 +839,16 @@ impl Settings {
                 return Err(SettingsError::Validation(
                     "[input] backend = \"stdio\" requires sample_format, rate_hz, and channels",
                 ));
+            }
+
+            if let Some(ref dsd) = input.dsd {
+                if let Some(gain_db) = dsd.gain_db {
+                    if !(-30.0..=30.0).contains(&gain_db) || gain_db.is_nan() {
+                        return Err(SettingsError::Validation(
+                            "[input.dsd] gain_db must be between -30.0 and +30.0 dB",
+                        ));
+                    }
+                }
             }
         }
 
@@ -2044,6 +2081,7 @@ allow_dsd = true
 [input.dsd]
 max_intermediate_rate_hz = 352800
 decimation_preset = "reference"
+gain_db = 6.0
 [target]
 format = "pcm"
 pcm_rate_hz = 96000
@@ -2054,6 +2092,28 @@ pcm_rate_hz = 96000
         let dsd = input.dsd.as_ref().unwrap();
         assert_eq!(dsd.max_intermediate_rate_hz, Some(PcmRateHz::PCM_352800));
         assert_eq!(dsd.decimation_preset, Some(FilterPreset::Reference));
+        assert_eq!(dsd.gain_db, Some(6.0));
+        assert_eq!(input.dsd_gain_db(), 6.0);
+        assert!((input.dsd_linear_gain() - 10.0_f64.powf(6.0 / 20.0)).abs() < 1e-6);
+
+        // Invalid gain_db rejection
+        let invalid_toml = r#"
+schema_version = 1
+[input]
+backend = "pipewire"
+[input.dsd]
+gain_db = 45.0
+[target]
+format = "pcm"
+pcm_rate_hz = 96000
+"#;
+        let err = Settings::from_toml_str(invalid_toml).unwrap_err();
+        match err {
+            SettingsError::Validation(msg) => {
+                assert!(msg.contains("[input.dsd] gain_db"));
+            }
+            other => panic!("expected Validation error, got: {other:?}"),
+        }
     }
 
     #[test]

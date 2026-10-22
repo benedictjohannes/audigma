@@ -1082,7 +1082,12 @@ pub fn run_play(args: PlayArgs) -> Result<(), EngineError> {
             sample_rate,
         )
     } else {
-        let file_input = FileAudioInput::open(&args.input)?;
+        let dsd_gain_db = settings
+            .input
+            .as_ref()
+            .map(|i| i.dsd_gain_db())
+            .unwrap_or(6.0);
+        let file_input = FileAudioInput::open_with_dsd_gain(&args.input, dsd_gain_db)?;
         let rate = file_input.info().sample_rate;
         (Box::new(file_input), rate)
     };
@@ -1282,7 +1287,12 @@ pub fn run_convert(args: ConvertArgs) -> Result<(), EngineError> {
             sample_rate,
         )
     } else {
-        let file_input = FileAudioInput::open(&args.input)?;
+        let dsd_gain_db = settings
+            .input
+            .as_ref()
+            .map(|i| i.dsd_gain_db())
+            .unwrap_or(6.0);
+        let file_input = FileAudioInput::open_with_dsd_gain(&args.input, dsd_gain_db)?;
         let rate = file_input.info().sample_rate;
         (Box::new(file_input), rate)
     };

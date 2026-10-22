@@ -257,17 +257,9 @@ Cloned local reference repositories kept in [`references/`](references/) (ignore
 
 # Handoff Brief
 
-- **Current Phase:** Phase 5 [In Progress]
-- **Next Phase:** Phase 5 Step 4 (PipeWire Dynamic Multi-Rate & Dynamic Channel Mapping)
-- **What was done in this session (Step 5.3):**
-  - Designed and implemented `ChannelWorkerPool` in `audigma-engine`:
-    - 1 dedicated persistent RT worker thread per channel ($N \ge 1$).
-    - 64-byte cache-line aligned atomic synchronization barrier with zero false sharing.
-    - User-space spin-loop barrier for zero-overhead continuous throughput (~20 ns) with adaptive Linux futex fallback when idle.
-    - Zero heap allocations inside the audio processing loop; preallocated zero-copy buffers.
-    - POSIX `pthread_setschedparam(SCHED_FIFO)` priority and thread-local hardware FTZ/DAZ (`ScopedFtzDaz`).
-  - Wired `ChannelWorkerPool` into offline conversion (`OfflinePipeline`) and two-pass true-peak analysis (`measure_true_peak_pass1`).
-  - Wired `ChannelWorkerPool` into live streaming engine (`LivePipeline::run_streaming`).
-  - Wired `ChannelWorkerPool` into `audigma benchmark` measuring sequential baseline vs parallel worker pool throughput, achieving 1.85x to 1.95x speedup factor.
-  - Verified 100% bit-exact equivalence between sequential and worker-pool DSP execution via automated unit & integration tests and end-to-end file conversion of `LongLive.flac` to DSD64 DSF (matching SHA-256 `447be084dc383d0e2e26f04d684580278d9aaf4b0e6b9fd936181f6e443185c2`).
+- **Current Phase:** Phase 5 [Finished]
+- **Next Phase:** Phase 6
+- **What was done in this session:**
+  - Implemented configurable DSD volume gain (defaults to 6dB).
+  - Updated `Design.md` to reflect the decision on DSD configurable volume gain
   - Clean `cargo test`, `cargo clippy`, and `cargo fmt` across the entire workspace.

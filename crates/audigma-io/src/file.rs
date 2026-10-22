@@ -12,6 +12,7 @@ use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 
+#[allow(clippy::large_enum_variant)]
 enum FileInputSource {
     Pcm(DecoderInput),
     Dsf {
@@ -31,8 +32,16 @@ pub struct FileAudioInput {
 }
 
 impl FileAudioInput {
-    /// Opens an audio file for decoding.
+    /// Opens an audio file for decoding with default DSD decimation normalization gain (+6.0 dB).
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, EngineError> {
+        Self::open_with_dsd_gain(path, 6.0)
+    }
+
+    /// Opens an audio file for decoding with specified DSD decimation gain in dB.
+    pub fn open_with_dsd_gain<P: AsRef<Path>>(
+        path: P,
+        dsd_gain_db: f64,
+    ) -> Result<Self, EngineError> {
         let path_ref = path.as_ref();
         let file = File::open(path_ref).map_err(|e| {
             EngineError::Io(std::io::Error::new(
@@ -68,8 +77,10 @@ impl FileAudioInput {
                 source: FileInputSource::Dsf {
                     reader,
                     info,
-                    decimator_l: HalfBandDecimationCascade::new(preset, stages, max_frames),
-                    decimator_r: HalfBandDecimationCascade::new(preset, stages, max_frames),
+                    decimator_l: HalfBandDecimationCascade::new(preset, stages, max_frames)
+                        .with_gain_db(dsd_gain_db),
+                    decimator_r: HalfBandDecimationCascade::new(preset, stages, max_frames)
+                        .with_gain_db(dsd_gain_db),
                     dsd_scratch_l: vec![0; max_frames / 8],
                     dsd_scratch_r: vec![0; max_frames / 8],
                     divider,

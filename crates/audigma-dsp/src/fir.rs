@@ -412,6 +412,7 @@ pub struct HalfBandDecimationCascade {
     max_input_frames: usize,
     scratch_a: Vec<f64>,
     scratch_b: Vec<f64>,
+    linear_gain: f64,
 }
 
 impl HalfBandDecimationCascade {
@@ -445,7 +446,36 @@ impl HalfBandDecimationCascade {
             max_input_frames,
             scratch_a: vec![0.0; max_input_frames],
             scratch_b: vec![0.0; max_input_frames],
+            linear_gain: 1.0,
         }
+    }
+
+    /// Sets the linear output scaling gain on this cascade.
+    pub fn with_linear_gain(mut self, linear_gain: f64) -> Self {
+        self.linear_gain = linear_gain;
+        self
+    }
+
+    /// Sets the output gain in decibels on this cascade (`10^(gain_db / 20)`).
+    pub fn with_gain_db(mut self, gain_db: f64) -> Self {
+        self.linear_gain = 10.0_f64.powf(gain_db / 20.0);
+        self
+    }
+
+    /// Sets the linear output scaling gain on this cascade in-place.
+    pub fn set_linear_gain(&mut self, linear_gain: f64) {
+        self.linear_gain = linear_gain;
+    }
+
+    /// Sets the output gain in decibels on this cascade in-place (`10^(gain_db / 20)`).
+    pub fn set_gain_db(&mut self, gain_db: f64) {
+        self.linear_gain = 10.0_f64.powf(gain_db / 20.0);
+    }
+
+    /// Returns the current linear gain multiplier.
+    #[inline]
+    pub fn linear_gain(&self) -> f64 {
+        self.linear_gain
     }
 
     /// Resets all stages and internal buffers to digital silence.
@@ -547,6 +577,12 @@ impl HalfBandDecimationCascade {
                 .process_tile(&self.scratch_b[..cur_len], &mut output[..required_out])?;
         }
 
+        if (self.linear_gain - 1.0).abs() > 1e-9 {
+            for s in output[..required_out].iter_mut() {
+                *s *= self.linear_gain;
+            }
+        }
+
         Ok(required_out)
     }
 
@@ -583,6 +619,11 @@ impl HalfBandDecimationCascade {
 
         if self.num_stages == 0 {
             unpack_dsd_bytes_to_floats(bytes, &mut output[..total_samples])?;
+            if (self.linear_gain - 1.0).abs() > 1e-9 {
+                for s in output[..total_samples].iter_mut() {
+                    *s *= self.linear_gain;
+                }
+            }
             return Ok(total_samples);
         }
 
@@ -594,6 +635,11 @@ impl HalfBandDecimationCascade {
                 &self.scratch_a[..total_samples],
                 &mut output[..required_out],
             )?;
+            if (self.linear_gain - 1.0).abs() > 1e-9 {
+                for s in output[..required_out].iter_mut() {
+                    *s *= self.linear_gain;
+                }
+            }
             return Ok(required_out);
         }
 
@@ -627,6 +673,12 @@ impl HalfBandDecimationCascade {
         } else {
             self.stages[last_stage_idx]
                 .process_tile(&self.scratch_a[..cur_len], &mut output[..required_out])?;
+        }
+
+        if (self.linear_gain - 1.0).abs() > 1e-9 {
+            for s in output[..required_out].iter_mut() {
+                *s *= self.linear_gain;
+            }
         }
 
         Ok(required_out)
@@ -961,6 +1013,22 @@ mod tests {
             assert!(
                 (s - 1.0).abs() < 1e-4,
                 "Decimated DSD DC sample {s} deviates from 1.0"
+            );
+        }
+
+        // Test with +6.02 dB (2.0x linear) Scarlet Book normalization gain
+        let mut cascade_gain =
+            HalfBandDecimationCascade::new(FilterPreset::Balanced, 5, 8192).with_linear_gain(2.0);
+        assert_eq!(cascade_gain.linear_gain(), 2.0);
+        let mut pcm_gain_out = [0.0; 128];
+        let written_gain = cascade_gain
+            .process_dsd_bytes(&dc_bytes, &mut pcm_gain_out)
+            .unwrap();
+        assert_eq!(written_gain, 128);
+        for &s in &pcm_gain_out[80..128] {
+            assert!(
+                (s - 2.0).abs() < 1e-4,
+                "Decimated DSD DC sample with 2.0x gain {s} deviates from 2.0"
             );
         }
     }

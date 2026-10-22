@@ -17,9 +17,9 @@ use crate::lifecycle::{BlockAction, IdleCarrierFormat, LifecycleController};
 use crate::traits::{AudioInput, AudioOutput, EngineError};
 use crate::worker::{ChannelWorkerPool, TargetDsdConfig};
 use audigma_dsp::config::{SampleFormat, TargetRateSpec};
-use audigma_dsp::modulator::TpdfDither;
 use audigma_dsp::fir::PolyphaseResampler;
 use audigma_dsp::ftz::ScopedFtzDaz;
+use audigma_dsp::modulator::TpdfDither;
 use audigma_dsp::rates::PcmRateHz;
 use audigma_format::dop::{DopContainerFormat, DopPacker};
 use audigma_format::dsd_u32::{STEREO_DSD_U32_FRAME_BYTES, pack_stereo_dsd_u32_be};
@@ -374,10 +374,7 @@ impl LivePipeline {
         };
         let mut pcm_dithers: Vec<TpdfDither> = if matches!(
             pcm_sample_format,
-            SampleFormat::S16Le
-                | SampleFormat::S24Le
-                | SampleFormat::S24_3Le
-                | SampleFormat::S32Le
+            SampleFormat::S16Le | SampleFormat::S24Le | SampleFormat::S24_3Le | SampleFormat::S32Le
         ) {
             (0..num_channels)
                 .map(|c| TpdfDither::new(0x1234_5678_9abc_def0 + c as u64, 0.5))
@@ -809,9 +806,8 @@ impl LivePipeline {
                                     } else {
                                         0.0
                                     };
-                                    let q = (sample * 32767.0 + d)
-                                        .clamp(-32768.0, 32767.0)
-                                        .round() as i16;
+                                    let q = (sample * 32767.0 + d).clamp(-32768.0, 32767.0).round()
+                                        as i16;
                                     pcm_bytes.extend_from_slice(&q.to_le_bytes());
                                 }
                                 SampleFormat::S24Le => {
