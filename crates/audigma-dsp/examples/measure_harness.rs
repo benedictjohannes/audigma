@@ -9,8 +9,8 @@ use std::io::Write;
 use std::time::Instant;
 
 use audigma_dsp::{
-    CrfbModulator, DitherType, DsdBitRateHz, FilterPreset, HalfBandCascade, OverloadPolicy,
-    ScopedFtzDaz, get_crfb_coefficients,
+    Apodization, CrfbModulator, DitherType, DsdBitRateHz, FilterPhase, FilterPreset,
+    HalfBandCascade, OverloadPolicy, ScopedFtzDaz, get_crfb_coefficients,
 };
 
 #[derive(Debug, Clone)]
@@ -260,7 +260,13 @@ fn run_cascade_sine(
 
     const TILE_BASEBAND: usize = 64;
     let tile_expanded = TILE_BASEBAND * multiplier;
-    let mut cascade = HalfBandCascade::new(config.preset, cascade_stages, TILE_BASEBAND);
+    let mut cascade = HalfBandCascade::new(
+        config.preset,
+        FilterPhase::Linear,
+        Apodization::Off,
+        cascade_stages,
+        TILE_BASEBAND,
+    );
 
     // Warm-up cascade and modulator so delay lines are completely full
     let group_delay_baseband = cascade.total_group_delay_output_samples() / multiplier + 128;
@@ -495,7 +501,13 @@ fn run_multitone(
 
     const TILE_BASEBAND: usize = 64;
     let tile_expanded = TILE_BASEBAND * multiplier;
-    let mut cascade = HalfBandCascade::new(config.preset, cascade_stages, TILE_BASEBAND);
+    let mut cascade = HalfBandCascade::new(
+        config.preset,
+        FilterPhase::Linear,
+        Apodization::Off,
+        cascade_stages,
+        TILE_BASEBAND,
+    );
 
     let mut bb_scratch = [0.0f64; TILE_BASEBAND];
     let mut exp_scratch = vec![0.0f64; tile_expanded];
@@ -639,7 +651,13 @@ fn run_benchmark(
     const TILE_BASEBAND: usize = 64; // Block size = 64 frames (e.g. 1.45 ms at 44.1 kHz)
     let tile_expanded = TILE_BASEBAND * multiplier;
 
-    let mut cascade = HalfBandCascade::new(config.preset, cascade_stages, TILE_BASEBAND);
+    let mut cascade = HalfBandCascade::new(
+        config.preset,
+        FilterPhase::Linear,
+        Apodization::Off,
+        cascade_stages,
+        TILE_BASEBAND,
+    );
     let mut bb_scratch = [0.0f64; TILE_BASEBAND];
     let mut exp_scratch = vec![0.0f64; tile_expanded];
     let mut out_tile_bytes = vec![0u8; tile_expanded / 8];

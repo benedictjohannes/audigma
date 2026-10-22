@@ -573,6 +573,8 @@ impl OfflinePipeline {
         let worker_pool = ChannelWorkerPool::new(
             2,
             preset,
+            plan.dsp_config.phase,
+            plan.dsp_config.apodization,
             stages,
             TILE_BASEBAND_FRAMES,
             target_dsd,

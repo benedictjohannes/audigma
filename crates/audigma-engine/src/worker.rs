@@ -9,7 +9,7 @@
 //! - Isolated per-channel FIR cascade and 5th-order CRFB modulator states.
 
 use crate::traits::EngineError;
-use audigma_dsp::config::{DitherType, FilterPreset, OverloadPolicy};
+use audigma_dsp::config::{Apodization, DitherType, FilterPhase, FilterPreset, OverloadPolicy};
 use audigma_dsp::fir::HalfBandCascade;
 use audigma_dsp::ftz::ScopedFtzDaz;
 use audigma_dsp::modulator::CrfbModulator;
@@ -154,9 +154,13 @@ pub struct ChannelWorkerPool {
 
 impl ChannelWorkerPool {
     /// Spawns $N$ persistent channel worker threads upon pipeline preparation.
+    // The constructor mirrors the prepared pipeline configuration explicitly.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         channels: usize,
         preset: FilterPreset,
+        phase: FilterPhase,
+        apodization: Apodization,
         stages: usize,
         tile_baseband_frames: usize,
         target_dsd: Option<TargetDsdConfig>,
@@ -169,7 +173,8 @@ impl ChannelWorkerPool {
             ));
         }
 
-        let cascade_probe = HalfBandCascade::new(preset, stages, tile_baseband_frames);
+        let cascade_probe =
+            HalfBandCascade::new(preset, phase, apodization, stages, tile_baseband_frames);
         let mult = cascade_probe.rate_multiplier();
         let group_delay_output_samples = cascade_probe.total_group_delay_output_samples();
         let cascade_tile_len = tile_baseband_frames * mult;
@@ -195,7 +200,8 @@ impl ChannelWorkerPool {
             slots.push(slot);
 
             // Construct isolated cascade and modulator for this worker
-            let mut cascade = HalfBandCascade::new(preset, stages, tile_baseband_frames);
+            let mut cascade =
+                HalfBandCascade::new(preset, phase, apodization, stages, tile_baseband_frames);
             let mut modulator = if let Some(ref dsd_cfg) = target_dsd {
                 let coeffs = tables::get_crfb_coefficients(dsd_cfg.bit_rate).ok_or_else(|| {
                     EngineError::Pipeline(format!(
@@ -527,6 +533,8 @@ mod tests {
         let mut pool = ChannelWorkerPool::new(
             CHANNELS,
             PRESET_BALANCED.preset,
+            FilterPhase::Linear,
+            Apodization::Off,
             STAGES,
             FRAMES,
             Some(dsd_cfg.clone()),
@@ -536,8 +544,20 @@ mod tests {
         .expect("worker pool creation failed");
 
         // Sequential reference
-        let mut seq_cascade_l = HalfBandCascade::new(PRESET_BALANCED.preset, STAGES, FRAMES);
-        let mut seq_cascade_r = HalfBandCascade::new(PRESET_BALANCED.preset, STAGES, FRAMES);
+        let mut seq_cascade_l = HalfBandCascade::new(
+            PRESET_BALANCED.preset,
+            FilterPhase::Linear,
+            Apodization::Off,
+            STAGES,
+            FRAMES,
+        );
+        let mut seq_cascade_r = HalfBandCascade::new(
+            PRESET_BALANCED.preset,
+            FilterPhase::Linear,
+            Apodization::Off,
+            STAGES,
+            FRAMES,
+        );
         let coeffs = tables::get_crfb_coefficients(BIT_RATE).unwrap();
         let mut seq_mod_l = CrfbModulator::new(*coeffs, dsd_cfg.dither, dsd_cfg.overload_policy);
         seq_mod_l.set_dither_seed(12345);
@@ -596,6 +616,8 @@ mod tests {
         let mut pool = ChannelWorkerPool::new(
             CHANNELS,
             PRESET_BALANCED.preset,
+            FilterPhase::Linear,
+            Apodization::Off,
             STAGES,
             FRAMES,
             None,
@@ -629,6 +651,8 @@ mod tests {
         let mut pool = ChannelWorkerPool::new(
             CHANNELS,
             PRESET_BALANCED.preset,
+            FilterPhase::Linear,
+            Apodization::Off,
             STAGES,
             FRAMES,
             None,

@@ -1,7 +1,7 @@
 //! Integration test proving bit-exact output equivalence between sequential
 //! and persistent real-time ChannelWorkerPool DSP execution (`Design.md §1.2`, Phase 5 Step 5.3).
 
-use audigma_dsp::config::{DitherType, FilterPreset, OverloadPolicy};
+use audigma_dsp::config::{Apodization, DitherType, FilterPhase, FilterPreset, OverloadPolicy};
 use audigma_dsp::fir::HalfBandCascade;
 use audigma_dsp::modulator::CrfbModulator;
 use audigma_dsp::presets::{PRESET_BALANCED, PRESET_REFERENCE};
@@ -35,6 +35,8 @@ fn test_worker_pool_stereo_pcm_bit_exact() {
     let mut pool = ChannelWorkerPool::new(
         CHANNELS,
         PRESET_BALANCED.preset,
+        FilterPhase::Linear,
+        Apodization::Off,
         STAGES,
         FRAMES,
         None,
@@ -43,8 +45,20 @@ fn test_worker_pool_stereo_pcm_bit_exact() {
     )
     .expect("worker pool creation failed");
 
-    let mut seq_cascade_l = HalfBandCascade::new(PRESET_BALANCED.preset, STAGES, FRAMES);
-    let mut seq_cascade_r = HalfBandCascade::new(PRESET_BALANCED.preset, STAGES, FRAMES);
+    let mut seq_cascade_l = HalfBandCascade::new(
+        PRESET_BALANCED.preset,
+        FilterPhase::Linear,
+        Apodization::Off,
+        STAGES,
+        FRAMES,
+    );
+    let mut seq_cascade_r = HalfBandCascade::new(
+        PRESET_BALANCED.preset,
+        FilterPhase::Linear,
+        Apodization::Off,
+        STAGES,
+        FRAMES,
+    );
 
     let mult = pool.rate_multiplier();
     let req_pcm = FRAMES * mult;
@@ -90,6 +104,8 @@ fn test_worker_pool_7_1_surround_channels() {
     let mut pool = ChannelWorkerPool::new(
         CHANNELS,
         PRESET_BALANCED.preset,
+        FilterPhase::Linear,
+        Apodization::Off,
         STAGES,
         FRAMES,
         None,
@@ -134,6 +150,8 @@ fn verify_stereo_dsd_bit_exact(
     let mut pool = ChannelWorkerPool::new(
         CHANNELS,
         preset,
+        FilterPhase::Linear,
+        Apodization::Off,
         stages,
         FRAMES,
         Some(dsd_cfg.clone()),
@@ -142,8 +160,20 @@ fn verify_stereo_dsd_bit_exact(
     )
     .expect("worker pool creation failed");
 
-    let mut seq_cascade_l = HalfBandCascade::new(preset, stages, FRAMES);
-    let mut seq_cascade_r = HalfBandCascade::new(preset, stages, FRAMES);
+    let mut seq_cascade_l = HalfBandCascade::new(
+        preset,
+        FilterPhase::Linear,
+        Apodization::Off,
+        stages,
+        FRAMES,
+    );
+    let mut seq_cascade_r = HalfBandCascade::new(
+        preset,
+        FilterPhase::Linear,
+        Apodization::Off,
+        stages,
+        FRAMES,
+    );
     let coeffs = tables::get_crfb_coefficients(bit_rate).unwrap();
     let mut seq_mod_l = CrfbModulator::new(*coeffs, dsd_cfg.dither, dsd_cfg.overload_policy);
     seq_mod_l.set_dither_seed(SEED_BASE);

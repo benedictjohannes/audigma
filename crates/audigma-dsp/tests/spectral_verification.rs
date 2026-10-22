@@ -3,8 +3,8 @@
 use std::f64::consts::PI;
 
 use audigma_dsp::{
-    CrfbModulator, DitherType, DsdBitRateHz, FilterPreset, HalfBandCascade, OverloadPolicy,
-    ScopedFtzDaz, get_crfb_coefficients,
+    Apodization, CrfbModulator, DitherType, DsdBitRateHz, FilterPhase, FilterPreset,
+    HalfBandCascade, OverloadPolicy, ScopedFtzDaz, get_crfb_coefficients,
 };
 
 #[test]
@@ -137,33 +137,45 @@ fn test_cascade_and_modulator_end_to_end_presets() {
         FilterPreset::Reference,
         FilterPreset::LowLatency,
     ];
+    let modes = [
+        (FilterPhase::Linear, Apodization::Off),
+        (FilterPhase::Linear, Apodization::Gentle),
+        (FilterPhase::Minimum, Apodization::Off),
+        (FilterPhase::Minimum, Apodization::Gentle),
+    ];
 
     for preset in presets {
-        let mut cascade = HalfBandCascade::new(preset, 6, 64); // 64x to DSD64
-        let coeffs = *get_crfb_coefficients(DsdBitRateHz::DSD64).unwrap();
-        let mut modulator =
-            CrfbModulator::new(coeffs, DitherType::Tpdf, OverloadPolicy::MuteRecover);
+        for (phase, apodization) in modes {
+            let mut cascade = HalfBandCascade::new(preset, phase, apodization, 6, 64); // 64x to DSD64
+            let coeffs = *get_crfb_coefficients(DsdBitRateHz::DSD64).unwrap();
+            let mut modulator =
+                CrfbModulator::new(coeffs, DitherType::Tpdf, OverloadPolicy::MuteRecover);
 
-        let mut bb_input = [0.0f64; 64];
-        let amp = 10.0_f64.powf(-6.0 / 20.0);
-        for (i, s) in bb_input.iter_mut().enumerate() {
-            let t = i as f64 / 44_100.0;
-            *s = amp * (2.0 * PI * 1000.0 * t).sin();
-        }
+            let mut bb_input = [0.0f64; 64];
+            let amp = 10.0_f64.powf(-6.0 / 20.0);
+            for (i, s) in bb_input.iter_mut().enumerate() {
+                let t = i as f64 / 44_100.0;
+                *s = amp * (2.0 * PI * 1000.0 * t).sin();
+            }
 
-        let mut exp_scratch = vec![0.0f64; 64 * 64];
-        let mut tile_bytes = vec![0u8; (64 * 64) / 8];
+            let mut exp_scratch = vec![0.0f64; 64 * 64];
+            let mut tile_bytes = vec![0u8; (64 * 64) / 8];
 
-        for _ in 0..20 {
-            cascade.process_tile(&bb_input, &mut exp_scratch).unwrap();
-            modulator
-                .process_tile_bytes(&exp_scratch, &mut tile_bytes)
-                .unwrap();
-        }
+            for _ in 0..20 {
+                cascade.process_tile(&bb_input, &mut exp_scratch).unwrap();
+                modulator
+                    .process_tile_bytes(&exp_scratch, &mut tile_bytes)
+                    .unwrap();
+            }
 
-        assert_eq!(modulator.overload_count(), 0);
-        for &s in &modulator.state() {
-            assert!(s.abs() < CrfbModulator::STABILITY_THRESHOLD);
+            assert_eq!(
+                modulator.overload_count(),
+                0,
+                "{preset:?}/{phase:?}/{apodization:?} overloaded"
+            );
+            for &s in &modulator.state() {
+                assert!(s.abs() < CrfbModulator::STABILITY_THRESHOLD);
+            }
         }
     }
 }

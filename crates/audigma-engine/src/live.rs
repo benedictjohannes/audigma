@@ -360,6 +360,8 @@ impl LivePipeline {
         let mut worker_pool = ChannelWorkerPool::new(
             num_channels,
             preset,
+            self.plan.dsp_config.phase,
+            self.plan.dsp_config.apodization,
             self.cascade_stages,
             TILE_BASEBAND_FRAMES,
             target_dsd,

@@ -13,8 +13,9 @@ pub mod tables;
 pub mod volume;
 
 pub use tables::{
-    CrfbCoefficients, SRC_ASRC_256_PHASES, SRC_RATIONAL_160_PHASES, get_crfb_coefficients,
-    get_halfband_stage0_taps, get_halfband_stage1_taps,
+    CrfbCoefficients, HalfBandTaps, SRC_ASRC_256_PHASES, SRC_RATIONAL_160_PHASES,
+    get_crfb_coefficients, get_halfband_stage0_filter, get_halfband_stage0_taps,
+    get_halfband_stage1_filter, get_halfband_stage1_taps,
 };
 
 pub use config::{
@@ -23,8 +24,8 @@ pub use config::{
 };
 pub use fir::{
     DSD_BYTE_TO_FLOATS, FirError, HalfBandCascade, HalfBandDecimationCascade,
-    HalfBandDecimationStage, HalfBandStage, PolyphaseMode, PolyphaseResampler,
-    unpack_dsd_bytes_to_floats,
+    HalfBandDecimationStage, HalfBandStage, PolyphaseInterpolationStage, PolyphaseMode,
+    PolyphaseResampler, unpack_dsd_bytes_to_floats,
 };
 pub use ftz::ScopedFtzDaz;
 pub use modulator::{CrfbModulator, ModulatorError, TpdfDither};

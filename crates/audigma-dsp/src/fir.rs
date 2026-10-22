@@ -8,11 +8,11 @@
 //! - `PolyphaseResampler`: Kaiser-windowed sinc polyphase resampler for cross-family rational
 //!   conversion (44.1k <-> 48k via 160 phases) and sub-sample ASRC drift tracking (256 phases).
 
-use crate::config::FilterPreset;
+use crate::config::{Apodization, FilterPhase, FilterPreset};
 use crate::rates::{PcmRateHz, RateFamily};
 use crate::tables::{
-    SRC_ASRC_256_PHASES, SRC_RATIONAL_160_PHASES, get_halfband_stage0_taps,
-    get_halfband_stage1_taps,
+    HalfBandTaps, SRC_ASRC_256_PHASES, SRC_RATIONAL_160_PHASES, get_halfband_stage0_filter,
+    get_halfband_stage0_taps, get_halfband_stage1_filter, get_halfband_stage1_taps,
 };
 use thiserror::Error;
 
@@ -135,13 +135,165 @@ impl HalfBandStage {
     }
 }
 
+/// Generic 2x polyphase FIR interpolation stage for asymmetric / non-half-band prototypes.
+///
+/// The full-length prototype $h[n]$ is split into the two polyphase branches
+/// $E_0(z) = \sum_m h[2m] z^{-m}$ and $E_1(z) = \sum_m h[2m+1] z^{-m}$.
+/// Both branches are scaled by 2.0 to restore unity interpolation gain after
+/// zero-stuffing. This supports minimum-phase filters (no pre-ringing, causal
+/// energy) as well as linear-phase apodized filters that are not exact half-bands.
+#[derive(Debug, Clone)]
+pub struct PolyphaseInterpolationStage {
+    /// Even polyphase branch taps ($2 h[2m]$).
+    even_taps: Vec<f64>,
+    /// Odd polyphase branch taps ($2 h[2m+1]$).
+    odd_taps: Vec<f64>,
+    /// Number of taps per polyphase branch ($M = \lceil L / 2 \rceil$).
+    taps_per_phase: usize,
+    /// Circular double-buffer history line of size $2M$.
+    history: Vec<f64>,
+    /// Head write pointer in the circular buffer.
+    head: usize,
+    /// Impulse-response peak index, used as the alignment delay in output samples.
+    group_delay_output_samples: usize,
+}
+
+impl PolyphaseInterpolationStage {
+    /// Creates a new 2x polyphase stage from a full-length FIR prototype.
+    pub fn new(taps: &'static [f64]) -> Self {
+        assert!(!taps.is_empty(), "polyphase prototype must not be empty");
+        let taps_per_phase = taps.len().div_ceil(2);
+
+        let mut even_taps = Vec::with_capacity(taps_per_phase);
+        let mut odd_taps = Vec::with_capacity(taps_per_phase);
+        for m in 0..taps_per_phase {
+            even_taps.push(2.0 * taps.get(2 * m).copied().unwrap_or(0.0));
+            odd_taps.push(2.0 * taps.get(2 * m + 1).copied().unwrap_or(0.0));
+        }
+
+        let mut peak_index = 0;
+        let mut peak_magnitude = 0.0_f64;
+        for (idx, &tap) in taps.iter().enumerate() {
+            let magnitude = tap.abs();
+            if magnitude > peak_magnitude {
+                peak_magnitude = magnitude;
+                peak_index = idx;
+            }
+        }
+
+        Self {
+            even_taps,
+            odd_taps,
+            taps_per_phase,
+            history: vec![0.0; taps_per_phase * 2],
+            head: 0,
+            group_delay_output_samples: peak_index,
+        }
+    }
+
+    /// Resets all internal delay lines to zero.
+    pub fn reset(&mut self) {
+        self.history.fill(0.0);
+        self.head = 0;
+    }
+
+    /// Returns the alignment delay of this stage in 2x output sample periods.
+    #[inline]
+    pub const fn group_delay_output_samples(&self) -> usize {
+        self.group_delay_output_samples
+    }
+
+    /// Processes a slice of input samples, writing exactly `2 * input.len()` samples into `output`.
+    pub fn process_tile(&mut self, input: &[f64], output: &mut [f64]) -> Result<(), FirError> {
+        let required_out = input.len() * 2;
+        if output.len() < required_out {
+            return Err(FirError::OutputBufferTooSmall {
+                required: required_out,
+                provided: output.len(),
+            });
+        }
+
+        let m = self.taps_per_phase;
+        for (in_idx, &sample) in input.iter().enumerate() {
+            // Insert sample into mirrored positions in the double-buffer.
+            self.history[self.head] = sample;
+            self.history[self.head + m] = sample;
+
+            // Window of M chronological samples from oldest to newest.
+            let window_start = self.head + 1;
+            let window = &self.history[window_start..window_start + m];
+
+            let mut even_acc = 0.0;
+            let mut odd_acc = 0.0;
+            for (idx, (even_tap, odd_tap)) in
+                self.even_taps.iter().zip(self.odd_taps.iter()).enumerate()
+            {
+                let delayed = window[m - 1 - idx];
+                even_acc += even_tap * delayed;
+                odd_acc += odd_tap * delayed;
+            }
+
+            output[in_idx * 2] = even_acc;
+            output[in_idx * 2 + 1] = odd_acc;
+
+            self.head += 1;
+            if self.head >= m {
+                self.head = 0;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// One 2x interpolation stage selected by the configured filter phase/apodization.
+#[derive(Debug, Clone)]
+enum CascadeStage {
+    /// Linear-phase exact half-band prototype (folded symmetric kernel).
+    HalfBand(HalfBandStage),
+    /// General full-length prototype (asymmetric / apodized).
+    Polyphase(PolyphaseInterpolationStage),
+}
+
+impl CascadeStage {
+    fn from_taps(taps: HalfBandTaps) -> Self {
+        match taps {
+            HalfBandTaps::Symmetric(odd_taps) => Self::HalfBand(HalfBandStage::new(odd_taps)),
+            HalfBandTaps::General(full_taps) => {
+                Self::Polyphase(PolyphaseInterpolationStage::new(full_taps))
+            }
+        }
+    }
+
+    fn reset(&mut self) {
+        match self {
+            Self::HalfBand(stage) => stage.reset(),
+            Self::Polyphase(stage) => stage.reset(),
+        }
+    }
+
+    fn group_delay_output_samples(&self) -> usize {
+        match self {
+            Self::HalfBand(stage) => stage.group_delay_output_samples(),
+            Self::Polyphase(stage) => stage.group_delay_output_samples(),
+        }
+    }
+
+    fn process_tile(&mut self, input: &[f64], output: &mut [f64]) -> Result<(), FirError> {
+        match self {
+            Self::HalfBand(stage) => stage.process_tile(input, output),
+            Self::Polyphase(stage) => stage.process_tile(input, output),
+        }
+    }
+}
+
 /// Multistage power-of-two ($2^K$) interpolation cascade using bounded tile streaming.
 ///
 /// Designed to keep all intermediate upsampled buffers within the CPU L1 data cache.
 /// Stage 0 uses steep transition taps, while Stage 1+ use relaxed transition taps (`Design.md §4.2`).
 #[derive(Debug, Clone)]
 pub struct HalfBandCascade {
-    stages: Vec<HalfBandStage>,
+    stages: Vec<CascadeStage>,
     num_stages: usize,
     max_input_frames: usize,
     scratch_a: Vec<f64>,
@@ -152,17 +304,29 @@ impl HalfBandCascade {
     /// Creates a new power-of-two interpolation cascade.
     ///
     /// - `preset`: Filter preset determining Stage 0 and Stage 1+ coefficients.
+    /// - `phase`: Linear- or minimum-phase coefficient family.
+    /// - `apodization`: Off (brick-wall) or gentle Stage 0 roll-off.
     /// - `stages`: Number of 2x stages (e.g. 8 stages for 256x upsampling to DSD256).
     /// - `max_input_frames`: Maximum baseband frames processed in a single tile (e.g. 32 to 1024).
-    pub fn new(preset: FilterPreset, stages: usize, max_input_frames: usize) -> Self {
+    pub fn new(
+        preset: FilterPreset,
+        phase: FilterPhase,
+        apodization: Apodization,
+        stages: usize,
+        max_input_frames: usize,
+    ) -> Self {
         let mut stage_vec = Vec::with_capacity(stages);
         if stages > 0 {
-            // Stage 0: steep transition
-            stage_vec.push(HalfBandStage::new(get_halfband_stage0_taps(preset)));
-            // Stage 1+: relaxed transition
-            let s1_taps = get_halfband_stage1_taps(preset);
+            // Stage 0: steep transition, selected by phase and apodization.
+            stage_vec.push(CascadeStage::from_taps(get_halfband_stage0_filter(
+                preset,
+                phase,
+                apodization,
+            )));
+            // Stage 1+: relaxed transition. Apodization only affects Stage 0.
+            let s1_taps = get_halfband_stage1_filter(preset, phase);
             for _ in 1..stages {
-                stage_vec.push(HalfBandStage::new(s1_taps));
+                stage_vec.push(CascadeStage::from_taps(s1_taps));
             }
         }
 
@@ -901,7 +1065,13 @@ mod tests {
 
     #[test]
     fn test_halfband_cascade_256x_dsd256() {
-        let mut cascade = HalfBandCascade::new(FilterPreset::Balanced, 8, 32);
+        let mut cascade = HalfBandCascade::new(
+            FilterPreset::Balanced,
+            FilterPhase::Linear,
+            Apodization::Off,
+            8,
+            32,
+        );
         assert_eq!(cascade.rate_multiplier(), 256);
         assert_eq!(cascade.num_stages(), 8);
 
@@ -910,6 +1080,230 @@ mod tests {
         let mut output = [0.0; 4096];
         let written = cascade.process_tile(&input, &mut output).unwrap();
         assert_eq!(written, 4096);
+    }
+
+    #[test]
+    fn test_polyphase_stage_matches_zero_stuffed_convolution() {
+        let taps = match get_halfband_stage0_filter(
+            FilterPreset::Balanced,
+            FilterPhase::Linear,
+            Apodization::Gentle,
+        ) {
+            HalfBandTaps::General(taps) => taps,
+            HalfBandTaps::Symmetric(_) => panic!("gentle apodization must use general taps"),
+        };
+        let mut stage = PolyphaseInterpolationStage::new(taps);
+
+        let input: [f64; 16] = [
+            0.0, 1.0, -0.5, 0.25, 0.75, -0.125, 0.0, 0.5, -0.25, 0.125, 0.0, -0.75, 0.33, 0.66,
+            -0.33, 0.1,
+        ];
+        let mut output = [0.0f64; 32];
+        stage.process_tile(&input, &mut output).unwrap();
+
+        for n in 0..output.len() {
+            let mut expected = 0.0;
+            for (m, &sample) in input.iter().enumerate() {
+                if n >= 2 * m {
+                    expected += sample * taps[n - 2 * m];
+                }
+            }
+            expected *= 2.0;
+            assert!(
+                (output[n] - expected).abs() < 1e-12,
+                "sample {n}: {} != {}",
+                output[n],
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_phase_apodization_modes_dc_unity() {
+        let modes = [
+            (FilterPhase::Linear, Apodization::Off),
+            (FilterPhase::Linear, Apodization::Gentle),
+            (FilterPhase::Minimum, Apodization::Off),
+            (FilterPhase::Minimum, Apodization::Gentle),
+        ];
+
+        for preset in [
+            FilterPreset::Balanced,
+            FilterPreset::Reference,
+            FilterPreset::LowLatency,
+        ] {
+            for (phase, apodization) in modes {
+                let mut cascade = HalfBandCascade::new(preset, phase, apodization, 3, 256);
+                let input = [1.0f64; 256];
+                let mut output = [0.0f64; 2048];
+                cascade.process_tile(&input, &mut output).unwrap();
+
+                for (idx, &sample) in output[900..].iter().enumerate() {
+                    assert!(
+                        (sample - 1.0).abs() < 1e-6,
+                        "{preset:?}/{phase:?}/{apodization:?}: sample {} = {sample}",
+                        idx + 900
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_minimum_phase_is_causal_and_front_loaded() {
+        for preset in [
+            FilterPreset::Balanced,
+            FilterPreset::Reference,
+            FilterPreset::LowLatency,
+        ] {
+            for apodization in [Apodization::Off, Apodization::Gentle] {
+                let mut cascade =
+                    HalfBandCascade::new(preset, FilterPhase::Minimum, apodization, 1, 512);
+                let mut input = [0.0f64; 512];
+                let mut output = [0.0f64; 1024];
+                input[128] = 1.0;
+                cascade.process_tile(&input, &mut output).unwrap();
+
+                // Strict causality: no output before the input impulse arrives.
+                for (idx, &sample) in output[..256].iter().enumerate() {
+                    assert_eq!(
+                        sample, 0.0,
+                        "{preset:?}/{apodization:?}: pre-impulse sample {idx} is non-zero"
+                    );
+                }
+
+                let peak_idx = (256..output.len())
+                    .max_by(|&a, &b| output[a].abs().total_cmp(&output[b].abs()))
+                    .unwrap();
+                assert!(
+                    peak_idx - 256 < 16,
+                    "{preset:?}/{apodization:?}: minimum-phase impulse peak at offset {}",
+                    peak_idx - 256
+                );
+
+                let pre_energy: f64 = output[256..peak_idx].iter().map(|s| s.abs()).sum();
+                let post_energy: f64 = output[peak_idx + 1..].iter().map(|s| s.abs()).sum();
+                assert!(
+                    pre_energy < 0.5 * post_energy,
+                    "{preset:?}/{apodization:?}: energy is not front-loaded (pre={pre_energy}, post={post_energy})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_linear_phase_remains_symmetric() {
+        let mut cascade = HalfBandCascade::new(
+            FilterPreset::Balanced,
+            FilterPhase::Linear,
+            Apodization::Off,
+            1,
+            512,
+        );
+        let mut input = [0.0f64; 512];
+        let mut output = [0.0f64; 1024];
+        input[128] = 1.0;
+        cascade.process_tile(&input, &mut output).unwrap();
+
+        let peak_idx = (256..output.len())
+            .max_by(|&a, &b| output[a].abs().total_cmp(&output[b].abs()))
+            .unwrap();
+        // The linear-phase prototype is symmetric around its impulse peak.
+        for offset in 1..=40 {
+            let pre = output[peak_idx - offset];
+            let post = output[peak_idx + offset];
+            assert!(
+                (pre - post).abs() < 1e-12,
+                "asymmetry at offset {offset}: {pre} != {post}"
+            );
+        }
+    }
+
+    fn normalized_tail_energy(taps: &[f64], offset: usize) -> f64 {
+        let peak_idx = taps
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.abs().total_cmp(&b.abs()))
+            .map(|(idx, _)| idx)
+            .unwrap();
+        let peak = taps[peak_idx].abs();
+        taps[peak_idx + offset..]
+            .iter()
+            .map(|tap| tap.abs())
+            .fold(0.0f64, f64::max)
+            / peak
+    }
+
+    #[test]
+    fn test_gentle_apodization_suppresses_far_tail() {
+        for preset in [
+            FilterPreset::Balanced,
+            FilterPreset::Reference,
+            FilterPreset::LowLatency,
+        ] {
+            for phase in [FilterPhase::Linear, FilterPhase::Minimum] {
+                let off = match get_halfband_stage0_filter(preset, phase, Apodization::Off) {
+                    HalfBandTaps::General(taps) => taps,
+                    HalfBandTaps::Symmetric(taps) => taps,
+                };
+                let gentle = match get_halfband_stage0_filter(preset, phase, Apodization::Gentle) {
+                    HalfBandTaps::General(taps) => taps,
+                    HalfBandTaps::Symmetric(_) => panic!("gentle must use general taps"),
+                };
+
+                // Compare the effective full impulse responses. For the symmetric
+                // half-band prototype the odd taps are symmetric around the centre.
+                let off_tail = if matches!(
+                    get_halfband_stage0_filter(preset, phase, Apodization::Off),
+                    HalfBandTaps::Symmetric(_)
+                ) {
+                    let center = (off.len() * 2) - 1;
+                    let mut full = vec![0.0; center + 2 * off.len()];
+                    full[center] = 1.0;
+                    for (idx, &tap) in off.iter().enumerate() {
+                        let delta = 2 * idx + 1;
+                        full[center - delta] = 2.0 * tap;
+                        full[center + delta] = 2.0 * tap;
+                    }
+                    normalized_tail_energy(&full, 64)
+                } else {
+                    normalized_tail_energy(off, 64)
+                };
+                let gentle_tail = normalized_tail_energy(gentle, 64);
+
+                assert!(
+                    gentle_tail <= off_tail,
+                    "{preset:?}/{phase:?}: gentle tail {gentle_tail} exceeds off tail {off_tail}"
+                );
+                if phase == FilterPhase::Linear {
+                    assert!(
+                        gentle_tail < 0.5 * off_tail,
+                        "{preset:?}/{phase:?}: gentle tail {gentle_tail} not sufficiently below off tail {off_tail}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_minimum_phase_group_delay_is_lower() {
+        for preset in [
+            FilterPreset::Balanced,
+            FilterPreset::Reference,
+            FilterPreset::LowLatency,
+        ] {
+            let linear =
+                HalfBandCascade::new(preset, FilterPhase::Linear, Apodization::Off, 1, 128);
+            let minimum =
+                HalfBandCascade::new(preset, FilterPhase::Minimum, Apodization::Off, 1, 128);
+            assert!(
+                minimum.total_group_delay_output_samples()
+                    < linear.total_group_delay_output_samples(),
+                "{preset:?}: minimum-phase delay {} is not below linear delay {}",
+                minimum.total_group_delay_output_samples(),
+                linear.total_group_delay_output_samples()
+            );
+        }
     }
 
     #[test]

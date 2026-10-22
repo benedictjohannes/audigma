@@ -1449,10 +1449,20 @@ pub fn run_benchmark(args: BenchmarkArgs) -> Result<(), EngineError> {
     }
 
     // 2.A: Single-Threaded Sequential Baseline (Stereo L + R on 1 thread)
-    let mut seq_cascade_l =
-        audigma_dsp::fir::HalfBandCascade::new(plan.dsp_config.preset, stages, BLOCK_FRAMES);
-    let mut seq_cascade_r =
-        audigma_dsp::fir::HalfBandCascade::new(plan.dsp_config.preset, stages, BLOCK_FRAMES);
+    let mut seq_cascade_l = audigma_dsp::fir::HalfBandCascade::new(
+        plan.dsp_config.preset,
+        plan.dsp_config.phase,
+        plan.dsp_config.apodization,
+        stages,
+        BLOCK_FRAMES,
+    );
+    let mut seq_cascade_r = audigma_dsp::fir::HalfBandCascade::new(
+        plan.dsp_config.preset,
+        plan.dsp_config.phase,
+        plan.dsp_config.apodization,
+        stages,
+        BLOCK_FRAMES,
+    );
     let mut exp_l = vec![0.0f64; tile_expanded];
     let mut exp_r = vec![0.0f64; tile_expanded];
     let mut dsd_bytes_l = vec![0u8; tile_expanded / 8];
@@ -1533,6 +1543,8 @@ pub fn run_benchmark(args: BenchmarkArgs) -> Result<(), EngineError> {
     let mut worker_pool = ChannelWorkerPool::new(
         2,
         plan.dsp_config.preset,
+        plan.dsp_config.phase,
+        plan.dsp_config.apodization,
         stages,
         BLOCK_FRAMES,
         target_dsd,
