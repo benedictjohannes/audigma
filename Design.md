@@ -67,7 +67,7 @@ The Cargo workspace is organized as a strictly layered 8-crate DAG with zero cir
 crates/
   audigma-dsp/          # Pure math: rate types, DspConfiguration, presets.rs, FIR/ASRC, 5th-order CRFB DSM, dither, FTZ/DAZ (zero OS I/O)
   audigma-format/       # Containers (WAV/FLAC/DSF) & exact bit-packers (DSD_U32_BE, DoP s32le/s24le/s24_3le)
-  audigma-settings/     # TOML config Schema v1 (`Settings`), [[rules]] resolver, config check & explain
+  audigma-settings/     # TOML config Schema v1 (`Settings`), target resolver, config check & explain
   audigma-engine/       # Pure Rust pipeline planner, SPSC queues, ASRC drift controller & I/O traits (zero C FFI)
   audigma-io/           # Feature-gated concrete backends: ALSA, PipeWire, D-Bus ReserveDevice1, file/stdio & prober
   audigma-configurator/ # Interactive TUI & one-shot Web setup wizard (uses settings + engine/io prober & benchmark)
@@ -85,7 +85,7 @@ examples/                 # Ready-to-use TOML configs, MPD snippets, and WirePlu
 ### Layer Responsibilities
 - **`audigma-dsp`**: Pure numerical processing (`no_std`-friendly core logic, zero OS/file/network I/O). Implements domain rate/format types (`PcmRateHz`, `DsdBitRateHz`, `TransportFrameRateHz`), `DspConfiguration`, built-in verified filter and modulator coefficient tables (`presets.rs`: `PRESET_BALANCED`, `PRESET_REFERENCE`, `PRESET_LOW_LATENCY`), polyphase & half-band FIR interpolation, state-space / CRFB delta-sigma modulators, TPDF dither, overload guards, and thread-level hardware subnormal flushing (FTZ/DAZ). Portable across any operating system.
 - **`audigma-format`**: Audio container decoding/encoding (`WAV`, `FLAC`, Sony `DSF`) and hardware frame bit-packers (`DSD_U32_BE`, `DoP` across `s32le`/`s24le`/`s24_3le`). Zero OS dependencies.
-- **`audigma-settings`**: The `Schema v1` TOML configuration structs (`Settings`), `[[rules]]` evaluation engine, `config check` validation, and `config explain` resolution (mapping user settings and preset names like `"reference"` into concrete `audigma-dsp::DspConfiguration` and transport parameters). Zero OS dependencies.
+- **`audigma-settings`**: The `Schema v1` TOML configuration structs (`Settings`), `config check` validation, and `config explain` resolution (mapping user settings and preset names like `"reference"` into concrete `audigma-dsp::DspConfiguration` and transport parameters). Zero OS dependencies.
 - **`audigma-engine`**: Pure Rust orchestration connecting `dsp`, `format`, and `settings` into prepared pipelines (`prepare`, `process`, `drain`), lock-free real-time SPSC queues (`rtrb`), generation tags, the PI-controlled ASRC drift loop, lifecycle state machine, and abstract `AudioInput`/`AudioOutput` backend traits. Zero C-FFI or OS audio library dependencies, allowing instant unit testing with mock clocks/streams on any host.
 - **`audigma-io`**: Feature-gated concrete implementations of the `audigma-engine` I/O traits (`alsa`, `pipewire`, `file`, `stdio`, plus future platform backends like `coreaudio` or `asio`). Houses ALSA hardware capability probing, PipeWire virtual sink (`audigma_sink`) registration, and dynamic D-Bus device reservation (`org.freedesktop.ReserveDevice1`).
 - **`audigma-configurator`**: Isolates UI/terminal (`ratatui`/`crossterm`) and optional localhost one-shot Web wizard dependencies so they never bloat the core DSP or engine crates. Calls into `audigma-settings`, `audigma-engine`, and `audigma-io` to probe DACs, benchmark presets, and write `config.toml`.
@@ -108,7 +108,7 @@ examples/                 # Ready-to-use TOML configs, MPD snippets, and WirePlu
 
 ### 3.2 Clock Family Policies (`[target] rate_family`) & Dynamic Multi-Rate Negotiation
 
-Rather than an artificial "desktop vs. music mode" switch on the input, output clock switching is controlled purely by `[target] rate_family` (or `[[rules]]`):
+Rather than an artificial "desktop vs. music mode" switch on the input, output clock switching is controlled purely by `[target] rate_family`:
 
 1. **`rate_family = "44100"` or `"48000"` (Zero-Relock / Pinned Clock Policy):**
    - Keeps the DAC hardware clock permanently locked at that family (e.g. `11.2896 MHz` for `dsd256` under `"44100"`, or `12.288 MHz` under `"48000"`; for PCM, locked to `pcm_rate_hz`).
@@ -268,21 +268,19 @@ The engine state machine runs through:
 
 Configuration lives at `$XDG_CONFIG_HOME/audigma/config.toml` (default `~/.config/audigma/config.toml`). Unknown keys or invalid cross-field combinations are rejected by `audigma config check`.
 
-### 6.1 Rule-Based Selection (`[[rules]]`) vs. `rate_family`
-`[[rules]]` evaluates in first-match order based on observed input rate/format and resolves into an explicit preset and target configuration. `rate_family = "source"` is convenient shorthand that lowers into the same rule resolver:
+### 6.1 Declarative Target Resolution & `rate_family`
+Target resolution evaluates based on observed input rate/format and resolves into an explicit preset and target configuration. `rate_family = "source"` dynamically pairs 44.1 kHz-family and 48 kHz-family rates:
 
 ```toml
 schema_version = 1
 
-[[rules]]
-when_input_rate_family = "44100"   # 44.1k, 88.2k, 176.4k, 352.8k
-apply_preset = "reference"
-set_target = { format = "dsd", dsd_rate = "dsd256" }
+[target]
+format = "dsd"
+rate_family = "source"
+dsd_rate = "dsd256"
 
-[[rules]]
-when_input_rate_family = "48000"   # 48k, 96k, 192k, 384k
-apply_preset = "reference"
-set_target = { format = "pcm", pcm_rate_hz = 768000 }
+[resampler]
+preset = "reference"
 ```
 
 ### 6.2 Reference Configuration Fixtures

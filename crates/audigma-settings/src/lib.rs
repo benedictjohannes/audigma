@@ -1,4 +1,4 @@
-//! `audigma-settings`: Schema v1 TOML configuration (`Settings`), `[[rules]]` evaluation,
+//! `audigma-settings`: Schema v1 TOML configuration (`Settings`),
 //! preset resolution, and architectural invariant validation (`Design.md §6`).
 
 use audigma_dsp::{
@@ -490,27 +490,6 @@ pub struct OfflineConfig {
     pub dsf_pad_mode: DsfPadMode,
 }
 
-/// Target override block inside a `[[rules]]` entry (`Design.md §6.1`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RuleTargetOverride {
-    pub format: TargetFormat,
-    pub rate_family: Option<TargetRateFamily>,
-    pub dsd_rate: Option<DsdMultiplier>,
-    pub pcm_rate_hz: Option<PcmRateHz>,
-    pub sample_format: Option<SampleFormat>,
-    pub valid_bits: Option<u8>,
-}
-
-/// Rule entry in `[[rules]]` (`Design.md §6.1`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RuleConfig {
-    pub when_input_rate_family: RateFamily,
-    pub apply_preset: FilterPreset,
-    pub set_target: RuleTargetOverride,
-}
-
 /// Top-level `Schema v1` configuration (`Design.md §6`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -525,8 +504,6 @@ pub struct Settings {
     pub clock: Option<ClockConfig>,
     pub runtime: Option<RuntimeConfig>,
     pub offline: Option<OfflineConfig>,
-    #[serde(default)]
-    pub rules: Vec<RuleConfig>,
 }
 
 /// Concrete resolution produced by `Settings::explain_for_input_rate` (`audigma config explain`).
@@ -607,7 +584,6 @@ impl Settings {
                     write_report: Some(false),
                     dsf_pad_mode: DsfPadMode::SpecZero,
                 }),
-                rules: Vec::new(),
             },
             OutputContainer::Wav => Self {
                 schema_version: SCHEMA_VERSION_V1,
@@ -668,7 +644,6 @@ impl Settings {
                     write_report: Some(false),
                     dsf_pad_mode: DsfPadMode::SpecZero,
                 }),
-                rules: Vec::new(),
             },
             OutputContainer::Flac => Self {
                 schema_version: SCHEMA_VERSION_V1,
@@ -729,7 +704,6 @@ impl Settings {
                     write_report: Some(false),
                     dsf_pad_mode: DsfPadMode::SpecZero,
                 }),
-                rules: Vec::new(),
             },
             OutputContainer::Raw => Self {
                 schema_version: SCHEMA_VERSION_V1,
@@ -785,7 +759,6 @@ impl Settings {
                 clock: None,
                 runtime: None,
                 offline: None,
-                rules: Vec::new(),
             },
         }
     }
@@ -798,9 +771,9 @@ impl Settings {
             });
         }
 
-        if self.target.is_none() && self.rules.is_empty() {
+        if self.target.is_none() {
             return Err(SettingsError::Validation(
-                "configuration must specify either [target] or non-empty [[rules]]",
+                "configuration must specify [target]",
             ));
         }
 
@@ -952,8 +925,8 @@ impl Settings {
         warnings
     }
 
-    /// Evaluates `[[rules]]` in first-match order (or falls back to `[target]` + `rate_family`)
-    /// to resolve the concrete `PresetDefinition`, `StreamSpec`, and `DspConfiguration` (`Design.md §6.1`).
+    /// Resolves the concrete `PresetDefinition`, `StreamSpec`, and `DspConfiguration`
+    /// from `[target]` + `rate_family` (`Design.md §6.1`).
     pub fn explain_for_input_rate(
         &self,
         input_rate: PcmRateHz,
@@ -963,77 +936,6 @@ impl Settings {
         let resampler = self.resampler.clone().unwrap_or_default();
         let gain = self.gain.clone().unwrap_or_default();
 
-        // 1. Check first-match [[rules]]
-        if let Some(rule) = self
-            .rules
-            .iter()
-            .find(|r| r.when_input_rate_family == input_family)
-        {
-            let preset_def = presets::by_preset(rule.apply_preset);
-            let target_spec = match rule.set_target.format {
-                TargetFormat::Dsd => {
-                    let multiplier = rule
-                        .set_target
-                        .dsd_rate
-                        .ok_or(SettingsError::UnresolvedTargetRate(input_rate))?;
-                    let family = rule
-                        .set_target
-                        .rate_family
-                        .unwrap_or(TargetRateFamily::Source)
-                        .resolve_family(input_family);
-                    let bit_rate = multiplier
-                        .to_bit_rate(family)
-                        .ok_or(SettingsError::UnresolvedTargetRate(input_rate))?;
-                    TargetRateSpec::Dsd { bit_rate }
-                }
-                TargetFormat::Pcm => {
-                    let base_rate = rule
-                        .set_target
-                        .pcm_rate_hz
-                        .ok_or(SettingsError::UnresolvedTargetRate(input_rate))?;
-                    let family = rule
-                        .set_target
-                        .rate_family
-                        .unwrap_or(TargetRateFamily::Source)
-                        .resolve_family(input_family);
-                    let rate = if base_rate.rate_family() == family {
-                        base_rate
-                    } else {
-                        base_rate
-                            .corresponding_rate_in_family(family)
-                            .ok_or(SettingsError::UnresolvedTargetRate(input_rate))?
-                    };
-                    TargetRateSpec::Pcm {
-                        rate,
-                        sample_format: rule.set_target.sample_format.unwrap_or(SampleFormat::F32),
-                        valid_bits: rule.set_target.valid_bits,
-                    }
-                }
-            };
-
-            let mut dsp_config = preset_def.to_default_dsp_config(
-                resampler.phase,
-                resampler.apodization,
-                gain.preamp_db,
-                0.0,
-                gain.overload_policy,
-            );
-            if gain.headroom == HeadroomMode::Manual {
-                dsp_config.profile_headroom_db = 0.0;
-            }
-
-            return Ok(ResolvedPipelinePlan {
-                preset_def,
-                stream_spec: StreamSpec {
-                    input_rate,
-                    channels,
-                    target: target_spec,
-                },
-                dsp_config,
-            });
-        }
-
-        // 2. Fallback to [target] + rate_family
         let target = self
             .target
             .as_ref()
@@ -1106,19 +1008,17 @@ mod tests {
     use audigma_dsp::DsdBitRateHz;
 
     #[test]
-    fn test_design_md_section_6_1_rules_fixture() {
+    fn test_explain_source_family_dsd_target() {
         let toml = r#"
 schema_version = 1
 
-[[rules]]
-when_input_rate_family = "44100"   # 44.1k, 88.2k, 176.4k, 352.8k
-apply_preset = "reference"
-set_target = { format = "dsd", dsd_rate = "dsd256" }
+[target]
+format = "dsd"
+rate_family = "source"
+dsd_rate = "dsd256"
 
-[[rules]]
-when_input_rate_family = "48000"   # 48k, 96k, 192k, 384k
-apply_preset = "reference"
-set_target = { format = "pcm", pcm_rate_hz = 768000 }
+[resampler]
+preset = "reference"
 "#;
         let settings = Settings::from_toml_str(toml).unwrap();
         let plan_44k = settings
@@ -1138,10 +1038,8 @@ set_target = { format = "pcm", pcm_rate_hz = 768000 }
         assert_eq!(plan_48k.preset_def, &presets::PRESET_REFERENCE);
         assert_eq!(
             plan_48k.stream_spec.target,
-            TargetRateSpec::Pcm {
-                rate: PcmRateHz::PCM_768000,
-                sample_format: SampleFormat::F32,
-                valid_bits: None
+            TargetRateSpec::Dsd {
+                bit_rate: DsdBitRateHz::DSD256_48
             }
         );
     }

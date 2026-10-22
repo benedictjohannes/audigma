@@ -35,7 +35,7 @@ Build `audigma` from a clean Cargo workspace into a verified offline converter a
 crates/
   audigma-dsp/          # Pure math: rate types, DspConfiguration, presets.rs, FIR/ASRC, 5th-order CRFB DSM, dither, FTZ/DAZ (zero OS I/O)
   audigma-format/       # Containers (WAV/FLAC/DSF) & exact bit-packers (DSD_U32_BE, DoP s32le/s24le/s24_3le)
-  audigma-settings/     # TOML config Schema v1 (`Settings`), [[rules]] resolver, config check & explain
+  audigma-settings/     # TOML config Schema v1 (`Settings`), target resolver, config check & explain
   audigma-engine/       # Pure Rust pipeline planner, SPSC queues, ASRC drift controller & I/O traits (zero C FFI)
   audigma-io/           # Feature-gated concrete backends: ALSA, PipeWire, D-Bus ReserveDevice1, file/stdio & prober
   audigma-configurator/ # Interactive TUI & one-shot Web setup wizard (uses settings + engine/io prober & benchmark)
@@ -216,11 +216,11 @@ Cloned local reference repositories kept in [`references/`](references/) (ignore
 ### Phase 6: Interactive Configurator (`audigma-configurator`) & WirePlumber Templates
 **Maps to:** [`Design.md §2`](Design.md), [`§6.1`](Design.md), and [`§7`](Design.md).
 
-- **Goal:** Implement `audigma-configurator` to provide an interactive TUI (`audigma configure --tui`) and optional one-shot localhost Web wizard (`audigma configure --web`), complete rule-based selection (`[[rules]]`), and ship the `systemd --user` service and WirePlumber templates.
+- **Goal:** Implement `audigma-configurator` to provide an interactive TUI (`audigma configure --tui`) and optional one-shot localhost Web wizard (`audigma configure --web`), complete target resolution verification, and ship the `systemd --user` service and WirePlumber templates.
 - **Scope & Tasks:**
   1. In `audigma-configurator`, implement `audigma configure --tui` (and optional `--web` on `127.0.0.1:<random_port>` with session token that terminates on save, per [`Design.md §7`](Design.md)):
       - Guided flow: select Output Path (`PipeWire High-Rate PCM` vs. `Exclusive ALSA PCM` vs. `Exclusive ALSA DSD`) $\to$ probe DAC capabilities (`audigma-io`) $\to$ choose Rate Policy (`fixed` zero-relock vs. `source-family`) $\to$ choose Volume Policy (`software` vs. `hardware` vs. `none`) $\to$ run quick CPU benchmark (`audigma-engine`) $\to$ preview headroom/latency (`audigma-settings` / `audigma-dsp`) $\to$ write `~/.config/audigma/config.toml`.
-  2. Complete full `[[rules]]` evaluation and `audigma config explain` output ([`Design.md §6.1`](Design.md)).
+  2. Complete full declarative configuration validation and `audigma config explain` output ([`Design.md §6.1`](Design.md)).
   3. Package the `systemd --user` unit file, WirePlumber templates, shell completions, and manpage (`examples/`).
 - **`[User-Led]` Actions:**
   - Run `audigma configure`, generate a personalized config for `FiiO K17` and/or `JadeAudio JA11`, and optionally enable the `systemd --user` service.
