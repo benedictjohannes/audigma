@@ -27,12 +27,49 @@ pub enum DBusError {
     RealtimeKitFailed(String),
 }
 
-/// Requests real-time priority for the current thread or a given thread ID via RTKit (`org.freedesktop.RealtimeKit1`).
+/// The mechanism through which real-time priority was acquired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RealtimePriorityAcquisition {
+    /// Acquired directly via POSIX `SCHED_FIFO` (`pthread_setschedparam`).
+    DirectSchedFifo,
+    /// Acquired via `org.freedesktop.RealtimeKit1` D-Bus IPC.
+    RealtimeKit,
+}
+
+impl std::fmt::Display for RealtimePriorityAcquisition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DirectSchedFifo => write!(f, "POSIX SCHED_FIFO"),
+            Self::RealtimeKit => write!(f, "RealtimeKit"),
+        }
+    }
+}
+
+/// Requests real-time priority for the calling thread (`Design.md §1`).
 ///
-/// Uses pure Rust D-Bus via `zbus::Connection::system()` with zero FFI driven synchronously via `zbus::block_on`.
+/// First attempts direct POSIX real-time scheduling (`SCHED_FIFO` via `pthread_setschedparam`),
+/// which succeeds immediately with zero IPC overhead if the user session has real-time privileges (`RLIMIT_RTPRIO` / `ulimit -r`).
+/// If unprivileged (`EPERM`), falls back to RealtimeKit (`org.freedesktop.RealtimeKit1`) over the system D-Bus.
+///
 /// If RTKit is unavailable, permissions are denied, or the system does not run RTKit,
 /// returns a descriptive error allowing callers to log and fall back cleanly.
-pub fn request_realtime_priority(thread_id: u64, priority: u32) -> Result<(), DBusError> {
+pub fn request_realtime_priority(priority: u32) -> Result<RealtimePriorityAcquisition, DBusError> {
+    #[cfg(target_os = "linux")]
+    {
+        unsafe {
+            let mut param: libc::sched_param = core::mem::zeroed();
+            param.sched_priority = priority as i32;
+            if libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_FIFO, &param) == 0 {
+                return Ok(RealtimePriorityAcquisition::DirectSchedFifo);
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    let thread_id = unsafe { libc::syscall(libc::SYS_gettid) as u64 };
+    #[cfg(not(target_os = "linux"))]
+    let thread_id = 0u64;
+
     zbus::block_on(async {
         let conn = Connection::system().await?;
         let pid = std::process::id() as u64;
@@ -49,7 +86,7 @@ pub fn request_realtime_priority(thread_id: u64, priority: u32) -> Result<(), DB
             .map(|_| ());
 
         match reply {
-            Ok(()) => Ok(()),
+            Ok(()) => Ok(RealtimePriorityAcquisition::RealtimeKit),
             Err(e) => Err(DBusError::RealtimeKitFailed(format!(
                 "Failed to acquire RT priority {priority} for thread {thread_id}: {e}"
             ))),

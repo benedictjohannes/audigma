@@ -41,7 +41,6 @@ fn test_worker_pool_stereo_pcm_bit_exact() {
         FRAMES,
         None,
         None,
-        None,
     )
     .expect("worker pool creation failed");
 
@@ -110,7 +109,6 @@ fn test_worker_pool_7_1_surround_channels() {
         FRAMES,
         None,
         None,
-        None,
     )
     .expect("7.1 worker pool creation failed");
 
@@ -155,7 +153,6 @@ fn verify_stereo_dsd_bit_exact(
         stages,
         FRAMES,
         Some(dsd_cfg.clone()),
-        None,
         None,
     )
     .expect("worker pool creation failed");

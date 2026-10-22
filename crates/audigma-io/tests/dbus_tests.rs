@@ -32,10 +32,11 @@ fn test_dbus_realtime_kit_graceful_fallback() {
     // Requesting RT priority for an arbitrary thread id
     // May succeed if system RTKit is running, or return a clear error if unavailable.
     // In either case, it must not panic.
-    let result = request_realtime_priority(std::process::id() as u64, 10);
+    let result = request_realtime_priority(10);
     match result {
-        Ok(()) => {
-            // RTKit granted real-time priority
+        Ok(acq) => {
+            let msg = format!("{acq}");
+            assert!(!msg.is_empty());
         }
         Err(e) => {
             // Descriptive error without crashing

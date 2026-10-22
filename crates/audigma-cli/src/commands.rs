@@ -1,5 +1,7 @@
 //! CLI subcommands and commands for `audigma` (`Design.md §7`).
 
+use std::sync::Arc;
+
 use crate::ipc::{
     ControlClient, ControlServer, IpcError, IpcRequest, IpcResponse, default_socket_path,
 };
@@ -429,10 +431,9 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
     // Real-time thread priority
     #[cfg(feature = "dbus")]
     {
-        if let Err(e) = request_realtime_priority(0, 10) {
-            eprintln!("  RT Priority:   RealtimeKit request skipped/fallback: {e}");
-        } else {
-            eprintln!("  RT Priority:   Acquired real-time priority via RealtimeKit");
+        match request_realtime_priority(10) {
+            Ok(acq) => eprintln!("  RT Priority:   Acquired real-time priority via {acq}"),
+            Err(e) => eprintln!("  RT Priority:   Request skipped/fallback: {e}"),
         }
     }
 
@@ -537,8 +538,20 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
         .map_err(|e| EngineError::Pipeline(format!("failed to start control socket: {e}")))?;
     eprintln!("  ControlSocket: {}", socket_path.display());
 
+    // Real-time thread priority hook for channel workers
+    #[cfg(feature = "dbus")]
+    let worker_rt_hook: Option<Arc<dyn Fn(usize) + Send + Sync>> = Some(Arc::new(|ch: usize| {
+        match request_realtime_priority(10) {
+            Ok(acq) => eprintln!("  Worker {ch} RT:   Acquired real-time priority via {acq}"),
+            Err(e) => eprintln!("  audigma-ch{ch}: RT priority request skipped/fallback: {e}"),
+        }
+    }));
+    #[cfg(not(feature = "dbus"))]
+    let worker_rt_hook: Option<Arc<dyn Fn(usize) + Send + Sync>> = None;
+
     // Prepare and Run Live Pipeline
-    let mut pipeline = LivePipeline::prepare(settings.clone(), input_rate)?;
+    let mut pipeline =
+        LivePipeline::prepare_with_hook(settings.clone(), input_rate, worker_rt_hook.clone())?;
     let mut current_input_rate = input_rate;
     let mut current_target_spec = target_spec;
     let mut generation: u64 = 1;
@@ -794,7 +807,8 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
                 }
 
                 // Re-prepare the LivePipeline for the new input rate
-                pipeline = LivePipeline::prepare(settings.clone(), new_rate)?;
+                pipeline =
+                    LivePipeline::prepare_with_hook(settings.clone(), new_rate, worker_rt_hook.clone())?;
                 current_target_spec = new_target_spec;
 
                 // Bump generation and update active rate on virtual sink
@@ -1548,7 +1562,6 @@ pub fn run_benchmark(args: BenchmarkArgs) -> Result<(), EngineError> {
         stages,
         BLOCK_FRAMES,
         target_dsd,
-        None,
         None,
     )?;
 

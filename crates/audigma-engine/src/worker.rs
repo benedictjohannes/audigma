@@ -75,32 +75,7 @@ fn futex_wake(atomic: &AtomicU32) {
     }
 }
 
-/// Sets real-time scheduling priority (`SCHED_FIFO`) on the calling thread.
-#[cfg(target_os = "linux")]
-pub fn set_current_thread_realtime(priority: u32) -> Result<(), i32> {
-    unsafe {
-        let mut param: libc::sched_param = core::mem::zeroed();
-        param.sched_priority = priority as i32;
-        let ret = libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_FIFO, &param);
-        if ret == 0 { Ok(()) } else { Err(ret) }
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-pub fn set_current_thread_realtime(_priority: u32) -> Result<(), i32> {
-    Ok(())
-}
-
-/// Returns the OS thread ID (`gettid` on Linux).
-#[cfg(target_os = "linux")]
-pub fn get_current_thread_id() -> u64 {
-    unsafe { libc::syscall(libc::SYS_gettid) as u64 }
-}
-
-#[cfg(not(target_os = "linux"))]
-pub fn get_current_thread_id() -> u64 {
-    0
-}
+// Remove OS-specific thread RT / TID implementations from audigma-engine
 
 /// Dedicated 64-byte aligned synchronization and telemetry slot for one channel worker.
 #[repr(align(64))]
@@ -164,8 +139,7 @@ impl ChannelWorkerPool {
         stages: usize,
         tile_baseband_frames: usize,
         target_dsd: Option<TargetDsdConfig>,
-        rt_priority: Option<u32>,
-        thread_init_hook: Option<Arc<dyn Fn(usize, u64) + Send + Sync>>,
+        thread_init_hook: Option<Arc<dyn Fn(usize) + Send + Sync>>,
     ) -> Result<Self, EngineError> {
         if channels == 0 {
             return Err(EngineError::Pipeline(
@@ -226,13 +200,8 @@ impl ChannelWorkerPool {
                 .spawn(move || {
                     let _ftz = ScopedFtzDaz::new();
 
-                    if let Some(prio) = rt_priority {
-                        let _ = set_current_thread_realtime(prio);
-                    }
-
                     if let Some(ref hook) = thread_hook {
-                        let tid = get_current_thread_id();
-                        hook(ch, tid);
+                        hook(ch);
                     }
 
                     let mut current_gen = 0u32;
@@ -539,7 +508,6 @@ mod tests {
             FRAMES,
             Some(dsd_cfg.clone()),
             None,
-            None,
         )
         .expect("worker pool creation failed");
 
@@ -622,7 +590,6 @@ mod tests {
             FRAMES,
             None,
             None,
-            None,
         )
         .expect("multichannel worker pool failed");
 
@@ -655,7 +622,6 @@ mod tests {
             Apodization::Off,
             STAGES,
             FRAMES,
-            None,
             None,
             None,
         )

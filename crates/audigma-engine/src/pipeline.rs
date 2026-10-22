@@ -579,7 +579,6 @@ impl OfflinePipeline {
             TILE_BASEBAND_FRAMES,
             target_dsd,
             None,
-            None,
         )?;
         let mult = worker_pool.rate_multiplier();
 

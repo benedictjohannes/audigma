@@ -15,6 +15,8 @@ pub use alsa::{
 };
 
 #[cfg(feature = "dbus")]
-pub use dbus::{DBusError, DeviceReservation, request_realtime_priority};
+pub use dbus::{
+    DBusError, DeviceReservation, RealtimePriorityAcquisition, request_realtime_priority,
+};
 pub use file::{FileAudioInput, FileAudioOutput};
 pub use stdio::{StdioAudioInput, StdioAudioOutput};

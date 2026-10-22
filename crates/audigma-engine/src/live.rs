@@ -224,10 +224,19 @@ pub struct LivePipeline {
     intermediate_rate: PcmRateHz,
     cascade_stages: usize,
     carrier: IdleCarrierFormat,
+    thread_init_hook: Option<Arc<dyn Fn(usize) + Send + Sync>>,
 }
 
 impl LivePipeline {
     pub fn prepare(settings: Settings, input_rate: PcmRateHz) -> Result<Self, EngineError> {
+        Self::prepare_with_hook(settings, input_rate, None)
+    }
+
+    pub fn prepare_with_hook(
+        settings: Settings,
+        input_rate: PcmRateHz,
+        thread_init_hook: Option<Arc<dyn Fn(usize) + Send + Sync>>,
+    ) -> Result<Self, EngineError> {
         let plan = settings.explain_for_input_rate(input_rate)?;
         let target_spec = plan.stream_spec.target;
 
@@ -319,7 +328,13 @@ impl LivePipeline {
             intermediate_rate,
             cascade_stages: stages,
             carrier,
+            thread_init_hook,
         })
+    }
+
+    /// Sets or replaces the thread initialization hook for channel worker threads.
+    pub fn set_thread_init_hook(&mut self, hook: Option<Arc<dyn Fn(usize) + Send + Sync>>) {
+        self.thread_init_hook = hook;
     }
 
     /// Runs the streaming loop reading from `input`, converting, and writing to `output`.
@@ -365,8 +380,7 @@ impl LivePipeline {
             self.cascade_stages,
             TILE_BASEBAND_FRAMES,
             target_dsd,
-            Some(80),
-            None,
+            self.thread_init_hook.clone(),
         )?;
         let mult = worker_pool.rate_multiplier();
 
