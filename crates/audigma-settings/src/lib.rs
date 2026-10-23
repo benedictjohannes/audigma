@@ -825,6 +825,20 @@ impl Settings {
             }
         }
 
+        // Validate [gain] ranges against the representable volume span.
+        // This mirrors `audigma set volume`, so a config file cannot request gain
+        // the volume curve cannot represent (and `play -v 80` fails loudly too).
+        if let Some(gain) = &self.gain {
+            if !gain.preamp_db.is_finite()
+                || !(audigma_dsp::MIN_VOLUME_DB..=audigma_dsp::MAX_VOLUME_DB)
+                    .contains(&gain.preamp_db)
+            {
+                return Err(SettingsError::Validation(
+                    "[gain] preamp_db must be between -120.0 and +12.0 dB",
+                ));
+            }
+        }
+
         // Validate [output] & [target] cross-field constraints (Design.md §1.4 & §5.3)
         if let Some(output) = &self.output {
             if let Some(wait) = output.device_wait_ms {
@@ -1642,6 +1656,37 @@ pcm_rate_hz = 96000
             settings.output.as_ref().unwrap().volume_control(),
             VolumeControlMode::HardwareSoftwareFallback
         );
+    }
+
+    #[test]
+    fn test_gain_preamp_db_range_validation() {
+        let with_preamp = |db: &str| {
+            format!(
+                r#"
+schema_version = 1
+[target]
+format = "pcm"
+pcm_rate_hz = 96000
+[gain]
+preamp_db = {db}
+overload_policy = "mute-recover"
+"#
+            )
+        };
+
+        // Bounds are inclusive, and integers widen to f64.
+        for ok in ["-120.0", "0", "12.0"] {
+            Settings::from_toml_str(&with_preamp(ok))
+                .unwrap_or_else(|e| panic!("preamp_db = {ok} should be valid: {e}"));
+        }
+
+        for bad in ["-120.1", "12.1", "nan", "inf"] {
+            let err = Settings::from_toml_str(&with_preamp(bad)).unwrap_err();
+            assert!(
+                err.to_string().contains("preamp_db"),
+                "preamp_db = {bad} should be rejected: {err}"
+            );
+        }
     }
 
     #[test]

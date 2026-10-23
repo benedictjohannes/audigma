@@ -597,6 +597,16 @@ impl OfflinePipeline {
         &self.plan
     }
 
+    /// Layers a runtime user-volume attenuation (dB) on top of `[gain] preamp_db`.
+    ///
+    /// Mirrors the daemon's live `set volume`: the value participates in
+    /// `total_configured_gain_db()`, feeds the two-pass gain solver, and disables
+    /// bit-exact DSD passthrough when non-zero. Must be called before `run`.
+    pub fn with_user_volume_db(mut self, db: f64) -> Self {
+        self.plan.dsp_config.user_volume_db = db;
+        self
+    }
+
     /// Executes the prepared offline conversion pipeline from `input` to `output`.
     pub fn run<'a>(
         mut self,

@@ -277,3 +277,35 @@ fn test_offline_pipeline_dsd_automatic_passthrough_bit_exact() {
     assert_eq!(out_l, left_bytes);
     assert_eq!(out_r, right_bytes);
 }
+
+#[test]
+fn test_offline_pipeline_user_volume_layers_on_preamp() {
+    let in_rate = PcmRateHz::PCM_44100;
+    let (left, right) = generate_synthetic_stereo_sine(in_rate, 0.05, 1000.0, 0.5);
+    let total_frames = left.len() as u64;
+    let info = AudioStreamInfo::new_pcm(in_rate, 2, Some(total_frames), Some(16));
+
+    let mut input = MockAudioInput::new(info, left, right, true);
+    let mut out_buffer = Cursor::new(Vec::new());
+
+    let mut settings = Settings::default_offline(OutputContainer::Wav);
+    if let Some(ref mut gain) = settings.gain {
+        gain.peak_analysis = PeakAnalysisMode::SinglePass;
+        gain.preamp_db = -3.0;
+    }
+
+    let pipeline = OfflinePipeline::prepare(settings, in_rate)
+        .expect("prepare failed")
+        .with_user_volume_db(-6.0);
+
+    // User volume is additive: the configured preamp is preserved.
+    assert_eq!(pipeline.plan().dsp_config.preamp_db, -3.0);
+    assert_eq!(pipeline.plan().dsp_config.user_volume_db, -6.0);
+    let expected_gain_db = pipeline.plan().dsp_config.total_configured_gain_db();
+
+    let report = pipeline
+        .run(&mut input, Box::new(SeekableSink(&mut out_buffer)))
+        .expect("conversion failed");
+
+    assert!((report.applied_gain_db - expected_gain_db).abs() < 1e-9);
+}

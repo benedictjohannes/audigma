@@ -131,8 +131,17 @@ impl DaemonControlHandle {
         *self.volume_percent.lock().unwrap()
     }
 
+    /// Sets the live volume in dB, clamped to the representable range.
+    ///
+    /// Clamping happens daemon-side (not only in the CLI) because IPC clients
+    /// and desktop volume sliders can supply arbitrary values.
     #[inline]
     pub fn set_volume(&self, db: f64) {
+        let db = if db.is_nan() {
+            audigma_dsp::MIN_VOLUME_DB
+        } else {
+            db.clamp(audigma_dsp::MIN_VOLUME_DB, audigma_dsp::MAX_VOLUME_DB)
+        };
         let mut vol = self.volume_db.lock().unwrap();
         *vol = db;
         let mut p = self.volume_percent.lock().unwrap();

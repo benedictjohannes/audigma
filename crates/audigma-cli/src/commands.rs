@@ -121,10 +121,42 @@ pub struct SetArgs {
     pub socket: Option<PathBuf>,
 }
 
-/// Parses a volume argument into decibels (dB) according to confirmed rules:
-/// - Suffix `%` (e.g. `80%`, `100%`, `0%`): perceptual percentage converted via ALSA's volume_mapping.c curve.
-/// - No `%` (e.g. `-6`, `-3.2`, `0`, `0.0`, `+1.5`, `-6dB`): treated directly as decibels.
+/// Parses a decibel volume argument (e.g. `-6`, `-3.2`, `0`, `0.0`, `+1.5`, `-6dB`).
+///
+/// Percentages (`80%`) are handled by `parse_volume_arg`, not here: `run_set`
+/// forwards them over IPC so the daemon can apply the curve matching the active
+/// volume mode, instead of freezing the software curve client-side.
 pub fn parse_volume_to_db(arg: &str) -> Result<f64, String> {
+    let s = arg.trim();
+    if s.is_empty() {
+        return Err("volume argument cannot be empty".to_string());
+    }
+
+    let clean = s
+        .strip_suffix("dB")
+        .or_else(|| s.strip_suffix("db"))
+        .unwrap_or(s)
+        .trim();
+    clean
+        .parse()
+        .map_err(|e| format!("invalid decibel volume '{arg}': {e}"))
+}
+
+/// A volume argument parsed from the CLI, shared by `audigma set volume` and `audigma play -v`.
+#[derive(Debug, PartialEq)]
+enum VolumeArg {
+    /// Explicit decibels, already stripped of the optional `dB` suffix.
+    Db(f64),
+    /// Perceptual percentage; the consumer applies the appropriate ALSA curve.
+    Percent(f64),
+}
+
+/// Parses the shared CLI volume syntax: `<number>` / `<number>dB` for decibels,
+/// `<number>%` for a perceptual percentage.
+///
+/// `run_set` forwards percentages over IPC so the daemon can apply the curve that
+/// matches the active volume mode; `run_play` resolves them with the software curve.
+fn parse_volume_arg(arg: &str) -> Result<VolumeArg, String> {
     let s = arg.trim();
     if s.is_empty() {
         return Err("volume argument cannot be empty".to_string());
@@ -138,26 +170,38 @@ pub fn parse_volume_to_db(arg: &str) -> Result<f64, String> {
         if p < 0.0 {
             return Err("percentage volume cannot be negative".to_string());
         }
-        Ok(audigma_dsp::alsamixer_percentage_to_db(
-            p,
-            audigma_dsp::DEFAULT_SOFTWARE_MIN_DB,
-        ))
-    } else {
-        let clean = s
-            .strip_suffix("dB")
-            .or_else(|| s.strip_suffix("db"))
-            .unwrap_or(s)
-            .trim();
-        let db: f64 = clean
-            .parse()
-            .map_err(|e| format!("invalid decibel volume '{arg}': {e}"))?;
-        Ok(db)
+        return Ok(VolumeArg::Percent(p));
     }
+
+    parse_volume_to_db(arg).map(VolumeArg::Db)
+}
+
+/// Validates a decibel volume against the range the ALSA volume curve can represent.
+///
+/// Explicit dB values are rejected rather than silently clamped, so a typo like
+/// `80` (meaning `80%`) fails loudly instead of quietly boosting by +12 dB.
+fn validate_volume_db(db: f64) -> Result<f64, String> {
+    if !db.is_finite() {
+        return Err(format!("invalid volume '{db}' dB"));
+    }
+    if !(audigma_dsp::MIN_VOLUME_DB..=audigma_dsp::MAX_VOLUME_DB).contains(&db) {
+        let hint = if (0.0..=100.0).contains(&db) {
+            format!(" (did you mean '{db}%'? percentages require the % suffix)")
+        } else {
+            String::new()
+        };
+        return Err(format!(
+            "volume {db} dB is outside the supported range {}..={} dB{hint}",
+            audigma_dsp::MIN_VOLUME_DB,
+            audigma_dsp::MAX_VOLUME_DB
+        ));
+    }
+    Ok(db)
 }
 
 #[derive(Subcommand, Debug)]
 pub enum SetCommands {
-    /// Set live playback volume in dB (e.g. -3.0 or 0) or percentage (e.g. 80% or 0%)
+    /// Set live playback volume in dB (-120..=+12, e.g. -3.0 or 0) or percentage (e.g. 80% or 0%)
     Volume {
         #[arg(allow_hyphen_values = true)]
         value: String,
@@ -181,12 +225,14 @@ pub struct PlayArgs {
     #[arg(short = 'p', long = "preset")]
     pub preset: Option<String>,
 
-    /// Optional playback volume/preamp in dB (e.g. -3.0 or --volume=-3.0)
+    /// Optional playback volume in dB (e.g. -3.0) or percentage (e.g. 80%),
+    /// using the same syntax as `audigma set volume`
     #[arg(short = 'v', long = "volume", allow_hyphen_values = true)]
-    pub volume: Option<f64>,
+    pub volume: Option<String>,
 
-    /// Ad-hoc configuration override (e.g. -o output.transport=dop -o output.buffer_ms=20)
-    #[arg(short = 'o', long = "override")]
+    /// Ad-hoc configuration override; the value is parsed as a TOML literal
+    /// (e.g. -O output.transport=dop -O output.buffer_ms=20 -O output.device='"2"')
+    #[arg(short = 'O', long = "override")]
     pub overrides: Vec<String>,
 
     /// Optional TOML configuration file path
@@ -315,30 +361,14 @@ fn apply_toml_override(
     key_path: &str,
     raw_value: &str,
 ) -> Result<(), EngineError> {
-    let parts: Vec<&str> = key_path.split('.').collect();
-    if parts.is_empty() {
-        return Err(EngineError::Pipeline("empty override key".to_string()));
+    let parts: Vec<&str> = key_path.split('.').map(str::trim).collect();
+    if parts.iter().any(|p| p.is_empty()) {
+        return Err(EngineError::Pipeline(format!(
+            "invalid override key '{key_path}' (expected e.g. output.device)"
+        )));
     }
 
-    // Parse the value: try integer, float, boolean, or fallback to string
-    let parsed_val: toml::Value = if let Ok(i) = raw_value.parse::<i64>() {
-        toml::Value::Integer(i)
-    } else if let Ok(f) = raw_value.parse::<f64>() {
-        toml::Value::Float(f)
-    } else if let Ok(b) = raw_value.parse::<bool>() {
-        toml::Value::Boolean(b)
-    } else {
-        // Strip optional surrounding quotes
-        let trimmed = raw_value.trim();
-        let unquoted = if (trimmed.starts_with('"') && trimmed.ends_with('"'))
-            || (trimmed.starts_with('\'') && trimmed.ends_with('\''))
-        {
-            &trimmed[1..trimmed.len() - 1]
-        } else {
-            trimmed
-        };
-        toml::Value::String(unquoted.to_string())
-    };
+    let parsed_val = parse_override_value(raw_value);
 
     let mut current = root;
     for (i, &part) in parts.iter().enumerate() {
@@ -360,6 +390,33 @@ fn apply_toml_override(
     }
 
     Ok(())
+}
+
+/// Parses a CLI override value as a TOML literal, so that an override behaves
+/// exactly as if the same value had been written in `config.toml`:
+///
+/// - `-O gain.preamp_db=-3`    → integer (widened to `f64` by the target field)
+/// - `-O gain.preamp_db=-3.0`  → float
+/// - `-O output.device='"2"'`  → string `"2"` (quote values that look numeric)
+/// - `-O output.device=hw:CARD=K17,DEV=0` → not valid TOML, so treated as a string
+/// - `-O input.allowed_rates=[44100, 48000]` → array
+///
+/// Whether the parsed value fits the target field is decided later by
+/// `Settings` deserialization; this function never guesses a type.
+fn parse_override_value(raw_value: &str) -> toml::Value {
+    let trimmed = raw_value.trim();
+    if !trimmed.is_empty() {
+        // `v = <literal>` keeps the literal's native TOML type. Only `v` is
+        // extracted, so extra keys in the fragment cannot leak into the table.
+        if let Ok(toml::Value::Table(mut doc)) =
+            toml::from_str::<toml::Value>(&format!("v = {trimmed}"))
+        {
+            if let Some(value) = doc.remove("v") {
+                return value;
+            }
+        }
+    }
+    toml::Value::String(trimmed.to_string())
 }
 
 pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
@@ -540,12 +597,11 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
 
     // Real-time thread priority hook for channel workers
     #[cfg(feature = "dbus")]
-    let worker_rt_hook: Option<Arc<dyn Fn(usize) + Send + Sync>> = Some(Arc::new(|ch: usize| {
-        match request_realtime_priority(10) {
+    let worker_rt_hook: Option<Arc<dyn Fn(usize) + Send + Sync>> =
+        Some(Arc::new(|ch: usize| match request_realtime_priority(10) {
             Ok(acq) => eprintln!("  Worker {ch} RT:   Acquired real-time priority via {acq}"),
             Err(e) => eprintln!("  audigma-ch{ch}: RT priority request skipped/fallback: {e}"),
-        }
-    }));
+        }));
     #[cfg(not(feature = "dbus"))]
     let worker_rt_hook: Option<Arc<dyn Fn(usize) + Send + Sync>> = None;
 
@@ -807,8 +863,11 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
                 }
 
                 // Re-prepare the LivePipeline for the new input rate
-                pipeline =
-                    LivePipeline::prepare_with_hook(settings.clone(), new_rate, worker_rt_hook.clone())?;
+                pipeline = LivePipeline::prepare_with_hook(
+                    settings.clone(),
+                    new_rate,
+                    worker_rt_hook.clone(),
+                )?;
                 current_target_spec = new_target_spec;
 
                 // Bump generation and update active rate on virtual sink
@@ -953,20 +1012,11 @@ pub fn run_set(args: SetArgs) -> Result<(), EngineError> {
     let socket_path = args.socket.unwrap_or_else(default_socket_path);
     let req = match args.command {
         SetCommands::Volume { value } => {
-            let s = value.trim();
-            if let Some(pct_str) = s.strip_suffix('%') {
-                let p: f64 = pct_str.trim().parse().map_err(|e| {
-                    EngineError::Pipeline(format!("invalid percentage '{value}': {e}"))
-                })?;
-                if p < 0.0 {
-                    return Err(EngineError::Pipeline(
-                        "percentage volume cannot be negative".to_string(),
-                    ));
-                }
-                IpcRequest::SetVolumePercent { percent: p }
-            } else {
-                let volume_db = parse_volume_to_db(&value).map_err(EngineError::Pipeline)?;
-                IpcRequest::SetVolume { volume_db }
+            match parse_volume_arg(&value).map_err(EngineError::Pipeline)? {
+                VolumeArg::Percent(percent) => IpcRequest::SetVolumePercent { percent },
+                VolumeArg::Db(volume_db) => IpcRequest::SetVolume {
+                    volume_db: validate_volume_db(volume_db).map_err(EngineError::Pipeline)?,
+                },
             }
         }
         SetCommands::Preset { name } => IpcRequest::SetPreset { preset: name },
@@ -1029,7 +1079,7 @@ pub fn run_play(args: PlayArgs) -> Result<(), EngineError> {
     }
 
     // For live playback, default peak_analysis to single-pass (force override from file's two-pass)
-    // Users can still explicitly opt into two-pass using `-o gain.peak_analysis=two-pass`.
+    // Users can still explicitly opt into two-pass using `-O gain.peak_analysis=two-pass`.
     let gain_entry = toml_table
         .entry("gain".to_string())
         .or_insert_with(|| toml::Value::Table(toml::Table::new()));
@@ -1040,12 +1090,27 @@ pub fn run_play(args: PlayArgs) -> Result<(), EngineError> {
         );
     }
 
-    // 3. Apply common CLI ergonomics (device, volume, preset)
+    // 3. Apply common CLI ergonomics (device, preset). Volume is parsed here but
+    //    applied later as the runtime user-volume component, not as a
+    //    `[gain] preamp_db` override: the configured preamp is calibration, while
+    //    `-v` is the user-facing playback volume.
+    let user_volume_db: Option<f64> = match args.volume.as_deref() {
+        None => None,
+        Some(raw) => Some(
+            match parse_volume_arg(raw).map_err(EngineError::Pipeline)? {
+                VolumeArg::Db(db) => validate_volume_db(db).map_err(EngineError::Pipeline)?,
+                // `play` has no hardware mixer bridge, so the software ALSA curve is
+                // the analogue of the daemon's `volume_control = "software"` mode.
+                VolumeArg::Percent(pct) => audigma_dsp::alsamixer_percentage_to_db(
+                    pct,
+                    audigma_dsp::DEFAULT_SOFTWARE_MIN_DB,
+                ),
+            },
+        ),
+    };
+
     if let Some(ref dev) = args.device {
         apply_toml_override(&mut toml_table, "output.device", dev)?;
-    }
-    if let Some(vol) = args.volume {
-        apply_toml_override(&mut toml_table, "gain.preamp_db", &vol.to_string())?;
     }
     if let Some(ref p) = args.preset {
         let preset = by_name(p)
@@ -1058,7 +1123,7 @@ pub fn run_play(args: PlayArgs) -> Result<(), EngineError> {
         apply_toml_override(&mut toml_table, "resampler.preset", preset_str)?;
     }
 
-    // 4. Apply ad-hoc CLI overrides (-o key=value)
+    // 4. Apply ad-hoc CLI overrides (-O key=value)
     for ovr in &args.overrides {
         let (key, val) = ovr.split_once('=').ok_or_else(|| {
             EngineError::Pipeline(format!(
@@ -1106,8 +1171,12 @@ pub fn run_play(args: PlayArgs) -> Result<(), EngineError> {
         (Box::new(file_input), rate)
     };
 
-    // 4. Prepare Pipeline
+    // 4. Prepare Pipeline and layer the CLI volume on top of the configured preamp
     let pipeline = OfflinePipeline::prepare(settings.clone(), input_rate)?;
+    let pipeline = match user_volume_db {
+        Some(db) => pipeline.with_user_volume_db(db),
+        None => pipeline,
+    };
     let plan = pipeline.plan().clone();
     let target_spec = plan.stream_spec.target;
 
@@ -1157,9 +1226,13 @@ pub fn run_play(args: PlayArgs) -> Result<(), EngineError> {
             "  Filter Preset: {:?} (phase: {:?})",
             plan.dsp_config.preset, plan.dsp_config.phase
         );
-        if let Some(ref g) = settings.gain {
-            eprintln!("  Preamp / Gain: {:.2} dB", g.preamp_db);
-        }
+        eprintln!(
+            "  Gain:          preamp {:.2} dB + volume {:.2} dB + headroom {:.2} dB = {:.2} dB",
+            plan.dsp_config.preamp_db,
+            plan.dsp_config.user_volume_db,
+            plan.dsp_config.profile_headroom_db,
+            plan.dsp_config.total_configured_gain_db()
+        );
     }
 
     let mut alsa_output = AlsaAudioOutput::open(alsa_config)
@@ -1970,17 +2043,45 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_volume_to_db_percentage() {
-        assert_eq!(parse_volume_to_db("100%").unwrap(), 0.0);
-        assert_eq!(parse_volume_to_db("0%").unwrap(), -120.0);
+    fn test_parse_volume_to_db_rejects_percentages() {
+        // Percentages are daemon-owned: `run_set` forwards them via
+        // `SetVolumePercent` so the active hardware/software ALSA curve is
+        // applied at runtime instead of being frozen client-side.
+        assert!(parse_volume_to_db("0%").is_err());
+        assert!(parse_volume_to_db("80%").is_err());
+    }
 
-        let half = parse_volume_to_db("50%").unwrap();
-        // 50% slider => ALSA volume_mapping curve with -60 dB floor => ~= -15.58 dB
-        assert!((half - (-15.58)).abs() < 0.1);
+    #[test]
+    fn test_parse_volume_arg_shared_syntax() {
+        assert_eq!(parse_volume_arg("-6").unwrap(), VolumeArg::Db(-6.0));
+        assert_eq!(parse_volume_arg("-6dB").unwrap(), VolumeArg::Db(-6.0));
+        assert_eq!(parse_volume_arg("0").unwrap(), VolumeArg::Db(0.0));
+        assert_eq!(parse_volume_arg("+1.5").unwrap(), VolumeArg::Db(1.5));
+        assert_eq!(parse_volume_arg("80%").unwrap(), VolumeArg::Percent(80.0));
+        assert_eq!(
+            parse_volume_arg(" 50 % ").unwrap(),
+            VolumeArg::Percent(50.0)
+        );
 
-        let ten = parse_volume_to_db("10%").unwrap();
-        // 10% slider => ALSA curve => ~= -43.27 dB (audible, pleasant background)
-        assert!((ten - (-43.27)).abs() < 0.1);
+        assert!(parse_volume_arg("-5%").is_err());
+        assert!(parse_volume_arg("abc%").is_err());
+        assert!(parse_volume_arg("").is_err());
+        assert!(parse_volume_arg("xyz").is_err());
+    }
+
+    #[test]
+    fn test_validate_volume_db_range() {
+        assert_eq!(validate_volume_db(-120.0).unwrap(), -120.0);
+        assert_eq!(validate_volume_db(0.0).unwrap(), 0.0);
+        assert_eq!(validate_volume_db(12.0).unwrap(), 12.0);
+
+        assert!(validate_volume_db(-120.1).is_err());
+        assert!(validate_volume_db(12.1).is_err());
+        assert!(validate_volume_db(f64::INFINITY).is_err());
+        assert!(validate_volume_db(f64::NAN).is_err());
+
+        let err = validate_volume_db(80.0).unwrap_err();
+        assert!(err.contains("80%"), "hint missing from error: {err}");
     }
 
     #[test]
@@ -1988,7 +2089,67 @@ mod tests {
         assert!(parse_volume_to_db("").is_err());
         assert!(parse_volume_to_db("   ").is_err());
         assert!(parse_volume_to_db("xyz").is_err());
-        assert!(parse_volume_to_db("-5%").is_err());
-        assert!(parse_volume_to_db("abc%").is_err());
+        assert!(parse_volume_to_db("1.2.3").is_err());
+        assert!(parse_volume_to_db("dB").is_err());
+    }
+
+    #[test]
+    fn test_parse_override_value_uses_toml_syntax() {
+        assert_eq!(parse_override_value("-3"), toml::Value::Integer(-3));
+        assert_eq!(parse_override_value("-3.0"), toml::Value::Float(-3.0));
+        assert_eq!(parse_override_value("true"), toml::Value::Boolean(true));
+        assert_eq!(
+            parse_override_value("\"2\""),
+            toml::Value::String("2".to_string())
+        );
+        assert_eq!(
+            parse_override_value("hw:CARD=K17,DEV=0"),
+            toml::Value::String("hw:CARD=K17,DEV=0".to_string())
+        );
+        assert_eq!(
+            parse_override_value("[44100, 48000]"),
+            toml::Value::Array(vec![
+                toml::Value::Integer(44100),
+                toml::Value::Integer(48000),
+            ])
+        );
+        // Bare words fall back to strings, so unquoted presets keep working.
+        assert_eq!(
+            parse_override_value("two-pass"),
+            toml::Value::String("two-pass".to_string())
+        );
+        // Empty value is a string, not an error.
+        assert_eq!(parse_override_value(""), toml::Value::String(String::new()));
+    }
+
+    #[test]
+    fn test_apply_toml_override_nested() {
+        let mut root = toml::Table::new();
+        apply_toml_override(&mut root, "output.device", "hw:CARD=K17,DEV=0").unwrap();
+        apply_toml_override(&mut root, "gain.preamp_db", "-3").unwrap();
+
+        assert_eq!(root["output"]["device"].as_str(), Some("hw:CARD=K17,DEV=0"));
+        assert_eq!(root["gain"]["preamp_db"], toml::Value::Integer(-3));
+    }
+
+    #[test]
+    fn test_apply_toml_override_integer_widens_to_f64_on_deserialize() {
+        #[derive(serde::Deserialize)]
+        struct Probe {
+            preamp_db: f64,
+        }
+
+        let mut root = toml::Table::new();
+        apply_toml_override(&mut root, "preamp_db", "-3").unwrap();
+        let merged = toml::to_string(&root).unwrap();
+        let probe: Probe = toml::from_str(&merged).unwrap();
+        assert_eq!(probe.preamp_db, -3.0);
+    }
+
+    #[test]
+    fn test_apply_toml_override_rejects_empty_key_segment() {
+        let mut root = toml::Table::new();
+        assert!(apply_toml_override(&mut root, "output..device", "x").is_err());
+        assert!(apply_toml_override(&mut root, " ", "x").is_err());
     }
 }

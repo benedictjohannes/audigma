@@ -37,4 +37,7 @@ pub use rates::{
     DEFAULT_AUDIO_BASEBAND_HZ, DsdBitRateHz, DsdMultiplier, PcmRateHz, RateFamily,
     TransportFrameRateHz, select_dsd_intermediate_rate,
 };
-pub use volume::{DEFAULT_SOFTWARE_MIN_DB, alsamixer_db_to_percentage, alsamixer_percentage_to_db};
+pub use volume::{
+    DEFAULT_SOFTWARE_MIN_DB, MAX_VOLUME_DB, MIN_VOLUME_DB, alsamixer_db_to_percentage,
+    alsamixer_percentage_to_db,
+};

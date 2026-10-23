@@ -276,3 +276,22 @@ fn test_volume_percentage_alsamixer_curve_on_hardware_bridge() {
     control.stop();
     let _ = handle.join().unwrap();
 }
+
+#[test]
+fn test_daemon_set_volume_clamps_to_supported_range() {
+    let control = DaemonControlHandle::new(44_100, "pcm", 192_000, "balanced", 0.0);
+
+    control.set_volume(1_000.0);
+    assert_eq!(control.get_volume(), audigma_dsp::MAX_VOLUME_DB);
+
+    control.set_volume(-1_000.0);
+    assert_eq!(control.get_volume(), audigma_dsp::MIN_VOLUME_DB);
+
+    // A non-finite dB value must never reach the DSP gain stage.
+    control.set_volume(f64::NAN);
+    assert_eq!(control.get_volume(), audigma_dsp::MIN_VOLUME_DB);
+
+    // In-range values pass through untouched.
+    control.set_volume(-6.0);
+    assert_eq!(control.get_volume(), -6.0);
+}

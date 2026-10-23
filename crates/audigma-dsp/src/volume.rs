@@ -3,26 +3,32 @@
 /// Default software volume lower floor in decibels (-60.0 dBFS).
 pub const DEFAULT_SOFTWARE_MIN_DB: f64 = -60.0;
 
+/// Absolute minimum volume in decibels. At or below this the signal is muted.
+pub const MIN_VOLUME_DB: f64 = -120.0;
+
+/// Absolute maximum volume boost in decibels permitted by the ALSA volume curve.
+pub const MAX_VOLUME_DB: f64 = 12.0;
+
 /// Converts a perceptual volume percentage [0.0, 100.0] to decibels using ALSA's `volume_mapping.c` curve.
 ///
 /// Uses `min_db` as the lower boundary (e.g. -50.0 dB for JA11, or -60.0 dB for software volume).
-/// At 0%, returns -120.0 dB (silence/mute).
+/// At 0% (or any non-finite input), returns `MIN_VOLUME_DB` (silence/mute).
 pub fn alsamixer_percentage_to_db(pct: f64, min_db: f64) -> f64 {
-    if pct <= 0.0 {
-        return -120.0;
+    if !pct.is_finite() || pct <= 0.0 {
+        return MIN_VOLUME_DB;
     }
     let p = pct / 100.0;
     let min_norm = 10.0_f64.powf(min_db / 60.0);
     let val = min_norm + p * (1.0 - min_norm);
     if val <= 1e-6 {
-        return -120.0;
+        return MIN_VOLUME_DB;
     }
-    (60.0 * val.log10()).clamp(min_db, 12.0)
+    (60.0 * val.log10()).clamp(min_db, MAX_VOLUME_DB)
 }
 
 /// Converts decibels back to a perceptual volume percentage [0.0, 100.0] using ALSA's `volume_mapping.c` curve.
 pub fn alsamixer_db_to_percentage(db: f64, min_db: f64) -> f64 {
-    if db <= min_db || db <= -120.0 {
+    if !db.is_finite() || db <= min_db || db <= MIN_VOLUME_DB {
         return 0.0;
     }
     if db >= 0.0 {
@@ -93,5 +99,21 @@ mod tests {
                 "Failed roundtrip for pct={pct}, db={db}, recovered={recovered}"
             );
         }
+    }
+
+    #[test]
+    fn test_volume_bounds_are_enforced() {
+        let min_db = DEFAULT_SOFTWARE_MIN_DB;
+
+        // Boost is clamped to the global ceiling even above 100%.
+        assert_eq!(alsamixer_percentage_to_db(200.0, min_db), MAX_VOLUME_DB);
+
+        // Zero and non-finite percentages are treated as silence.
+        assert_eq!(alsamixer_percentage_to_db(0.0, min_db), MIN_VOLUME_DB);
+        assert_eq!(alsamixer_percentage_to_db(f64::NAN, min_db), MIN_VOLUME_DB);
+
+        // Non-finite / bottom-of-range dB values report 0%.
+        assert_eq!(alsamixer_db_to_percentage(f64::NAN, min_db), 0.0);
+        assert_eq!(alsamixer_db_to_percentage(MIN_VOLUME_DB, min_db), 0.0);
     }
 }

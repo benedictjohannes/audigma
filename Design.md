@@ -501,7 +501,7 @@ order = 5
 ```text
 audigma run [-c CONFIG]
 audigma stop
-audigma play -i INPUT [-d DEVICE] [-p PRESET] [-v VOLUME_DB] [-o KEY=VAL...] [-c CONFIG] [--json]
+audigma play -i INPUT [-d DEVICE] [-p PRESET] [-v VOLUME] [-O KEY=VAL...] [-c CONFIG] [--json]
 audigma convert -i INPUT -o OUTPUT [-c CONFIG]
 audigma benchmark [-i INPUT] [-c CONFIG] [--json]
 audigma probe [--backend alsa|pipewire] [--json]
@@ -517,7 +517,7 @@ audigma reload
 audigma doctor [--fix] [--json]
 ```
 
-- **`audigma play`:** Direct file/stream playback to an exclusive ALSA hardware endpoint. Supports immediate ergonomic overrides (`-d device`, `-p preset`, `-v volume_db`) and generic ad-hoc configuration overrides (`-o key=value`, e.g. `-o output.transport=dop -o output.buffer_ms=25`) which take precedence over the specified or default `config.toml`.
+- **`audigma play`:** Direct file/stream playback to an exclusive ALSA hardware endpoint. Supports immediate ergonomic overrides (`-d device`, `-p preset`, `-v volume` in dB or percentage with the same syntax as `audigma set volume`; `-v` is applied as the user-volume component layered on top of `[gain] preamp_db`, not as a preamp replacement) and generic ad-hoc configuration overrides (`-O key=value`, e.g. `-O output.transport=dop -O output.buffer_ms=25`) which take precedence over the specified or default `config.toml`.
 - **`audigma run` & `audigma stop`:** `run` executes the live audio pipeline in the foreground (intended for `systemd --user` service or direct terminal invocation). `audigma stop` connects to the local control socket and requests an orderly shutdown: ramping PCM gain to zero, draining filter group delays, emitting the balanced DSD idle sequence, releasing the D-Bus `ReserveDevice1` device lock so PipeWire/WirePlumber immediately reclaims the DAC, and terminating the daemon.
 - **`audigma configure` (`audigma-configurator`):** Interactive TUI (`--tui`, default) or temporary localhost Web wizard (`--web`, bound to `127.0.0.1:<port>` with a one-time session token that exits cleanly on save). Walks the user through selecting an output path (PipeWire PCM upsampler vs. Exclusive ALSA PCM/DSD), choosing a rate family policy (`"source"` vs. `"44100"` / `"48000"`), running a quick CPU benchmark, previewing headroom/latency, and writing `config.toml` + optional WirePlumber/systemd user snippets.
 - **`audigma doctor [--fix]` (`audigma-doctor`):** Inspects the host OS audio stack and diagnoses runtime issues:
