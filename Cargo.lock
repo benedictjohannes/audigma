@@ -142,6 +142,7 @@ dependencies = [
  "libc",
  "rtrb",
  "serde",
+ "smallvec",
  "thiserror",
 ]
 

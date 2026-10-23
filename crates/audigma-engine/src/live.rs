@@ -13,7 +13,7 @@
 //! - Monitored live telemetry exported via shared state.
 
 use crate::asrc::{AdaptiveClockDriftController, ClockDriftConfig};
-use crate::lifecycle::{BlockAction, IdleCarrierFormat, LifecycleController};
+use crate::lifecycle::{BlockAction, IdleCarrierFormat, LifecycleController, LifecycleState};
 use crate::traits::{AudioInput, AudioOutput, EngineError};
 use crate::worker::{ChannelWorkerPool, TargetDsdConfig};
 use audigma_dsp::config::{SampleFormat, TargetRateSpec};
@@ -24,21 +24,186 @@ use audigma_dsp::rates::PcmRateHz;
 use audigma_format::dop::{DopContainerFormat, DopPacker};
 use audigma_format::dsd_u32::{STEREO_DSD_U32_FRAME_BYTES, pack_stereo_dsd_u32_be};
 use audigma_settings::{OutputTransport, ResolvedPipelinePlan, Settings};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use smallvec::SmallVec;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// Number of channel slices stored inline by the live loop's scratch lists.
+///
+/// Typical 2/6/8-channel streams stay entirely on the stack; larger counts spill
+/// to the heap rather than imposing a hard channel limit.
+const INLINE_CHANNELS: usize = 16;
+
+type ChannelMutSlices<'a> = SmallVec<[&'a mut [f64]; INLINE_CHANNELS]>;
+type ChannelSlices<'a> = SmallVec<[&'a [f64]; INLINE_CHANNELS]>;
+
+/// Sentinel stored in `volume_percent` when the user selected a dB value instead
+/// of a percentage. `NaN` is never a valid percentage.
+const PERCENT_UNSET_BITS: u64 = f64::NAN.to_bits();
+
+/// Sentinel stored in `disconnect_duration_ms` when the daemon is connected.
+const DISCONNECT_NONE: u64 = u64::MAX;
+
+#[inline]
+fn load_f64(value: &AtomicU64) -> f64 {
+    f64::from_bits(value.load(Ordering::Relaxed))
+}
+
+#[inline]
+fn store_f64(value: &AtomicU64, v: f64) {
+    value.store(v.to_bits(), Ordering::Relaxed);
+}
+
+/// High-level daemon state exposed over telemetry and the control socket.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum DaemonState {
+    Stopped,
+    WaitingForDevice,
+    Preparing,
+    Priming,
+    Running,
+    DrainingMuting,
+    Reconfiguring,
+    Recovering,
+    DeviceLost,
+}
+
+impl DaemonState {
+    /// Stable human/JSON-facing name for this state.
+    #[inline]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stopped => "Stopped",
+            Self::WaitingForDevice => "WaitingForDevice",
+            Self::Preparing => "Preparing",
+            Self::Priming => "Priming",
+            Self::Running => "Running",
+            Self::DrainingMuting => "DrainingMuting",
+            Self::Reconfiguring => "Reconfiguring",
+            Self::Recovering => "Recovering",
+            Self::DeviceLost => "DeviceLost",
+        }
+    }
+
+    #[inline]
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::WaitingForDevice,
+            2 => Self::Preparing,
+            3 => Self::Priming,
+            4 => Self::Running,
+            5 => Self::DrainingMuting,
+            6 => Self::Reconfiguring,
+            7 => Self::Recovering,
+            8 => Self::DeviceLost,
+            _ => Self::Stopped,
+        }
+    }
+}
+
+impl std::fmt::Display for DaemonState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<LifecycleState> for DaemonState {
+    fn from(state: LifecycleState) -> Self {
+        match state {
+            LifecycleState::Stopped => Self::Stopped,
+            LifecycleState::Preparing => Self::Preparing,
+            LifecycleState::Priming => Self::Priming,
+            LifecycleState::Running => Self::Running,
+            LifecycleState::DrainingMuting => Self::DrainingMuting,
+            LifecycleState::Reconfiguring => Self::Reconfiguring,
+            LifecycleState::Recovering => Self::Recovering,
+            LifecycleState::DeviceLost => Self::DeviceLost,
+        }
+    }
+}
+
+/// Active volume control strategy for the live daemon.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DaemonVolumeMode {
+    Software,
+    Hardware,
+    None,
+}
+
+impl DaemonVolumeMode {
+    #[inline]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Software => "software",
+            Self::Hardware => "hardware",
+            Self::None => "none",
+        }
+    }
+
+    #[inline]
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Hardware,
+            2 => Self::None,
+            _ => Self::Software,
+        }
+    }
+}
+
+impl std::fmt::Display for DaemonVolumeMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Active output transport format for the live daemon.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DaemonOutputFormat {
+    Pcm,
+    Dsd,
+}
+
+impl DaemonOutputFormat {
+    #[inline]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pcm => "pcm",
+            Self::Dsd => "dsd",
+        }
+    }
+
+    #[inline]
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Dsd,
+            _ => Self::Pcm,
+        }
+    }
+}
+
+impl std::fmt::Display for DaemonOutputFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 /// Live engine runtime telemetry snapshot.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DaemonTelemetry {
-    pub state: String,
+    pub state: DaemonState,
     pub input_rate_hz: u32,
-    pub output_format: String,
+    pub output_format: DaemonOutputFormat,
     pub output_rate_hz: u32,
     pub preset: String,
     pub volume_db: f64,
     pub volume_percent: f64,
-    pub volume_mode: String,
+    pub volume_mode: DaemonVolumeMode,
     pub is_muted: bool,
     pub preamp_db: f64,
     pub total_input_frames: u64,
@@ -55,59 +220,81 @@ pub struct DaemonTelemetry {
     pub disconnect_duration_ms: Option<u64>,
 }
 
+/// Lock-free telemetry storage shared with the IPC thread.
+///
+/// The live audio loop only ever touches atomics here. The one remaining mutex
+/// guards the device target string, which is written by the daemon supervisor
+/// and read by the IPC thread, never by the streaming loop.
+struct TelemetryState {
+    state: AtomicU8,
+    input_rate_hz: AtomicU32,
+    output_format: AtomicU8,
+    output_rate_hz: AtomicU32,
+    preset: String,
+    preamp_db: AtomicU64,
+    volume_db: AtomicU64,
+    volume_percent: AtomicU64,
+    total_input_frames: AtomicU64,
+    total_output_frames: AtomicU64,
+    queue_fill_pct: AtomicU64,
+    drift_ppm: AtomicU64,
+    overload_count: AtomicU64,
+    xrun_count: AtomicU64,
+    uptime_secs: AtomicU64,
+    device_target: Mutex<Option<String>>,
+    disconnect_duration_ms: AtomicU64,
+}
+
 /// Shared control and telemetry state handle for the live daemon.
 #[derive(Clone)]
 pub struct DaemonControlHandle {
     pub running: Arc<AtomicBool>,
     pub generation: Arc<AtomicU64>,
-    pub volume_db: Arc<Mutex<f64>>,
-    pub volume_percent: Arc<Mutex<Option<f64>>>,
-    pub volume_mode: Arc<Mutex<String>>,
-    pub is_muted: Arc<AtomicBool>,
-    pub target_preset: Arc<Mutex<Option<String>>>,
-    pub telemetry: Arc<Mutex<DaemonTelemetry>>,
+    volume_db: Arc<AtomicU64>,
+    volume_percent: Arc<AtomicU64>,
+    volume_mode: Arc<AtomicU8>,
+    is_muted: Arc<AtomicBool>,
+    target_preset: Arc<Mutex<Option<String>>>,
+    telemetry: Arc<TelemetryState>,
 }
 
 impl DaemonControlHandle {
     pub fn new(
         input_rate: u32,
-        output_format: &str,
+        output_format: DaemonOutputFormat,
         output_rate: u32,
         preset: &str,
         preamp_db: f64,
     ) -> Self {
-        let telemetry = DaemonTelemetry {
-            state: "Stopped".to_string(),
-            input_rate_hz: input_rate,
-            output_format: output_format.to_string(),
-            output_rate_hz: output_rate,
+        let telemetry = TelemetryState {
+            state: AtomicU8::new(DaemonState::Stopped as u8),
+            input_rate_hz: AtomicU32::new(input_rate),
+            output_format: AtomicU8::new(output_format as u8),
+            output_rate_hz: AtomicU32::new(output_rate),
             preset: preset.to_string(),
-            volume_db: 0.0,
-            volume_percent: 100.0,
-            volume_mode: "software".to_string(),
-            is_muted: false,
-            preamp_db,
-            total_input_frames: 0,
-            total_output_frames: 0,
-            queue_fill_pct: 0.0,
-            drift_ppm: 0.0,
-            overload_count: 0,
-            xrun_count: 0,
-            generation: 1,
-            uptime_secs: 0,
-            device_target: None,
-            disconnect_duration_ms: None,
+            preamp_db: AtomicU64::new(preamp_db.to_bits()),
+            volume_db: AtomicU64::new(0.0f64.to_bits()),
+            volume_percent: AtomicU64::new(100.0f64.to_bits()),
+            total_input_frames: AtomicU64::new(0),
+            total_output_frames: AtomicU64::new(0),
+            queue_fill_pct: AtomicU64::new(0.0f64.to_bits()),
+            drift_ppm: AtomicU64::new(0.0f64.to_bits()),
+            overload_count: AtomicU64::new(0),
+            xrun_count: AtomicU64::new(0),
+            uptime_secs: AtomicU64::new(0),
+            device_target: Mutex::new(None),
+            disconnect_duration_ms: AtomicU64::new(DISCONNECT_NONE),
         };
 
         Self {
             running: Arc::new(AtomicBool::new(true)),
             generation: Arc::new(AtomicU64::new(1)),
-            volume_db: Arc::new(Mutex::new(0.0)),
-            volume_percent: Arc::new(Mutex::new(Some(100.0))),
-            volume_mode: Arc::new(Mutex::new("software".to_string())),
+            volume_db: Arc::new(AtomicU64::new(0.0f64.to_bits())),
+            volume_percent: Arc::new(AtomicU64::new(100.0f64.to_bits())),
+            volume_mode: Arc::new(AtomicU8::new(DaemonVolumeMode::Software as u8)),
             is_muted: Arc::new(AtomicBool::new(false)),
             target_preset: Arc::new(Mutex::new(None)),
-            telemetry: Arc::new(Mutex::new(telemetry)),
+            telemetry: Arc::new(telemetry),
         }
     }
 
@@ -123,12 +310,13 @@ impl DaemonControlHandle {
 
     #[inline]
     pub fn get_volume(&self) -> f64 {
-        *self.volume_db.lock().unwrap()
+        load_f64(&self.volume_db)
     }
 
     #[inline]
     pub fn get_volume_percent(&self) -> Option<f64> {
-        *self.volume_percent.lock().unwrap()
+        let pct = load_f64(&self.volume_percent);
+        (!pct.is_nan()).then_some(pct)
     }
 
     /// Sets the live volume in dB, clamped to the representable range.
@@ -142,40 +330,37 @@ impl DaemonControlHandle {
         } else {
             db.clamp(audigma_dsp::MIN_VOLUME_DB, audigma_dsp::MAX_VOLUME_DB)
         };
-        let mut vol = self.volume_db.lock().unwrap();
-        *vol = db;
-        let mut p = self.volume_percent.lock().unwrap();
-        *p = None;
-        let mut telem = self.telemetry.lock().unwrap();
-        telem.volume_db = db;
+        store_f64(&self.volume_db, db);
+        self.volume_percent
+            .store(PERCENT_UNSET_BITS, Ordering::Relaxed);
+        store_f64(&self.telemetry.volume_db, db);
     }
 
     #[inline]
     pub fn set_volume_percent(&self, pct: f64) {
-        let mut p = self.volume_percent.lock().unwrap();
-        *p = Some(pct);
-        let mut telem = self.telemetry.lock().unwrap();
-        telem.volume_percent = pct;
+        if pct.is_nan() {
+            self.volume_percent
+                .store(PERCENT_UNSET_BITS, Ordering::Relaxed);
+            return;
+        }
+        store_f64(&self.volume_percent, pct);
+        store_f64(&self.telemetry.volume_percent, pct);
     }
 
     #[inline]
     pub fn sync_telemetry(&self, db: f64, pct: f64) {
-        let mut telem = self.telemetry.lock().unwrap();
-        telem.volume_db = db;
-        telem.volume_percent = pct;
+        store_f64(&self.telemetry.volume_db, db);
+        store_f64(&self.telemetry.volume_percent, pct);
     }
 
     #[inline]
-    pub fn get_volume_mode(&self) -> String {
-        self.volume_mode.lock().unwrap().clone()
+    pub fn get_volume_mode(&self) -> DaemonVolumeMode {
+        DaemonVolumeMode::from_u8(self.volume_mode.load(Ordering::Relaxed))
     }
 
     #[inline]
-    pub fn set_volume_mode(&self, mode: &str) {
-        let mut m = self.volume_mode.lock().unwrap();
-        *m = mode.to_string();
-        let mut telem = self.telemetry.lock().unwrap();
-        telem.volume_mode = mode.to_string();
+    pub fn set_volume_mode(&self, mode: DaemonVolumeMode) {
+        self.volume_mode.store(mode as u8, Ordering::Relaxed);
     }
 
     #[inline]
@@ -186,8 +371,6 @@ impl DaemonControlHandle {
     #[inline]
     pub fn set_muted(&self, muted: bool) {
         self.is_muted.store(muted, Ordering::SeqCst);
-        let mut telem = self.telemetry.lock().unwrap();
-        telem.is_muted = muted;
     }
 
     #[inline]
@@ -197,21 +380,111 @@ impl DaemonControlHandle {
     }
 
     #[inline]
-    pub fn get_telemetry(&self) -> DaemonTelemetry {
-        self.telemetry.lock().unwrap().clone()
+    pub fn state(&self) -> DaemonState {
+        DaemonState::from_u8(self.telemetry.state.load(Ordering::Relaxed))
     }
 
     #[inline]
-    pub fn set_state(&self, state: &str) {
-        let mut telem = self.telemetry.lock().unwrap();
-        telem.state = state.to_string();
+    pub fn set_state(&self, state: DaemonState) {
+        self.telemetry.state.store(state as u8, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn set_lifecycle_state(&self, state: LifecycleState) {
+        self.set_state(state.into());
+    }
+
+    /// Returns a consistent snapshot of the current daemon telemetry.
+    #[inline]
+    pub fn get_telemetry(&self) -> DaemonTelemetry {
+        let device_target = self.telemetry.device_target.lock().unwrap().clone();
+        let disconnect_duration_ms = match self
+            .telemetry
+            .disconnect_duration_ms
+            .load(Ordering::Relaxed)
+        {
+            DISCONNECT_NONE => None,
+            ms => Some(ms),
+        };
+
+        DaemonTelemetry {
+            state: self.state(),
+            input_rate_hz: self.telemetry.input_rate_hz.load(Ordering::Relaxed),
+            output_format: DaemonOutputFormat::from_u8(
+                self.telemetry.output_format.load(Ordering::Relaxed),
+            ),
+            output_rate_hz: self.telemetry.output_rate_hz.load(Ordering::Relaxed),
+            preset: self.telemetry.preset.clone(),
+            volume_db: load_f64(&self.telemetry.volume_db),
+            volume_percent: load_f64(&self.telemetry.volume_percent),
+            volume_mode: self.get_volume_mode(),
+            is_muted: self.is_muted(),
+            preamp_db: load_f64(&self.telemetry.preamp_db),
+            total_input_frames: self.telemetry.total_input_frames.load(Ordering::Relaxed),
+            total_output_frames: self.telemetry.total_output_frames.load(Ordering::Relaxed),
+            queue_fill_pct: load_f64(&self.telemetry.queue_fill_pct),
+            drift_ppm: load_f64(&self.telemetry.drift_ppm),
+            overload_count: self.telemetry.overload_count.load(Ordering::Relaxed),
+            xrun_count: self.telemetry.xrun_count.load(Ordering::Relaxed),
+            generation: self.generation.load(Ordering::Relaxed),
+            uptime_secs: self.telemetry.uptime_secs.load(Ordering::Relaxed),
+            device_target,
+            disconnect_duration_ms,
+        }
     }
 
     #[inline]
     pub fn set_disconnect_info(&self, target: Option<String>, duration_ms: Option<u64>) {
-        let mut telem = self.telemetry.lock().unwrap();
-        telem.device_target = target;
-        telem.disconnect_duration_ms = duration_ms;
+        *self.telemetry.device_target.lock().unwrap() = target;
+        self.telemetry
+            .disconnect_duration_ms
+            .store(duration_ms.unwrap_or(DISCONNECT_NONE), Ordering::Relaxed);
+    }
+
+    /// Updates the input/output stream rates and target format after a reconfiguration.
+    #[inline]
+    pub fn set_stream_config(
+        &self,
+        input_rate_hz: u32,
+        output_format: DaemonOutputFormat,
+        output_rate_hz: u32,
+    ) {
+        self.telemetry
+            .input_rate_hz
+            .store(input_rate_hz, Ordering::Relaxed);
+        self.telemetry
+            .output_format
+            .store(output_format as u8, Ordering::Relaxed);
+        self.telemetry
+            .output_rate_hz
+            .store(output_rate_hz, Ordering::Relaxed);
+    }
+
+    /// Updates runtime counters without taking any locks.
+    #[inline]
+    pub fn update_runtime_stats(
+        &self,
+        total_input_frames: u64,
+        total_output_frames: u64,
+        overload_count: u64,
+        queue_fill_pct: Option<f64>,
+        uptime_secs: u64,
+    ) {
+        self.telemetry
+            .total_input_frames
+            .store(total_input_frames, Ordering::Relaxed);
+        self.telemetry
+            .total_output_frames
+            .store(total_output_frames, Ordering::Relaxed);
+        self.telemetry
+            .overload_count
+            .store(overload_count, Ordering::Relaxed);
+        if let Some(pct) = queue_fill_pct {
+            store_f64(&self.telemetry.queue_fill_pct, pct);
+        }
+        self.telemetry
+            .uptime_secs
+            .store(uptime_secs, Ordering::Relaxed);
     }
 }
 
@@ -465,6 +738,24 @@ impl LivePipeline {
         let staging_len = (cascade_tile_len * 4 * num_channels.max(2)).max(16384);
         let mut transport_staging = vec![0u8; staging_len];
 
+        // Pre-allocate the high-rate PCM output staging buffer so the streaming
+        // loop never allocates per tile.
+        let pcm_bytes_per_sample = match pcm_sample_format {
+            SampleFormat::S16Le => 2,
+            SampleFormat::S24Le | SampleFormat::S24_3Le | SampleFormat::S32Le => {
+                if pcm_sample_format == SampleFormat::S24_3Le {
+                    3
+                } else {
+                    4
+                }
+            }
+            SampleFormat::F32 => 4,
+            SampleFormat::F64 => 8,
+            _ => 4,
+        };
+        let mut pcm_staging =
+            Vec::with_capacity(cascade_tile_len * pcm_bytes_per_sample * num_channels);
+
         let start_time = Instant::now();
         let mut total_input_frames = 0u64;
         let mut total_output_frames = 0u64;
@@ -480,10 +771,8 @@ impl LivePipeline {
         let base_preamp = self.plan.dsp_config.preamp_db;
         let profile_headroom = self.plan.dsp_config.profile_headroom_db;
 
-        {
-            let mut telem = control.telemetry.lock().unwrap();
-            telem.state = format!("{:?}", lifecycle.state());
-        }
+        let mut reported_state = lifecycle.state();
+        control.set_lifecycle_state(reported_state);
 
         let mut last_hw_vol: Option<f64> = None;
         let mut last_hw_mute: Option<bool> = None;
@@ -518,7 +807,7 @@ impl LivePipeline {
                 }
                 TILE_BASEBAND_FRAMES
             } else {
-                let mut slices: Vec<&mut [f64]> =
+                let mut slices: ChannelMutSlices<'_> =
                     in_channels.iter_mut().map(|v| v.as_mut_slice()).collect();
                 input.read_channels(&mut slices)?
             };
@@ -596,7 +885,7 @@ impl LivePipeline {
 
             let (target_db, resolved_pct) = match cur_pct {
                 Some(pct) => {
-                    let min_db = if vol_mode.as_str() == "hardware" {
+                    let min_db = if vol_mode == DaemonVolumeMode::Hardware {
                         hw_bridge
                             .as_ref()
                             .and_then(|b| b.get_db_range())
@@ -610,7 +899,7 @@ impl LivePipeline {
                 }
                 None => {
                     let db = control.get_volume();
-                    let min_db = if vol_mode.as_str() == "hardware" {
+                    let min_db = if vol_mode == DaemonVolumeMode::Hardware {
                         hw_bridge
                             .as_ref()
                             .and_then(|b| b.get_db_range())
@@ -626,7 +915,7 @@ impl LivePipeline {
             control.sync_telemetry(target_db, resolved_pct);
 
             // Synchronize hardware volume if bridge is present and mode is hardware
-            if vol_mode.as_str() == "hardware" {
+            if vol_mode == DaemonVolumeMode::Hardware {
                 if let Some(ref mut bridge) = hw_bridge {
                     if last_hw_vol != Some(target_db) {
                         let _ = bridge.set_volume_db(target_db);
@@ -639,12 +928,12 @@ impl LivePipeline {
                 }
             }
 
-            let user_vol = match vol_mode.as_str() {
-                "hardware" | "none" => 0.0,
-                _ => target_db,
+            let user_vol = match vol_mode {
+                DaemonVolumeMode::Hardware | DaemonVolumeMode::None => 0.0,
+                DaemonVolumeMode::Software => target_db,
             };
             let linear_gain =
-                if (is_muted && vol_mode.as_str() != "hardware") || target_db <= -119.0 {
+                if (is_muted && vol_mode != DaemonVolumeMode::Hardware) || target_db <= -119.0 {
                     0.0
                 } else {
                     let total_gain_db = base_preamp + profile_headroom + user_vol;
@@ -652,11 +941,12 @@ impl LivePipeline {
                 };
 
             // Apply pre-SRC gain and lifecycle cosine ramping
-            let mut active_slices: Vec<&mut [f64]> = in_channels
+            let mut active_slices: ChannelMutSlices<'_> = in_channels
                 .iter_mut()
                 .map(|v| &mut v[..frames_read])
                 .collect();
             let action = lifecycle.process_input_channels(&mut active_slices);
+            drop(active_slices);
             for ch in in_channels.iter_mut() {
                 for sample in ch.iter_mut().take(frames_read) {
                     *sample *= linear_gain;
@@ -708,7 +998,7 @@ impl LivePipeline {
                 let tile = (proc_len - offset).min(TILE_BASEBAND_FRAMES);
                 let req_out = tile * mult;
 
-                let tile_slices: Vec<&[f64]> = if !asrc_resamplers.is_empty() {
+                let tile_slices: ChannelSlices<'_> = if !asrc_resamplers.is_empty() {
                     src_out_channels
                         .iter()
                         .map(|ch| &ch[offset..offset + tile])
@@ -799,31 +1089,17 @@ impl LivePipeline {
                     // High-rate PCM output. Quantize to the configured target sample
                     // format. Writing f32 bit patterns into an integer ALSA stream
                     // previously caused extreme clipping.
-                    let bytes_per_sample = match pcm_sample_format {
-                        SampleFormat::S16Le => 2,
-                        SampleFormat::S24Le | SampleFormat::S24_3Le | SampleFormat::S32Le => {
-                            if pcm_sample_format == SampleFormat::S24_3Le {
-                                3
-                            } else {
-                                4
-                            }
-                        }
-                        SampleFormat::F32 => 4,
-                        SampleFormat::F64 => 8,
-                        _ => 4,
-                    };
-                    let mut pcm_bytes =
-                        Vec::with_capacity(req_out * bytes_per_sample * num_channels);
+                    pcm_staging.clear();
                     for i in 0..req_out {
                         for c in 0..num_channels {
                             let out_c = worker_pool.channel_pcm(c);
                             let sample = out_c[i];
                             match pcm_sample_format {
                                 SampleFormat::F32 => {
-                                    pcm_bytes.extend_from_slice(&(sample as f32).to_le_bytes());
+                                    pcm_staging.extend_from_slice(&(sample as f32).to_le_bytes());
                                 }
                                 SampleFormat::F64 => {
-                                    pcm_bytes.extend_from_slice(&sample.to_le_bytes());
+                                    pcm_staging.extend_from_slice(&sample.to_le_bytes());
                                 }
                                 SampleFormat::S16Le => {
                                     let d = if c < pcm_dithers.len() {
@@ -833,7 +1109,7 @@ impl LivePipeline {
                                     };
                                     let q = (sample * 32767.0 + d).clamp(-32768.0, 32767.0).round()
                                         as i16;
-                                    pcm_bytes.extend_from_slice(&q.to_le_bytes());
+                                    pcm_staging.extend_from_slice(&q.to_le_bytes());
                                 }
                                 SampleFormat::S24Le => {
                                     let d = if c < pcm_dithers.len() {
@@ -844,7 +1120,7 @@ impl LivePipeline {
                                     let q = (sample * 8388607.0 + d)
                                         .clamp(-8388608.0, 8388607.0)
                                         .round() as i32;
-                                    pcm_bytes.extend_from_slice(&q.to_le_bytes());
+                                    pcm_staging.extend_from_slice(&q.to_le_bytes());
                                 }
                                 SampleFormat::S24_3Le => {
                                     let d = if c < pcm_dithers.len() {
@@ -855,9 +1131,9 @@ impl LivePipeline {
                                     let q = (sample * 8388607.0 + d)
                                         .clamp(-8388608.0, 8388607.0)
                                         .round() as i32;
-                                    pcm_bytes.push((q & 0xFF) as u8);
-                                    pcm_bytes.push(((q >> 8) & 0xFF) as u8);
-                                    pcm_bytes.push(((q >> 16) & 0xFF) as u8);
+                                    pcm_staging.push((q & 0xFF) as u8);
+                                    pcm_staging.push(((q >> 8) & 0xFF) as u8);
+                                    pcm_staging.push(((q >> 16) & 0xFF) as u8);
                                 }
                                 SampleFormat::S32Le => {
                                     let d = if c < pcm_dithers.len() {
@@ -868,15 +1144,15 @@ impl LivePipeline {
                                     let q = (sample * 2147483647.0 + d)
                                         .clamp(-2147483648.0, 2147483647.0)
                                         .round() as i32;
-                                    pcm_bytes.extend_from_slice(&q.to_le_bytes());
+                                    pcm_staging.extend_from_slice(&q.to_le_bytes());
                                 }
                                 _ => {
-                                    pcm_bytes.extend_from_slice(&(sample as f32).to_le_bytes());
+                                    pcm_staging.extend_from_slice(&(sample as f32).to_le_bytes());
                                 }
                             }
                         }
                     }
-                    output.write_all(&pcm_bytes).map_err(|e| {
+                    output.write_all(&pcm_staging).map_err(|e| {
                         let code = e.raw_os_error().unwrap_or(0);
                         if e.kind() == std::io::ErrorKind::BrokenPipe
                             || code == libc::ENODEV
@@ -900,26 +1176,27 @@ impl LivePipeline {
 
             // Periodic telemetry update
             if total_input_frames % 8192 < frames_read as u64 {
-                let mut telem = control.telemetry.lock().unwrap();
-                telem.state = format!("{:?}", lifecycle.state());
-                telem.total_input_frames = total_input_frames;
-                telem.total_output_frames = total_output_frames;
-                telem.overload_count = overload_events;
-                telem.uptime_secs = start_time.elapsed().as_secs();
-                if let Some((fill, cap)) = input.buffer_occupancy() {
-                    if cap > 0 {
-                        telem.queue_fill_pct = fill as f64 / cap as f64 * 100.0;
-                    }
+                let state = lifecycle.state();
+                if state != reported_state {
+                    control.set_lifecycle_state(state);
+                    reported_state = state;
                 }
+                let queue_fill_pct = input
+                    .buffer_occupancy()
+                    .and_then(|(fill, cap)| (cap > 0).then(|| fill as f64 / cap as f64 * 100.0));
+                control.update_runtime_stats(
+                    total_input_frames,
+                    total_output_frames,
+                    overload_events,
+                    queue_fill_pct,
+                    start_time.elapsed().as_secs(),
+                );
             }
         }
 
         // Clean planned stop
         lifecycle.request_stop();
-        {
-            let mut telem = control.telemetry.lock().unwrap();
-            telem.state = "DrainingMuting".to_string();
-        }
+        control.set_state(DaemonState::DrainingMuting);
 
         // Emit silence/tail frames to guarantee zero clicks
         let tail_bytes = 1024
@@ -933,10 +1210,7 @@ impl LivePipeline {
         let _ = output.write_all(&tail_buf);
         let _ = output.flush();
 
-        {
-            let mut telem = control.telemetry.lock().unwrap();
-            telem.state = "Stopped".to_string();
-        }
+        control.set_state(DaemonState::Stopped);
 
         Ok(StreamExitReason::Stopped)
     }

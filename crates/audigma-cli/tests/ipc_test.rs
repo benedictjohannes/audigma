@@ -1,19 +1,20 @@
 use audigma_cli::ipc::{ControlClient, ControlServer, IpcRequest, IpcResponse};
-use audigma_engine::DaemonControlHandle;
+use audigma_engine::{DaemonControlHandle, DaemonOutputFormat};
 
 #[test]
 fn test_ipc_socket_server_client_roundtrip() {
     let temp_dir = std::env::temp_dir();
     let socket_path = temp_dir.join(format!("audigma-test-sock-{}.sock", std::process::id()));
 
-    let control = DaemonControlHandle::new(48000, "pcm", 192000, "balanced", -3.0);
+    let control =
+        DaemonControlHandle::new(48000, DaemonOutputFormat::Pcm, 192000, "balanced", -3.0);
     let server = ControlServer::start(socket_path.clone(), control.clone()).expect("Start server");
 
     // 1. Query initial status
     let resp = ControlClient::send(&socket_path, IpcRequest::GetStatus).expect("Get status");
     if let IpcResponse::Telemetry(telem) = resp {
         assert_eq!(telem.input_rate_hz, 48000);
-        assert_eq!(telem.output_format, "pcm");
+        assert_eq!(telem.output_format, DaemonOutputFormat::Pcm);
         assert_eq!(telem.preamp_db, -3.0);
         assert_eq!(telem.volume_db, 0.0);
     } else {

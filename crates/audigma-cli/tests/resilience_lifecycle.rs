@@ -1,7 +1,7 @@
 //! Integration tests for output device resilience and hotplug lifecycle transitions (`Plan.md Step 5.2`).
 
 use audigma_dsp::rates::PcmRateHz;
-use audigma_engine::live::{DaemonControlHandle, LivePipeline};
+use audigma_engine::live::{DaemonControlHandle, DaemonOutputFormat, DaemonState, LivePipeline};
 use audigma_engine::traits::{AudioOutput, EngineError, MockAudioInput};
 use audigma_format::AudioStreamInfo;
 use audigma_io::alsa::{AlsaDeviceWatcher, wait_for_alsa_device};
@@ -72,7 +72,8 @@ fn test_disconnecting_output_sink_triggers_device_disconnected_error() {
 
     // Output will disconnect after ~2048 bytes
     let mut mock_out = DisconnectingOutputSink::new(2048);
-    let control = DaemonControlHandle::new(44100, "Dsd", 11289600, "balanced", 0.0);
+    let control =
+        DaemonControlHandle::new(44100, DaemonOutputFormat::Dsd, 11289600, "balanced", 0.0);
 
     let res = pipeline.run_streaming(&mut mock_in, &mut mock_out, control);
     assert!(res.is_err());
@@ -141,17 +142,19 @@ fn test_wait_for_alsa_device_timeout() {
 
 #[test]
 fn test_telemetry_extended_fields_serializable() {
-    let control = DaemonControlHandle::new(48000, "pcm", 96000, "balanced", 0.0);
-    control.set_state("WaitingForDevice");
+    let control = DaemonControlHandle::new(48000, DaemonOutputFormat::Pcm, 96000, "balanced", 0.0);
+    control.set_state(DaemonState::WaitingForDevice);
     control.set_disconnect_info(Some("hw:CARD=JA11,DEV=0".to_string()), Some(1500));
 
     let telem = control.get_telemetry();
-    assert_eq!(telem.state, "WaitingForDevice");
+    assert_eq!(telem.state, DaemonState::WaitingForDevice);
     assert_eq!(telem.device_target.as_deref(), Some("hw:CARD=JA11,DEV=0"));
     assert_eq!(telem.disconnect_duration_ms, Some(1500));
 
     let json_str = serde_json::to_string(&telem).unwrap();
     assert!(json_str.contains("\"state\":\"WaitingForDevice\""));
+    assert!(json_str.contains("\"output_format\":\"pcm\""));
+    assert!(json_str.contains("\"volume_mode\":\"software\""));
     assert!(json_str.contains("\"device_target\":\"hw:CARD=JA11,DEV=0\""));
     assert!(json_str.contains("\"disconnect_duration_ms\":1500"));
 }

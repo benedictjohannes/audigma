@@ -8,7 +8,9 @@ use crate::ipc::{
 use audigma_dsp::config::{SampleFormat, TargetRateSpec};
 use audigma_dsp::presets::{ALL_PRESETS, by_name};
 use audigma_dsp::rates::PcmRateHz;
-use audigma_engine::live::{DaemonControlHandle, LivePipeline};
+use audigma_engine::live::{
+    DaemonControlHandle, DaemonOutputFormat, DaemonState, DaemonVolumeMode, LivePipeline,
+};
 use audigma_engine::traits::{AudioInput, AudioOutput, DecoderInput, EngineError};
 use audigma_engine::{
     ChannelWorkerPool, IdleCarrierFormat, LifecycleController, MockAudioInput, OfflinePipeline,
@@ -572,14 +574,14 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
         }
     };
 
-    let (out_fmt_str, out_rate_hz) = match target_spec {
-        TargetRateSpec::Dsd { bit_rate } => ("dsd".to_string(), bit_rate.get()),
-        TargetRateSpec::Pcm { rate, .. } => ("pcm".to_string(), rate.get()),
+    let (out_fmt, out_rate_hz) = match target_spec {
+        TargetRateSpec::Dsd { bit_rate } => (DaemonOutputFormat::Dsd, bit_rate.get()),
+        TargetRateSpec::Pcm { rate, .. } => (DaemonOutputFormat::Pcm, rate.get()),
     };
 
     let control = DaemonControlHandle::new(
         input_rate.get(),
-        &out_fmt_str,
+        out_fmt,
         out_rate_hz,
         match plan.dsp_config.preset {
             audigma_dsp::config::FilterPreset::Balanced => "balanced",
@@ -643,9 +645,9 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
     let active_vol_mode = match vol_control_mode {
         audigma_settings::VolumeControlMode::HardwareSoftwareFallback => {
             if hw_mixer.is_some() {
-                "hardware"
+                DaemonVolumeMode::Hardware
             } else {
-                "software"
+                DaemonVolumeMode::Software
             }
         }
         audigma_settings::VolumeControlMode::Hardware => {
@@ -654,10 +656,10 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
                     "  VolumeControl: Warning: 'hardware' volume requested but no mixer element found; digital gain locked at 0 dBFS"
                 );
             }
-            "hardware"
+            DaemonVolumeMode::Hardware
         }
-        audigma_settings::VolumeControlMode::Software => "software",
-        audigma_settings::VolumeControlMode::None => "none",
+        audigma_settings::VolumeControlMode::Software => DaemonVolumeMode::Software,
+        audigma_settings::VolumeControlMode::None => DaemonVolumeMode::None,
     };
     control.set_volume_mode(active_vol_mode);
     eprintln!(
@@ -681,7 +683,7 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
                 eprintln!(
                     "[INFO] audigma: waiting for output device '{target_device}' (device_wait_ms: {device_wait_ms}, keep_audio_sink_ms: {keep_audio_sink_ms})..."
                 );
-                control.set_state("WaitingForDevice");
+                control.set_state(DaemonState::WaitingForDevice);
                 control.set_disconnect_info(Some(target_device.clone()), Some(0));
 
                 let wait_start = Instant::now();
@@ -877,20 +879,11 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
                 input.set_active_rate(new_rate);
 
                 // Update telemetry
-                {
-                    let mut telem = control.telemetry.lock().unwrap();
-                    telem.input_rate_hz = new_rate.get();
-                    match new_target_spec {
-                        TargetRateSpec::Dsd { bit_rate } => {
-                            telem.output_format = "dsd".to_string();
-                            telem.output_rate_hz = bit_rate.get();
-                        }
-                        TargetRateSpec::Pcm { rate, .. } => {
-                            telem.output_format = "pcm".to_string();
-                            telem.output_rate_hz = rate.get();
-                        }
-                    }
-                }
+                let (output_format, output_rate_hz) = match new_target_spec {
+                    TargetRateSpec::Dsd { bit_rate } => (DaemonOutputFormat::Dsd, bit_rate.get()),
+                    TargetRateSpec::Pcm { rate, .. } => (DaemonOutputFormat::Pcm, rate.get()),
+                };
+                control.set_stream_config(new_rate.get(), output_format, output_rate_hz);
 
                 continue;
             }
@@ -905,7 +898,7 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
                     );
                     _reservation = None; // Release D-Bus reservation while device is gone
                 }
-                control.set_state("WaitingForDevice");
+                control.set_state(DaemonState::WaitingForDevice);
                 control.set_disconnect_info(Some(target_device.clone()), Some(0));
             }
 

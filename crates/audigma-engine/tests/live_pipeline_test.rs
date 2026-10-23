@@ -1,5 +1,5 @@
 use audigma_dsp::rates::PcmRateHz;
-use audigma_engine::live::{DaemonControlHandle, LivePipeline};
+use audigma_engine::live::{DaemonControlHandle, DaemonOutputFormat, DaemonState, LivePipeline};
 use audigma_engine::traits::{AudioInput, AudioOutput, MockAudioInput};
 use audigma_format::AudioStreamInfo;
 use audigma_settings::{OutputContainer, Settings};
@@ -36,7 +36,8 @@ fn test_live_pipeline_streaming_lifecycle() {
     let mut mock_in = MockAudioInput::new(info, vec![0.1; frames], vec![0.1; frames], false);
     let mut mock_out = TestOutputSink::default();
 
-    let control = DaemonControlHandle::new(44100, "Dsd", 11289600, "balanced", 0.0);
+    let control =
+        DaemonControlHandle::new(44100, DaemonOutputFormat::Dsd, 11289600, "balanced", 0.0);
     let ctrl_thread = control.clone();
 
     // Spawn runner on background thread
@@ -58,7 +59,7 @@ fn test_live_pipeline_streaming_lifecycle() {
     assert_eq!(res.unwrap(), audigma_engine::StreamExitReason::Stopped);
 
     let final_telem = control.get_telemetry();
-    assert_eq!(final_telem.state, "Stopped");
+    assert_eq!(final_telem.state, DaemonState::Stopped);
 }
 
 #[test]
@@ -74,7 +75,8 @@ fn test_live_pipeline_dynamic_sample_rate_switch() {
     let mut mock_in = MockAudioInput::new(info, vec![0.1; frames], vec![0.1; frames], false);
     let mut mock_out = TestOutputSink::default();
 
-    let control = DaemonControlHandle::new(44100, "Dsd", 11289600, "balanced", 0.0);
+    let control =
+        DaemonControlHandle::new(44100, DaemonOutputFormat::Dsd, 11289600, "balanced", 0.0);
 
     // Simulate an upstream rate change to 96 kHz
     mock_in.simulate_rate_change(r96);
@@ -136,7 +138,7 @@ pcm_rate_hz = 96000
     let mut mock_in = MockAudioInput::new_multichannel(info, ch_data, false);
     let mut mock_out = TestOutputSink::default();
 
-    let control = DaemonControlHandle::new(48000, "pcm", 96000, "balanced", 0.0);
+    let control = DaemonControlHandle::new(48000, DaemonOutputFormat::Pcm, 96000, "balanced", 0.0);
     let ctrl_thread = control.clone();
 
     let handle = std::thread::spawn(move || {

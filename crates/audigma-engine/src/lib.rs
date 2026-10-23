@@ -21,7 +21,10 @@ pub mod worker;
 
 pub use asrc::{AdaptiveClockDriftController, ClockDriftConfig, ClockDriftError};
 pub use lifecycle::{BlockAction, IdleCarrierFormat, LifecycleController, LifecycleState};
-pub use live::{DaemonControlHandle, DaemonTelemetry, LivePipeline, StreamExitReason};
+pub use live::{
+    DaemonControlHandle, DaemonOutputFormat, DaemonState, DaemonTelemetry, DaemonVolumeMode,
+    LivePipeline, StreamExitReason,
+};
 pub use peak::{Pass1PeakResult, measure_true_peak_pass1};
 pub use pipeline::{OfflinePipeline, OfflineReport};
 pub use queue::{AudioSpscQueue, DEFAULT_CHUNK_SAMPLES, TaggedChunk};
