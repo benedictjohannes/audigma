@@ -523,6 +523,10 @@ impl AudioOutput for AlsaAudioOutput {
     fn can_seek(&self) -> bool {
         false
     }
+
+    fn xrun_count(&self) -> u64 {
+        self.xrun_count
+    }
 }
 
 #[cfg(test)]

@@ -497,18 +497,22 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
     }
 
     // Set up Input Backend helper closure
+    let out_buf_ms = out_cfg.buffer_ms.unwrap_or(40);
+    let target_preroll_secs = (out_buf_ms as f64 / 1000.0 + 0.050).clamp(0.060, 0.500);
+
     let create_input_driver =
         |in_cfg: &audigma_settings::InputConfig| -> Result<Box<dyn AudioInput>, EngineError> {
             match in_cfg.backend {
                 #[cfg(feature = "pipewire")]
                 InputBackend::Pipewire => {
-                    let sink =
+                    let mut sink =
                         PipeWireVirtualSink::from_input_config(in_cfg, input_rate.get(), 128)
                             .map_err(|e| {
                                 EngineError::Pipeline(format!(
                                     "failed to bind PipeWire virtual sink: {e}"
                                 ))
                             })?;
+                    sink.set_preroll_secs(target_preroll_secs);
                     Ok(Box::new(sink))
                 }
                 InputBackend::Alsa => Err(EngineError::Pipeline(
@@ -875,8 +879,12 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
                 // Bump generation and update active rate on virtual sink
                 generation += 1;
                 control.generation.store(generation, Ordering::SeqCst);
+                control.inc_rate_switch();
                 input.set_generation(generation);
                 input.set_active_rate(new_rate);
+                // Re-assert the preroll cushion in case the output buffer was
+                // reconfigured for the new target rate.
+                input.set_preroll_secs(target_preroll_secs);
 
                 // Update telemetry
                 let (output_format, output_rate_hz) = match new_target_spec {
@@ -969,10 +977,32 @@ pub fn run_status(args: StatusArgs) -> Result<(), EngineError> {
                         "  Frames In / Out:     {} / {}",
                         telem.total_input_frames, telem.total_output_frames
                     );
-                    println!("  Queue Occupancy:     {:.1}%", telem.queue_fill_pct);
-                    println!("  ASRC Clock Drift:    {:.1} ppm", telem.drift_ppm);
+                    println!(
+                        "  Queue Occupancy:     {:.1}% ({:.1} ms)",
+                        telem.queue_fill_pct, telem.buffer_fill_ms
+                    );
+                    println!(
+                        "  Input Ring Chunks:   {} processed, {} dropped",
+                        telem.processed_chunks, telem.dropped_chunks
+                    );
+                    let fault_str = if telem.asrc_fault_active { " [FAULT ACTIVE]" } else { "" };
+                    println!(
+                        "  ASRC Clock Drift:    {:.1} ppm (starvations: {}, overruns: {}){fault_str}",
+                        telem.drift_ppm, telem.asrc_starvations, telem.asrc_overruns
+                    );
+                    println!(
+                        "  Pipeline Health:     {} empty polls, {} idle entries ({} tiles)",
+                        telem.empty_polls, telem.idle_entries, telem.idle_tiles
+                    );
+                    println!(
+                        "  DSP Tile Execution:  max {} µs, {} late tiles",
+                        telem.max_dsp_tile_us, telem.late_dsp_tiles
+                    );
                     println!("  Overload Events:     {}", telem.overload_count);
                     println!("  ALSA XRuns:          {}", telem.xrun_count);
+                    if telem.rate_switch_count > 0 {
+                        println!("  Rate Switches:       {}", telem.rate_switch_count);
+                    }
                 }
             }
             Ok(IpcResponse::Error(msg)) => {

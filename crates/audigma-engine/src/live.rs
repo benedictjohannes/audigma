@@ -12,7 +12,7 @@
 //! - Real-time thread priority acquisition with graceful fallback.
 //! - Monitored live telemetry exported via shared state.
 
-use crate::asrc::{AdaptiveClockDriftController, ClockDriftConfig};
+use crate::asrc::{AdaptiveClockDriftController, ClockDriftConfig, ClockDriftError};
 use crate::lifecycle::{BlockAction, IdleCarrierFormat, LifecycleController, LifecycleState};
 use crate::traits::{AudioInput, AudioOutput, EngineError};
 use crate::worker::{ChannelWorkerPool, TargetDsdConfig};
@@ -209,6 +209,8 @@ pub struct DaemonTelemetry {
     pub total_input_frames: u64,
     pub total_output_frames: u64,
     pub queue_fill_pct: f64,
+    #[serde(default)]
+    pub buffer_fill_ms: f64,
     pub drift_ppm: f64,
     pub overload_count: u64,
     pub xrun_count: u64,
@@ -218,6 +220,28 @@ pub struct DaemonTelemetry {
     pub device_target: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disconnect_duration_ms: Option<u64>,
+    #[serde(default)]
+    pub empty_polls: u64,
+    #[serde(default)]
+    pub idle_entries: u64,
+    #[serde(default)]
+    pub idle_tiles: u64,
+    #[serde(default)]
+    pub dropped_chunks: u64,
+    #[serde(default)]
+    pub processed_chunks: u64,
+    #[serde(default)]
+    pub asrc_starvations: u64,
+    #[serde(default)]
+    pub asrc_overruns: u64,
+    #[serde(default)]
+    pub asrc_fault_active: bool,
+    #[serde(default)]
+    pub rate_switch_count: u64,
+    #[serde(default)]
+    pub max_dsp_tile_us: u64,
+    #[serde(default)]
+    pub late_dsp_tiles: u64,
 }
 
 /// Lock-free telemetry storage shared with the IPC thread.
@@ -237,12 +261,24 @@ struct TelemetryState {
     total_input_frames: AtomicU64,
     total_output_frames: AtomicU64,
     queue_fill_pct: AtomicU64,
+    buffer_fill_ms: AtomicU64,
     drift_ppm: AtomicU64,
     overload_count: AtomicU64,
     xrun_count: AtomicU64,
     uptime_secs: AtomicU64,
     device_target: Mutex<Option<String>>,
     disconnect_duration_ms: AtomicU64,
+    empty_polls: AtomicU64,
+    idle_entries: AtomicU64,
+    idle_tiles: AtomicU64,
+    dropped_chunks: AtomicU64,
+    processed_chunks: AtomicU64,
+    asrc_starvations: AtomicU64,
+    asrc_overruns: AtomicU64,
+    asrc_fault_active: AtomicBool,
+    rate_switch_count: AtomicU64,
+    max_dsp_tile_us: AtomicU64,
+    late_dsp_tiles: AtomicU64,
 }
 
 /// Shared control and telemetry state handle for the live daemon.
@@ -278,12 +314,24 @@ impl DaemonControlHandle {
             total_input_frames: AtomicU64::new(0),
             total_output_frames: AtomicU64::new(0),
             queue_fill_pct: AtomicU64::new(0.0f64.to_bits()),
+            buffer_fill_ms: AtomicU64::new(0.0f64.to_bits()),
             drift_ppm: AtomicU64::new(0.0f64.to_bits()),
             overload_count: AtomicU64::new(0),
             xrun_count: AtomicU64::new(0),
             uptime_secs: AtomicU64::new(0),
             device_target: Mutex::new(None),
             disconnect_duration_ms: AtomicU64::new(DISCONNECT_NONE),
+            empty_polls: AtomicU64::new(0),
+            idle_entries: AtomicU64::new(0),
+            idle_tiles: AtomicU64::new(0),
+            dropped_chunks: AtomicU64::new(0),
+            processed_chunks: AtomicU64::new(0),
+            asrc_starvations: AtomicU64::new(0),
+            asrc_overruns: AtomicU64::new(0),
+            asrc_fault_active: AtomicBool::new(false),
+            rate_switch_count: AtomicU64::new(0),
+            max_dsp_tile_us: AtomicU64::new(0),
+            late_dsp_tiles: AtomicU64::new(0),
         };
 
         Self {
@@ -423,6 +471,7 @@ impl DaemonControlHandle {
             total_input_frames: self.telemetry.total_input_frames.load(Ordering::Relaxed),
             total_output_frames: self.telemetry.total_output_frames.load(Ordering::Relaxed),
             queue_fill_pct: load_f64(&self.telemetry.queue_fill_pct),
+            buffer_fill_ms: load_f64(&self.telemetry.buffer_fill_ms),
             drift_ppm: load_f64(&self.telemetry.drift_ppm),
             overload_count: self.telemetry.overload_count.load(Ordering::Relaxed),
             xrun_count: self.telemetry.xrun_count.load(Ordering::Relaxed),
@@ -430,6 +479,17 @@ impl DaemonControlHandle {
             uptime_secs: self.telemetry.uptime_secs.load(Ordering::Relaxed),
             device_target,
             disconnect_duration_ms,
+            empty_polls: self.telemetry.empty_polls.load(Ordering::Relaxed),
+            idle_entries: self.telemetry.idle_entries.load(Ordering::Relaxed),
+            idle_tiles: self.telemetry.idle_tiles.load(Ordering::Relaxed),
+            dropped_chunks: self.telemetry.dropped_chunks.load(Ordering::Relaxed),
+            processed_chunks: self.telemetry.processed_chunks.load(Ordering::Relaxed),
+            asrc_starvations: self.telemetry.asrc_starvations.load(Ordering::Relaxed),
+            asrc_overruns: self.telemetry.asrc_overruns.load(Ordering::Relaxed),
+            asrc_fault_active: self.telemetry.asrc_fault_active.load(Ordering::Relaxed),
+            rate_switch_count: self.telemetry.rate_switch_count.load(Ordering::Relaxed),
+            max_dsp_tile_us: self.telemetry.max_dsp_tile_us.load(Ordering::Relaxed),
+            late_dsp_tiles: self.telemetry.late_dsp_tiles.load(Ordering::Relaxed),
         }
     }
 
@@ -460,14 +520,36 @@ impl DaemonControlHandle {
             .store(output_rate_hz, Ordering::Relaxed);
     }
 
+    /// Increments the sample rate switch counter.
+    #[inline]
+    pub fn inc_rate_switch(&self) {
+        self.telemetry
+            .rate_switch_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Updates runtime counters without taking any locks.
     #[inline]
+    #[allow(clippy::too_many_arguments)]
     pub fn update_runtime_stats(
         &self,
         total_input_frames: u64,
         total_output_frames: u64,
         overload_count: u64,
         queue_fill_pct: Option<f64>,
+        buffer_fill_ms: Option<f64>,
+        drift_ppm: f64,
+        xrun_count: u64,
+        empty_polls: u64,
+        idle_entries: u64,
+        idle_tiles: u64,
+        dropped_chunks: u64,
+        processed_chunks: u64,
+        asrc_starvations: u64,
+        asrc_overruns: u64,
+        asrc_fault_active: bool,
+        max_dsp_tile_us: u64,
+        late_dsp_tiles: u64,
         uptime_secs: u64,
     ) {
         self.telemetry
@@ -482,6 +564,43 @@ impl DaemonControlHandle {
         if let Some(pct) = queue_fill_pct {
             store_f64(&self.telemetry.queue_fill_pct, pct);
         }
+        if let Some(ms) = buffer_fill_ms {
+            store_f64(&self.telemetry.buffer_fill_ms, ms);
+        }
+        store_f64(&self.telemetry.drift_ppm, drift_ppm);
+        self.telemetry
+            .xrun_count
+            .store(xrun_count, Ordering::Relaxed);
+        self.telemetry
+            .empty_polls
+            .store(empty_polls, Ordering::Relaxed);
+        self.telemetry
+            .idle_entries
+            .store(idle_entries, Ordering::Relaxed);
+        self.telemetry
+            .idle_tiles
+            .store(idle_tiles, Ordering::Relaxed);
+        self.telemetry
+            .dropped_chunks
+            .store(dropped_chunks, Ordering::Relaxed);
+        self.telemetry
+            .processed_chunks
+            .store(processed_chunks, Ordering::Relaxed);
+        self.telemetry
+            .asrc_starvations
+            .store(asrc_starvations, Ordering::Relaxed);
+        self.telemetry
+            .asrc_overruns
+            .store(asrc_overruns, Ordering::Relaxed);
+        self.telemetry
+            .asrc_fault_active
+            .store(asrc_fault_active, Ordering::Relaxed);
+        self.telemetry
+            .max_dsp_tile_us
+            .store(max_dsp_tile_us, Ordering::Relaxed);
+        self.telemetry
+            .late_dsp_tiles
+            .store(late_dsp_tiles, Ordering::Relaxed);
         self.telemetry
             .uptime_secs
             .store(uptime_secs, Ordering::Relaxed);
@@ -706,7 +825,6 @@ impl LivePipeline {
                 ));
             }
             asrc_drift_ctrl = Some(AdaptiveClockDriftController::new(ClockDriftConfig {
-                target_fill: 0.5,
                 max_correction_ppm: max_ppm,
                 ..Default::default()
             }));
@@ -766,13 +884,64 @@ impl LivePipeline {
         let idle_threshold_tiles =
             (self.intermediate_rate.get() as usize / (TILE_BASEBAND_FRAMES * 10)).max(20);
         let mut consecutive_empty_polls = 0usize;
+        let mut empty_polls_total = 0u64;
+        let mut idle_entries_total = 0u64;
+        let mut idle_tiles_total = 0u64;
+        let mut asrc_starvations_total = 0u64;
+        let mut asrc_overruns_total = 0u64;
+        let mut asrc_in_starvation = false;
+        let mut asrc_in_overrun = false;
+        let mut current_drift_ppm = 0.0f64;
+        let mut max_dsp_tile_us = 0u64;
+        let mut late_dsp_tiles = 0u64;
+        let tile_budget = Duration::from_secs_f64(
+            TILE_BASEBAND_FRAMES as f64 / self.intermediate_rate.get() as f64,
+        );
         let mut pending_rate_switch: Option<PcmRateHz> = None;
-
-        let base_preamp = self.plan.dsp_config.preamp_db;
-        let profile_headroom = self.plan.dsp_config.profile_headroom_db;
+        let mut last_telemetry_time = Instant::now();
 
         let mut reported_state = lifecycle.state();
         control.set_lifecycle_state(reported_state);
+
+        macro_rules! sync_telemetry {
+            ($force:expr) => {
+                if $force || last_telemetry_time.elapsed() >= Duration::from_millis(150) {
+                    last_telemetry_time = Instant::now();
+                    let cur_state = lifecycle.state();
+                    if cur_state != reported_state {
+                        control.set_lifecycle_state(cur_state);
+                        reported_state = cur_state;
+                    }
+                    let q_pct = input
+                        .buffer_occupancy()
+                        .and_then(|(fill, cap)| (cap > 0).then(|| fill as f64 / cap as f64 * 100.0));
+                    let b_ms = input.buffer_fill_secs().map(|s| s * 1000.0);
+                    control.update_runtime_stats(
+                        total_input_frames,
+                        total_output_frames,
+                        overload_events,
+                        q_pct,
+                        b_ms,
+                        current_drift_ppm,
+                        output.xrun_count(),
+                        empty_polls_total,
+                        idle_entries_total,
+                        idle_tiles_total,
+                        input.dropped_chunks(),
+                        input.processed_chunks(),
+                        asrc_starvations_total,
+                        asrc_overruns_total,
+                        asrc_in_starvation || asrc_in_overrun,
+                        max_dsp_tile_us,
+                        late_dsp_tiles,
+                        start_time.elapsed().as_secs(),
+                    );
+                }
+            };
+        }
+
+        let base_preamp = self.plan.dsp_config.preamp_db;
+        let profile_headroom = self.plan.dsp_config.profile_headroom_db;
 
         let mut last_hw_vol: Option<f64> = None;
         let mut last_hw_mute: Option<bool> = None;
@@ -814,16 +983,19 @@ impl LivePipeline {
 
             if frames_read == 0 && pending_rate_switch.is_none() {
                 consecutive_empty_polls = consecutive_empty_polls.saturating_add(1);
+                empty_polls_total = empty_polls_total.saturating_add(1);
                 // During active streaming, allow a brief grace window (~15 ms, well within the
                 // ALSA hardware buffer cushion) for the next PipeWire quantum to arrive before
                 // synthesizing and writing idle silence tiles into the middle of the stream.
                 if total_input_frames > 0 && !is_idle && consecutive_empty_polls <= 30 {
+                    sync_telemetry!(false);
                     std::thread::sleep(Duration::from_micros(500));
                     continue;
                 }
 
                 // When input is temporarily idle or quiet in live streaming:
                 // Emit continuous idle / silence frames to keep DAC clock locked and prevent ALSA XRuns.
+                idle_tiles_total = idle_tiles_total.saturating_add(1);
                 let idle_tile_frames = TILE_BASEBAND_FRAMES;
                 let idle_bytes = match self.carrier {
                     IdleCarrierFormat::NativeDsd => {
@@ -859,9 +1031,15 @@ impl LivePipeline {
                         })?;
                 }
                 consecutive_empty_tiles = consecutive_empty_tiles.saturating_add(1);
-                if consecutive_empty_tiles >= idle_threshold_tiles {
+                if consecutive_empty_tiles >= idle_threshold_tiles && !is_idle {
                     is_idle = true;
+                    idle_entries_total = idle_entries_total.saturating_add(1);
+                    // The ASRC is not updated while idle; clear the latched fault
+                    // state so status does not report a stale [FAULT ACTIVE].
+                    asrc_in_starvation = false;
+                    asrc_in_overrun = false;
                 }
+                sync_telemetry!(false);
                 let chunk_dur = Duration::from_secs_f64(
                     idle_tile_frames as f64 / self.intermediate_rate.get() as f64,
                 );
@@ -968,23 +1146,48 @@ impl LivePipeline {
 
             // Polyphase SRC / ASRC
             let proc_len = if !asrc_resamplers.is_empty() {
+                // Update drift controller BEFORE running resamplers
+                let dt = frames_read as f64 / self.input_rate.get() as f64;
+                if let Some(ref mut drift_ctrl) = asrc_drift_ctrl {
+                    // Only control the ASRC when the input can report a real
+                    // buffered duration. A slot-count fallback would assume a
+                    // fixed quantum and inject a wrong correction.
+                    if let Some(secs) = input.buffer_fill_secs() {
+                        let ppm = match drift_ctrl.update(secs, dt) {
+                            Ok(p) => {
+                                asrc_in_starvation = false;
+                                asrc_in_overrun = false;
+                                p
+                            }
+                            Err(ClockDriftError::Starvation { .. }) => {
+                                if !asrc_in_starvation {
+                                    asrc_in_starvation = true;
+                                    asrc_starvations_total = asrc_starvations_total.saturating_add(1);
+                                }
+                                asrc_in_overrun = false;
+                                drift_ctrl.last_drift_ppm()
+                            }
+                            Err(ClockDriftError::Overrun { .. }) => {
+                                if !asrc_in_overrun {
+                                    asrc_in_overrun = true;
+                                    asrc_overruns_total = asrc_overruns_total.saturating_add(1);
+                                }
+                                asrc_in_starvation = false;
+                                drift_ctrl.last_drift_ppm()
+                            }
+                        };
+                        current_drift_ppm = ppm;
+                        for r in asrc_resamplers.iter_mut() {
+                            r.set_drift_ppm(ppm);
+                        }
+                    }
+                }
+
                 let mut min_prod = usize::MAX;
                 for c in 0..num_channels {
                     let in_slice = &in_channels[c][..frames_read];
                     let (_, prod) = asrc_resamplers[c].process(in_slice, &mut src_out_channels[c]);
                     min_prod = min_prod.min(prod);
-                }
-
-                // Update drift controller
-                let dt = frames_read as f64 / self.input_rate.get() as f64;
-                if let Some(ref mut drift_ctrl) = asrc_drift_ctrl {
-                    if let Some((fill, cap)) = input.buffer_occupancy() {
-                        if let Ok(ppm) = drift_ctrl.update(fill, cap, dt) {
-                            for r in asrc_resamplers.iter_mut() {
-                                r.set_drift_ppm(ppm);
-                            }
-                        }
-                    }
                 }
 
                 min_prod
@@ -1010,8 +1213,26 @@ impl LivePipeline {
                         .collect()
                 };
 
+                let dsp_start = Instant::now();
                 if is_dsd {
                     worker_pool.process_tile_dsd(&tile_slices)?;
+                } else {
+                    worker_pool.process_tile_pcm(&tile_slices)?;
+                }
+                let dsp_dur = dsp_start.elapsed();
+                let dsp_us = dsp_dur.as_micros() as u64;
+                if dsp_us > max_dsp_tile_us {
+                    max_dsp_tile_us = dsp_us;
+                }
+                // Only full-size tiles count as deadline misses. Partial tiles
+                // are dominated by fixed dispatch/futex overhead that does not
+                // scale with tile length, so counting them floods the metric
+                // whenever the input buffer is shallow.
+                if tile == TILE_BASEBAND_FRAMES && dsp_dur > tile_budget {
+                    late_dsp_tiles = late_dsp_tiles.saturating_add(1);
+                }
+
+                if is_dsd {
                     let out_l = worker_pool.channel_dsd(0);
                     let out_r = worker_pool.channel_dsd(1);
 
@@ -1084,8 +1305,6 @@ impl LivePipeline {
                     };
                     write_res?;
                 } else {
-                    worker_pool.process_tile_pcm(&tile_slices)?;
-
                     // High-rate PCM output. Quantize to the configured target sample
                     // format. Writing f32 bit patterns into an integer ALSA stream
                     // previously caused extreme clipping.
@@ -1174,27 +1393,12 @@ impl LivePipeline {
                 offset += tile;
             }
 
-            // Periodic telemetry update
-            if total_input_frames % 8192 < frames_read as u64 {
-                let state = lifecycle.state();
-                if state != reported_state {
-                    control.set_lifecycle_state(state);
-                    reported_state = state;
-                }
-                let queue_fill_pct = input
-                    .buffer_occupancy()
-                    .and_then(|(fill, cap)| (cap > 0).then(|| fill as f64 / cap as f64 * 100.0));
-                control.update_runtime_stats(
-                    total_input_frames,
-                    total_output_frames,
-                    overload_events,
-                    queue_fill_pct,
-                    start_time.elapsed().as_secs(),
-                );
-            }
+            sync_telemetry!(false);
         }
 
         // Clean planned stop
+        sync_telemetry!(true);
+        let _ = (reported_state, last_telemetry_time);
         lifecycle.request_stop();
         control.set_state(DaemonState::DrainingMuting);
 

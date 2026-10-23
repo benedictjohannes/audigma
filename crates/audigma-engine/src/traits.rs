@@ -110,6 +110,28 @@ pub trait AudioInput: Send {
     fn buffer_occupancy(&self) -> Option<(usize, usize)> {
         None
     }
+
+    /// Returns the currently buffered input duration in seconds, if supported.
+    ///
+    /// This is the authoritative fill signal for the adaptive clock drift
+    /// controller: unlike chunk-slot counts it is independent of the PipeWire
+    /// quantum and input sample rate.
+    fn buffer_fill_secs(&self) -> Option<f64> {
+        None
+    }
+
+    /// Number of input chunks dropped because the producer queue was full.
+    fn dropped_chunks(&self) -> u64 {
+        0
+    }
+
+    /// Number of input buffers/chunks received from the producer.
+    fn processed_chunks(&self) -> u64 {
+        0
+    }
+
+    /// Sets the target preroll cushion duration in seconds before playback begins or resumes.
+    fn set_preroll_secs(&mut self, _secs: f64) {}
 }
 
 /// Abstract hardware volume bridge for synchronized analog attenuation (`Design.md §1.8`).
@@ -131,6 +153,11 @@ pub trait AudioOutput: Write + Send {
     /// Returns `true` if this sink supports seeking.
     fn can_seek(&self) -> bool {
         false
+    }
+
+    /// Total output underrun/recovery events observed by the backend.
+    fn xrun_count(&self) -> u64 {
+        0
     }
 
     /// Seeks to an offset in this sink. Fails with `ErrorKind::Unsupported` if not seekable.

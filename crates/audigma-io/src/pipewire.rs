@@ -270,6 +270,10 @@ pub fn quantum_frames_for_rate(rate_hz: u32) -> u32 {
     1024_u32.saturating_mul(mult).clamp(1024, 65_536)
 }
 
+/// Default input cushion requested before the engine resumes consuming after startup
+/// or a rate/format switch if not configured from the output buffer duration.
+const DEFAULT_INPUT_PREROLL_SECS: f64 = 0.090;
+
 /// Helper function to build an SPA `ParamBuffers` POD sized for the given quantum and frame stride.
 pub fn build_buffers_pod(quantum_frames: u32, stride: u32) -> Result<Vec<u8>, PipeWireError> {
     let stride = stride.max(1) as i32;
@@ -551,12 +555,15 @@ pub struct PipeWireVirtualSink {
     running: Arc<AtomicBool>,
     dropped_chunks: Arc<AtomicU64>,
     processed_chunks: Arc<AtomicU64>,
+    /// Queued input in native units: PCM frames for PCM, bytes-per-channel for DSD.
+    /// Producer adds on push; consumer subtracts as native units are consumed.
+    buffered_units: Arc<AtomicU64>,
     dsd_gain_db: f64,
     decimators: Vec<audigma_dsp::fir::HalfBandDecimationCascade>,
     dsd_scratch: Vec<Vec<u8>>,
     dsd_residue: Vec<Vec<u8>>,
     prerolled: bool,
-    preroll_threshold: usize,
+    preroll_secs: f64,
 }
 
 impl PipeWireVirtualSink {
@@ -638,6 +645,7 @@ impl PipeWireVirtualSink {
         let running = Arc::new(AtomicBool::new(true));
         let dropped_chunks = Arc::new(AtomicU64::new(0));
         let processed_chunks = Arc::new(AtomicU64::new(0));
+        let buffered_units = Arc::new(AtomicU64::new(0));
 
         let gen_clone = generation.clone();
         let active_rate_cb = active_rate.clone();
@@ -650,6 +658,7 @@ impl PipeWireVirtualSink {
         let running_clone = running.clone();
         let dropped_chunks_cb = dropped_chunks.clone();
         let processed_chunks_cb = processed_chunks.clone();
+        let buffered_units_cb = buffered_units.clone();
 
         let pos_str = channel_positions.join(",");
         let mut all_allowed_rates = allowed_rates.clone();
@@ -867,8 +876,11 @@ impl PipeWireVirtualSink {
                                             }
                                         }
                                         chunk.set_dsd(cur_gen, n_ch, &byte_buf);
+                                        let units = chunk.frames() as u64;
                                         if producer.push(chunk).is_err() {
                                             dropped_chunks_cb.fetch_add(1, Ordering::Relaxed);
+                                        } else {
+                                            buffered_units_cb.fetch_add(units, Ordering::Relaxed);
                                         }
                                     }
                                 } else if !datas.is_empty() {
@@ -917,8 +929,12 @@ impl PipeWireVirtualSink {
                                                     }
                                                 }
                                                 chunk.set_dsd(cur_gen, n_ch, &byte_buf);
+                                                let units = chunk.frames() as u64;
                                                 if producer.push(chunk).is_err() {
                                                     dropped_chunks_cb.fetch_add(1, Ordering::Relaxed);
+                                                } else {
+                                                    buffered_units_cb
+                                                        .fetch_add(units, Ordering::Relaxed);
                                                 }
                                             }
                                         }
@@ -971,8 +987,11 @@ impl PipeWireVirtualSink {
                                         }
 
                                         chunk.set(cur_gen, n_ch, &float_buf);
+                                        let units = chunk.frames() as u64;
                                         if producer.push(chunk).is_err() {
                                             dropped_chunks_cb.fetch_add(1, Ordering::Relaxed);
+                                        } else {
+                                            buffered_units_cb.fetch_add(units, Ordering::Relaxed);
                                         }
                                     }
                                 } else {
@@ -998,8 +1017,12 @@ impl PipeWireVirtualSink {
                                                 }
 
                                                 chunk.set(cur_gen, n_ch, &float_buf);
+                                                let units = chunk.frames() as u64;
                                                 if producer.push(chunk).is_err() {
                                                     dropped_chunks_cb.fetch_add(1, Ordering::Relaxed);
+                                                } else {
+                                                    buffered_units_cb
+                                                        .fetch_add(units, Ordering::Relaxed);
                                                 }
                                             }
                                         }
@@ -1086,8 +1109,6 @@ impl PipeWireVirtualSink {
             Some(32),
         );
 
-        let preroll_threshold = (queue_chunks / 4).clamp(1, 32);
-
         Ok(Self {
             info,
             _worker: Some(worker),
@@ -1105,13 +1126,20 @@ impl PipeWireVirtualSink {
             running,
             dropped_chunks,
             processed_chunks,
+            buffered_units,
             dsd_gain_db,
             decimators: Vec::new(),
             dsd_scratch: Vec::new(),
             dsd_residue: Vec::new(),
             prerolled: false,
-            preroll_threshold,
+            preroll_secs: DEFAULT_INPUT_PREROLL_SECS,
         })
+    }
+
+    /// Sets the target preroll cushion duration in seconds.
+    #[inline]
+    pub fn set_preroll_secs(&mut self, secs: f64) {
+        self.preroll_secs = secs.clamp(0.040, 1.0);
     }
 
     /// Returns whether the currently negotiated DSD bitstream is LSB bit order.
@@ -1141,207 +1169,45 @@ impl PipeWireVirtualSink {
     pub fn processed_chunks(&self) -> u64 {
         self.processed_chunks.load(Ordering::Relaxed)
     }
-}
 
-impl Drop for PipeWireVirtualSink {
-    fn drop(&mut self) {
-        self.running.store(false, Ordering::SeqCst);
-        if let Some(worker) = self._worker.take() {
-            let _ = worker.join();
-        }
-    }
-}
-
-impl AudioInput for PipeWireVirtualSink {
-    fn info(&self) -> &AudioStreamInfo {
-        &self.info
-    }
-
-    fn read_stereo(&mut self, left: &mut [f64], right: &mut [f64]) -> Result<usize, EngineError> {
-        self.read_channels(&mut [left, right])
-    }
-
-    fn read_channels(&mut self, channels: &mut [&mut [f64]]) -> Result<usize, EngineError> {
-        if channels.is_empty() {
-            return Ok(0);
-        }
-        let max_frames = channels.iter().map(|s| s.len()).min().unwrap_or(0);
-        if max_frames == 0 {
-            return Ok(0);
-        }
-
-        let cur_slots = self.consumer.slots() + if self.current_chunk.is_some() { 1 } else { 0 };
-        if !self.prerolled {
-            if cur_slots < self.preroll_threshold {
-                return Ok(0);
-            }
-            self.prerolled = true;
-        } else if cur_slots == 0 {
-            // Keep prerolled state across temporary underruns so a rate/format
-            // switch does not re-arm the 32-chunk preroll threshold.
-            return Ok(0);
-        }
-
-        if self.info.is_dsd() && !self.decimators.is_empty() {
-            let stages = self.decimators[0].num_stages();
-            let divider = 1usize << stages;
-            let dsd_bytes_per_pcm = divider.div_ceil(8);
-            let pcm_to_produce = max_frames.min(1024);
-            let needed_dsd_bytes = pcm_to_produce * dsd_bytes_per_pcm;
-
-            while self.dsd_residue.len() < channels.len() {
-                self.dsd_residue.push(Vec::new());
-            }
-
-            let mut scratch = std::mem::take(&mut self.dsd_scratch);
-            while scratch.len() < channels.len() {
-                scratch.push(vec![0; 16384]);
-            }
-            for buf in scratch.iter_mut() {
-                if buf.len() < needed_dsd_bytes {
-                    buf.resize(needed_dsd_bytes, 0);
-                }
-            }
-
-            let res_bytes = self.dsd_residue[0].len();
-            #[allow(clippy::needless_range_loop)]
-            for c in 0..channels.len() {
-                if res_bytes > 0 {
-                    scratch[c][..res_bytes].copy_from_slice(&self.dsd_residue[c]);
-                    self.dsd_residue[c].clear();
-                }
-            }
-
-            let to_read = needed_dsd_bytes.saturating_sub(res_bytes);
-            let actual_read = if to_read > 0 {
-                let mut dsd_ptrs: Vec<&mut [u8]> = scratch
-                    .iter_mut()
-                    .take(channels.len())
-                    .map(|b| &mut b[res_bytes..res_bytes + to_read])
-                    .collect();
-
-                match self.read_dsd_bytes(&mut dsd_ptrs) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        self.dsd_scratch = scratch;
-                        return Err(e);
-                    }
-                }
+    /// Buffered input duration in seconds, including the partially consumed chunk.
+    fn buffered_duration_secs(&self) -> f64 {
+        let units = self.buffered_units.load(Ordering::Relaxed) as f64;
+        if self.is_dsd.load(Ordering::Relaxed) {
+            let bit_rate = self.active_dsd_bit_rate.load(Ordering::Relaxed);
+            if bit_rate > 0 {
+                units * 8.0 / bit_rate as f64
             } else {
-                0
-            };
-
-            let total_available = res_bytes + actual_read;
-            let pcm_frames_produced = total_available / dsd_bytes_per_pcm;
-            let aligned_bytes = pcm_frames_produced * dsd_bytes_per_pcm;
-            let leftover = total_available - aligned_bytes;
-
-            if leftover > 0 {
-                #[allow(clippy::needless_range_loop)]
-                for c in 0..channels.len() {
-                    self.dsd_residue[c]
-                        .extend_from_slice(&scratch[c][aligned_bytes..total_available]);
-                }
+                0.0
             }
-
-            if pcm_frames_produced == 0 {
-                self.dsd_scratch = scratch;
-                return Ok(0);
-            }
-
-            for (c, ch_slice) in channels.iter_mut().enumerate() {
-                if c < self.decimators.len() {
-                    if let Err(e) = self.decimators[c].process_dsd_bytes(
-                        &scratch[c][..aligned_bytes],
-                        &mut ch_slice[..pcm_frames_produced],
-                    ) {
-                        eprintln!("[audigma-pw-in] decimation error on channel {c}: {e:?}");
-                        ch_slice[..pcm_frames_produced].fill(0.0);
-                    }
-                } else {
-                    ch_slice[..pcm_frames_produced].fill(0.0);
-                }
-            }
-
-            self.dsd_scratch = scratch;
-            return Ok(pcm_frames_produced);
+        } else {
+            let rate = self.active_rate.load(Ordering::Relaxed).max(1);
+            units / rate as f64
         }
-
-        let mut frames_read = 0;
-        let cur_gen = self.generation.load(Ordering::Relaxed);
-
-        while frames_read < max_frames {
-            // First consume any remaining frames from the currently held chunk
-            if let Some(ref chunk) = self.current_chunk {
-                if chunk.generation != cur_gen || chunk.is_dsd {
-                    self.current_chunk = None;
-                    self.read_offset = 0;
-                    continue;
-                }
-
-                let total_frames = chunk.frames();
-                let available = total_frames.saturating_sub(self.read_offset);
-                if available > 0 {
-                    let to_copy = (max_frames - frames_read).min(available);
-                    let samples = chunk.as_slice();
-                    let chunk_ch = chunk.channels;
-
-                    for i in 0..to_copy {
-                        let base_idx = (self.read_offset + i) * chunk_ch;
-                        if chunk_ch == 1 && channels.len() > 1 {
-                            // Mono source into multi-channel (e.g. stereo)
-                            let s = samples[self.read_offset + i];
-                            for ch_slice in channels.iter_mut() {
-                                ch_slice[frames_read + i] = s;
-                            }
-                        } else {
-                            for (c, ch_slice) in channels.iter_mut().enumerate() {
-                                if c < chunk_ch {
-                                    ch_slice[frames_read + i] = samples[base_idx + c];
-                                } else {
-                                    ch_slice[frames_read + i] = 0.0;
-                                }
-                            }
-                        }
-                    }
-
-                    self.read_offset += to_copy;
-                    frames_read += to_copy;
-
-                    if self.read_offset >= total_frames {
-                        self.current_chunk = None;
-                        self.read_offset = 0;
-                    }
-
-                    if frames_read == max_frames {
-                        break;
-                    }
-                } else {
-                    self.current_chunk = None;
-                    self.read_offset = 0;
-                }
-            }
-
-            // If we still need more frames, pop the next chunk from the SPSC ring buffer
-            match self.consumer.pop() {
-                Ok(chunk) => {
-                    if chunk.generation != cur_gen || chunk.is_dsd {
-                        continue;
-                    }
-                    self.current_chunk = Some(chunk);
-                    self.read_offset = 0;
-                }
-                Err(_) => {
-                    // Queue empty, return what we have accumulated
-                    break;
-                }
-            }
-        }
-
-        Ok(frames_read)
     }
 
-    fn read_dsd_bytes(&mut self, channels: &mut [&mut [u8]]) -> Result<usize, EngineError> {
+    #[inline]
+    fn sub_buffered_units(&self, units: u64) {
+        if units > 0 {
+            let _ = self
+                .buffered_units
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                    Some(cur.saturating_sub(units))
+                });
+        }
+    }
+
+    /// Reads raw DSD bytes, optionally accounting them against `buffered_units`.
+    ///
+    /// The public `AudioInput::read_dsd_bytes` accounts each byte read. The
+    /// decimating `read_channels` path passes `account = false` because it
+    /// accounts the *PCM-aligned* byte count instead, which keeps any leftover
+    /// `dsd_residue` visible in the buffered-duration signal.
+    fn read_dsd_bytes_internal(
+        &mut self,
+        channels: &mut [&mut [u8]],
+        account: bool,
+    ) -> Result<usize, EngineError> {
         if channels.is_empty() {
             return Ok(0);
         }
@@ -1355,12 +1221,9 @@ impl AudioInput for PipeWireVirtualSink {
 
         while bytes_read < max_bytes {
             if let Some(ref chunk) = self.current_chunk {
-                if chunk.generation != cur_gen {
-                    self.current_chunk = None;
-                    self.read_offset = 0;
-                    continue;
-                }
-                if !chunk.is_dsd {
+                if chunk.generation != cur_gen || !chunk.is_dsd {
+                    let remaining = chunk.frames().saturating_sub(self.read_offset) as u64;
+                    self.sub_buffered_units(remaining);
                     self.current_chunk = None;
                     self.read_offset = 0;
                     continue;
@@ -1403,10 +1266,8 @@ impl AudioInput for PipeWireVirtualSink {
 
             match self.consumer.pop() {
                 Ok(chunk) => {
-                    if chunk.generation != cur_gen {
-                        continue;
-                    }
-                    if !chunk.is_dsd {
+                    if chunk.generation != cur_gen || !chunk.is_dsd {
+                        self.sub_buffered_units(chunk.frames() as u64);
                         continue;
                     }
                     self.current_chunk = Some(chunk);
@@ -1418,7 +1279,219 @@ impl AudioInput for PipeWireVirtualSink {
             }
         }
 
+        if account {
+            self.sub_buffered_units(bytes_read as u64);
+        }
         Ok(bytes_read)
+    }
+}
+
+impl Drop for PipeWireVirtualSink {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::SeqCst);
+        if let Some(worker) = self._worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl AudioInput for PipeWireVirtualSink {
+    fn info(&self) -> &AudioStreamInfo {
+        &self.info
+    }
+
+    fn read_stereo(&mut self, left: &mut [f64], right: &mut [f64]) -> Result<usize, EngineError> {
+        self.read_channels(&mut [left, right])
+    }
+
+    fn read_channels(&mut self, channels: &mut [&mut [f64]]) -> Result<usize, EngineError> {
+        if channels.is_empty() {
+            return Ok(0);
+        }
+        let max_frames = channels.iter().map(|s| s.len()).min().unwrap_or(0);
+        if max_frames == 0 {
+            return Ok(0);
+        }
+
+        if !self.prerolled {
+            if self.buffered_duration_secs() < self.preroll_secs {
+                return Ok(0);
+            }
+            self.prerolled = true;
+        } else if self.buffered_units.load(Ordering::Relaxed) == 0 {
+            return Ok(0);
+        }
+
+        if self.info.is_dsd() && !self.decimators.is_empty() {
+            let stages = self.decimators[0].num_stages();
+            let divider = 1usize << stages;
+            let dsd_bytes_per_pcm = divider.div_ceil(8);
+            let pcm_to_produce = max_frames.min(1024);
+            let needed_dsd_bytes = pcm_to_produce * dsd_bytes_per_pcm;
+
+            while self.dsd_residue.len() < channels.len() {
+                self.dsd_residue.push(Vec::new());
+            }
+
+            let mut scratch = std::mem::take(&mut self.dsd_scratch);
+            while scratch.len() < channels.len() {
+                scratch.push(vec![0; 16384]);
+            }
+            for buf in scratch.iter_mut() {
+                if buf.len() < needed_dsd_bytes {
+                    buf.resize(needed_dsd_bytes, 0);
+                }
+            }
+
+            let res_bytes = self.dsd_residue[0].len();
+            #[allow(clippy::needless_range_loop)]
+            for c in 0..channels.len() {
+                if res_bytes > 0 {
+                    scratch[c][..res_bytes].copy_from_slice(&self.dsd_residue[c]);
+                    self.dsd_residue[c].clear();
+                }
+            }
+
+            let to_read = needed_dsd_bytes.saturating_sub(res_bytes);
+            let actual_read = if to_read > 0 {
+                let mut dsd_ptrs: Vec<&mut [u8]> = scratch
+                    .iter_mut()
+                    .take(channels.len())
+                    .map(|b| &mut b[res_bytes..res_bytes + to_read])
+                    .collect();
+
+                match self.read_dsd_bytes_internal(&mut dsd_ptrs, false) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        self.dsd_scratch = scratch;
+                        return Err(e);
+                    }
+                }
+            } else {
+                0
+            };
+
+            let total_available = res_bytes + actual_read;
+            let pcm_frames_produced = total_available / dsd_bytes_per_pcm;
+            let aligned_bytes = pcm_frames_produced * dsd_bytes_per_pcm;
+            let leftover = total_available - aligned_bytes;
+
+            // Account the bytes actually converted to PCM. Any `leftover` stays
+            // counted in `buffered_units` because it is carried in `dsd_residue`
+            // and will be consumed by a later call.
+            self.sub_buffered_units(aligned_bytes as u64);
+
+            if leftover > 0 {
+                #[allow(clippy::needless_range_loop)]
+                for c in 0..channels.len() {
+                    self.dsd_residue[c]
+                        .extend_from_slice(&scratch[c][aligned_bytes..total_available]);
+                }
+            }
+
+            if pcm_frames_produced == 0 {
+                self.dsd_scratch = scratch;
+                return Ok(0);
+            }
+
+            for (c, ch_slice) in channels.iter_mut().enumerate() {
+                if c < self.decimators.len() {
+                    if let Err(e) = self.decimators[c].process_dsd_bytes(
+                        &scratch[c][..aligned_bytes],
+                        &mut ch_slice[..pcm_frames_produced],
+                    ) {
+                        eprintln!("[audigma-pw-in] decimation error on channel {c}: {e:?}");
+                        ch_slice[..pcm_frames_produced].fill(0.0);
+                    }
+                } else {
+                    ch_slice[..pcm_frames_produced].fill(0.0);
+                }
+            }
+
+            self.dsd_scratch = scratch;
+            return Ok(pcm_frames_produced);
+        }
+
+        let mut frames_read = 0;
+        let cur_gen = self.generation.load(Ordering::Relaxed);
+
+        while frames_read < max_frames {
+            // First consume any remaining frames from the currently held chunk
+            if let Some(ref chunk) = self.current_chunk {
+                if chunk.generation != cur_gen || chunk.is_dsd {
+                    let remaining = chunk.frames().saturating_sub(self.read_offset) as u64;
+                    self.sub_buffered_units(remaining);
+                    self.current_chunk = None;
+                    self.read_offset = 0;
+                    continue;
+                }
+
+                let total_frames = chunk.frames();
+                let available = total_frames.saturating_sub(self.read_offset);
+                if available > 0 {
+                    let to_copy = (max_frames - frames_read).min(available);
+                    let samples = chunk.as_slice();
+                    let chunk_ch = chunk.channels;
+
+                    for i in 0..to_copy {
+                        let base_idx = (self.read_offset + i) * chunk_ch;
+                        if chunk_ch == 1 && channels.len() > 1 {
+                            // Mono source into multi-channel (e.g. stereo)
+                            let s = samples[self.read_offset + i];
+                            for ch_slice in channels.iter_mut() {
+                                ch_slice[frames_read + i] = s;
+                            }
+                        } else {
+                            for (c, ch_slice) in channels.iter_mut().enumerate() {
+                                if c < chunk_ch {
+                                    ch_slice[frames_read + i] = samples[base_idx + c];
+                                } else {
+                                    ch_slice[frames_read + i] = 0.0;
+                                }
+                            }
+                        }
+                    }
+
+                    self.read_offset += to_copy;
+                    frames_read += to_copy;
+                    self.sub_buffered_units(to_copy as u64);
+
+                    if self.read_offset >= total_frames {
+                        self.current_chunk = None;
+                        self.read_offset = 0;
+                    }
+
+                    if frames_read == max_frames {
+                        break;
+                    }
+                } else {
+                    self.current_chunk = None;
+                    self.read_offset = 0;
+                }
+            }
+
+            // If we still need more frames, pop the next chunk from the SPSC ring buffer
+            match self.consumer.pop() {
+                Ok(chunk) => {
+                    if chunk.generation != cur_gen || chunk.is_dsd {
+                        self.sub_buffered_units(chunk.frames() as u64);
+                        continue;
+                    }
+                    self.current_chunk = Some(chunk);
+                    self.read_offset = 0;
+                }
+                Err(_) => {
+                    // Queue empty, return what we have accumulated
+                    break;
+                }
+            }
+        }
+
+        Ok(frames_read)
+    }
+
+    fn read_dsd_bytes(&mut self, channels: &mut [&mut [u8]]) -> Result<usize, EngineError> {
+        self.read_dsd_bytes_internal(channels, true)
     }
 
     fn check_rate_change(&self) -> Option<PcmRateHz> {
@@ -1438,7 +1511,11 @@ impl AudioInput for PipeWireVirtualSink {
     fn set_generation(&mut self, generation_tag: u64) {
         self.generation.store(generation_tag, Ordering::SeqCst);
         while self.consumer.pop().is_ok() {}
-        self.prerolled = true;
+        self.buffered_units.store(0, Ordering::Relaxed);
+        // Re-arm the duration-based preroll. The previous stream's buffered
+        // audio is no longer valid after a rate/format switch, and starting
+        // from an empty ring guarantees chronic underruns.
+        self.prerolled = false;
         self.current_chunk = None;
         self.read_offset = 0;
         for r in self.dsd_residue.iter_mut() {
@@ -1450,7 +1527,8 @@ impl AudioInput for PipeWireVirtualSink {
         self.active_rate.store(rate.get(), Ordering::SeqCst);
         self.pending_rate.store(0, Ordering::SeqCst);
         while self.consumer.pop().is_ok() {}
-        self.prerolled = true;
+        self.buffered_units.store(0, Ordering::Relaxed);
+        self.prerolled = false;
         self.current_chunk = None;
         self.read_offset = 0;
         for r in self.dsd_residue.iter_mut() {
@@ -1495,6 +1573,22 @@ impl AudioInput for PipeWireVirtualSink {
         let occupied = self.consumer.slots() + if self.current_chunk.is_some() { 1 } else { 0 };
         let capacity = self.consumer.buffer().capacity();
         Some((occupied, capacity))
+    }
+
+    fn buffer_fill_secs(&self) -> Option<f64> {
+        Some(self.buffered_duration_secs())
+    }
+
+    fn dropped_chunks(&self) -> u64 {
+        self.dropped_chunks.load(Ordering::Relaxed)
+    }
+
+    fn processed_chunks(&self) -> u64 {
+        self.processed_chunks.load(Ordering::Relaxed)
+    }
+
+    fn set_preroll_secs(&mut self, secs: f64) {
+        PipeWireVirtualSink::set_preroll_secs(self, secs);
     }
 }
 
@@ -1732,4 +1826,8 @@ impl Write for PipeWirePcmOutput {
     }
 }
 
-impl AudioOutput for PipeWirePcmOutput {}
+impl AudioOutput for PipeWirePcmOutput {
+    fn xrun_count(&self) -> u64 {
+        self.underrun_count() + self.overrun_count()
+    }
+}
