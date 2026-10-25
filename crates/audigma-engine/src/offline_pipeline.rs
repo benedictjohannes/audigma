@@ -10,11 +10,13 @@
 //! - Container and transport packing (DSF, WAV, FLAC, Native DSD, DoP, Raw)
 
 use crate::peak::measure_true_peak_pass1;
+use crate::processor::TileProcessor;
 use crate::tail::TailManager;
+use crate::topology::PipelineTopology;
 use crate::traits::{AudioInput, AudioOutput, EngineError};
-use crate::worker::{ChannelWorkerPool, TargetDsdConfig};
+use crate::transport::{is_dsd_passthrough_eligible, transfer_offline_dsd_passthrough};
 use audigma_dsp::DSD_IDLE_BYTE;
-use audigma_dsp::config::{SampleFormat, TargetFormat, TargetRateSpec};
+use audigma_dsp::config::{DspConfiguration, SampleFormat, TargetFormat, TargetRateSpec};
 use audigma_dsp::fir::PolyphaseResampler;
 use audigma_dsp::ftz::ScopedFtzDaz;
 use audigma_dsp::rates::PcmRateHz;
@@ -466,8 +468,9 @@ impl<'a> ContainerWriter<'a> {
 pub struct OfflinePipeline {
     plan: ResolvedPipelinePlan,
     settings: Settings,
+    topology: PipelineTopology,
     rational_src: Option<(PolyphaseResampler, PolyphaseResampler)>,
-    worker_pool: ChannelWorkerPool,
+    processor: TileProcessor,
     tile_size: usize,
     mult: usize,
 }
@@ -478,73 +481,11 @@ impl OfflinePipeline {
         let plan = settings.explain_for_input_rate(input_rate)?;
         let preset = plan.dsp_config.preset;
 
-        // Determine intermediate baseband rate and power-of-two stages
-        let (intermediate_rate, stages) = match plan.stream_spec.target {
-            TargetRateSpec::Dsd { bit_rate } => {
-                let dsd_family = bit_rate.rate_family();
-                let in_family = input_rate.rate_family();
-                if in_family == dsd_family {
-                    if bit_rate.get() >= input_rate.get() {
-                        let mult = bit_rate.get() / input_rate.get();
-                        let stages = (mult as f64).log2().round() as usize;
-                        (input_rate, stages)
-                    } else {
-                        return Err(EngineError::Pipeline(format!(
-                            "input rate {input_rate} exceeds DSD bit rate {bit_rate}"
-                        )));
-                    }
-                } else {
-                    // Cross-family conversion (e.g. 192k 48-family -> 44.1-family DSD):
-                    // Resample at matched tier (192k -> 176.4k) to preserve ultrasonic content,
-                    // then upsample via power-of-two half-band FIR stages to target DSD bit rate.
-                    let matched_tier_rate = input_rate
-                        .corresponding_rate_in_family(dsd_family)
-                        .filter(|r| bit_rate.get() >= r.get())
-                        .or_else(|| dsd_family.base_pcm_rate())
-                        .ok_or_else(|| {
-                            EngineError::Pipeline(format!(
-                                "invalid rate family for DSD bit rate {bit_rate}"
-                            ))
-                        })?;
-                    let mult = bit_rate.get() / matched_tier_rate.get();
-                    let stages = (mult as f64).log2().round() as usize;
-                    (matched_tier_rate, stages)
-                }
-            }
-            TargetRateSpec::Pcm { rate, .. } => {
-                let target_family = rate.rate_family();
-                let in_family = input_rate.rate_family();
-                if in_family == target_family {
-                    let mult = rate.get() / input_rate.get();
-                    let stages = if mult >= 1 {
-                        (mult as f64).log2().round() as usize
-                    } else {
-                        0
-                    };
-                    (input_rate, stages)
-                } else {
-                    // Cross-family PCM conversion:
-                    // If target rate allows, resample at matched tier first, then power-of-two stages
-                    let matched_tier_rate = input_rate
-                        .corresponding_rate_in_family(target_family)
-                        .filter(|r| rate.get() >= r.get())
-                        .or_else(|| target_family.base_pcm_rate())
-                        .ok_or_else(|| {
-                            EngineError::Pipeline(format!("invalid target rate family for {rate}"))
-                        })?;
-                    let mult = rate.get() / matched_tier_rate.get();
-                    let stages = if mult >= 1 {
-                        (mult as f64).log2().round() as usize
-                    } else {
-                        0
-                    };
-                    (matched_tier_rate, stages)
-                }
-            }
-        };
+        let topology = PipelineTopology::resolve(input_rate, plan.stream_spec.target)?;
+        let intermediate_rate = topology.intermediate_rate;
 
         // Determine if cross-family rational SRC is required
-        let rational_src = if input_rate != intermediate_rate {
+        let rational_src = if topology.requires_rational_src {
             let src_l = PolyphaseResampler::new_rational(input_rate, intermediate_rate)?;
             let src_r = PolyphaseResampler::new_rational(input_rate, intermediate_rate)?;
             Some((src_l, src_r))
@@ -553,40 +494,32 @@ impl OfflinePipeline {
         };
 
         const TILE_BASEBAND_FRAMES: usize = 512;
-        let target_dsd = match plan.stream_spec.target {
-            TargetRateSpec::Dsd { bit_rate } => {
-                let seed = settings
-                    .offline
-                    .as_ref()
-                    .and_then(|o| o.seed)
-                    .unwrap_or(12345);
-                Some(TargetDsdConfig {
-                    bit_rate,
-                    dither: plan.dsp_config.dither,
-                    overload_policy: plan.dsp_config.overload_policy,
-                    seed_base: seed,
-                })
-            }
-            TargetRateSpec::Pcm { .. } => None,
-        };
+        let seed = settings
+            .offline
+            .as_ref()
+            .and_then(|o| o.seed)
+            .unwrap_or(12345);
+        let target_dsd = topology.target_dsd_config(&plan.dsp_config, seed);
 
-        let worker_pool = ChannelWorkerPool::new(
+        let processor = TileProcessor::new(
             2,
             preset,
             plan.dsp_config.phase,
             plan.dsp_config.apodization,
-            stages,
+            topology,
             TILE_BASEBAND_FRAMES,
             target_dsd,
+            false,
             None,
         )?;
-        let mult = worker_pool.rate_multiplier();
+        let mult = processor.rate_multiplier();
 
         Ok(Self {
             plan,
             settings,
+            topology,
             rational_src,
-            worker_pool,
+            processor,
             tile_size: TILE_BASEBAND_FRAMES,
             mult,
         })
@@ -595,6 +528,16 @@ impl OfflinePipeline {
     /// Returns the resolved pipeline plan.
     pub fn plan(&self) -> &ResolvedPipelinePlan {
         &self.plan
+    }
+
+    /// Returns the resolved pipeline topology.
+    pub fn topology(&self) -> &PipelineTopology {
+        &self.topology
+    }
+
+    /// Returns the underlying tile processor.
+    pub fn processor(&self) -> &TileProcessor {
+        &self.processor
     }
 
     /// Layers a runtime user-volume attenuation (dB) on top of `[gain] preamp_db`.
@@ -620,33 +563,14 @@ impl OfflinePipeline {
         let target_spec = self.plan.stream_spec.target;
         let is_dsd = matches!(target_spec, TargetRateSpec::Dsd { .. });
 
-        let is_input_dsd = input.info().is_dsd();
-        let is_target_matching_dsd = match target_spec {
-            TargetRateSpec::Dsd { bit_rate } => input.info().dsd_bit_rate == Some(bit_rate),
-            _ => false,
-        };
-        let is_volume_unity = self.plan.dsp_config.user_volume_db.abs() < 1e-6
-            && self.plan.dsp_config.preamp_db.abs() < 1e-6;
-
-        if is_input_dsd && is_target_matching_dsd && is_volume_unity {
+        if is_dsd_passthrough_eligible(&input.info(), &target_spec, &self.plan.dsp_config) {
             // Automatic Opportunistic Bit-Exact DSD Passthrough (Design.md §1.6):
             // The input is DSD, target matches input rate, and software volume attenuation is unity (100%).
             // Direct bit-exact transfer bypassing decimation, filtering, and remodulation.
             let mut container_writer = ContainerWriter::new(&self.settings, &target_spec, output)?;
-            let chunk_bytes = 4096;
-            let mut dsd_l = vec![0u8; chunk_bytes];
-            let mut dsd_r = vec![0u8; chunk_bytes];
-            let mut total_input_frames = 0u64;
-
-            loop {
-                let bytes_read = input.read_dsd_bytes(&mut [&mut dsd_l, &mut dsd_r])?;
-                if bytes_read == 0 {
-                    break;
-                }
-                total_input_frames += (bytes_read * 8) as u64;
-                container_writer.write_stereo_dsd(&dsd_l[..bytes_read], &dsd_r[..bytes_read])?;
-            }
-
+            let total_input_frames = transfer_offline_dsd_passthrough(input, |l, r| {
+                container_writer.write_stereo_dsd(l, r)
+            })?;
             let (total_output_frames, total_bytes_written) = container_writer.finalize()?;
             let elapsed_ms = start_time.elapsed().as_millis() as u64;
 
@@ -676,7 +600,7 @@ impl OfflinePipeline {
                 let peak_result = measure_true_peak_pass1(
                     input,
                     self.rational_src.clone(),
-                    &mut self.worker_pool,
+                    &mut self.processor,
                     &self.plan.dsp_config,
                     self.tile_size,
                 )?;
@@ -685,7 +609,7 @@ impl OfflinePipeline {
             PeakAnalysisMode::SinglePass => (self.plan.dsp_config.total_configured_gain_db(), None),
         };
 
-        let linear_gain = 10.0f64.powf(applied_gain_db / 20.0);
+        let linear_gain = DspConfiguration::compute_linear_gain(applied_gain_db, false);
 
         // Step 2: Tail Policy & Duration Setup
         let tail_policy = self
@@ -695,7 +619,7 @@ impl OfflinePipeline {
             .and_then(|o| o.tail_policy)
             .unwrap_or(TailPolicy::TrimToDuration);
 
-        let group_delay_output_samples = self.worker_pool.total_group_delay_output_samples();
+        let group_delay_output_samples = self.processor.total_group_delay_output_samples();
         let target_output_samples = input.info().total_frames.map(|frames| match target_spec {
             TargetRateSpec::Dsd { bit_rate } => {
                 (frames as f64 * (bit_rate.get() as f64 / input_rate.get() as f64)).round() as u64
@@ -757,9 +681,9 @@ impl OfflinePipeline {
                         let in_r = &src_out_right[offset..offset + chunk];
 
                         if is_dsd {
-                            self.worker_pool.process_tile_dsd(&[in_l, in_r])?;
+                            self.processor.process_tile_dsd(&[in_l, in_r])?;
                         } else {
-                            self.worker_pool.process_tile_pcm(&[in_l, in_r])?;
+                            self.processor.process_tile_pcm(&[in_l, in_r])?;
                         }
 
                         self.process_interpolated_block(
@@ -774,10 +698,10 @@ impl OfflinePipeline {
                 }
                 None => {
                     if is_dsd {
-                        self.worker_pool
+                        self.processor
                             .process_tile_dsd(&[left_slice, right_slice])?;
                     } else {
-                        self.worker_pool
+                        self.processor
                             .process_tile_pcm(&[left_slice, right_slice])?;
                     }
 
@@ -814,9 +738,9 @@ impl OfflinePipeline {
             let in_r = &in_right[..chunk];
 
             if is_dsd {
-                self.worker_pool.process_tile_dsd(&[in_l, in_r])?;
+                self.processor.process_tile_dsd(&[in_l, in_r])?;
             } else {
-                self.worker_pool.process_tile_pcm(&[in_l, in_r])?;
+                self.processor.process_tile_pcm(&[in_l, in_r])?;
             }
 
             self.process_interpolated_block(
@@ -831,7 +755,7 @@ impl OfflinePipeline {
 
         // Step 5: Finalize Container
         let (total_output_frames, total_bytes_written) = container_writer.finalize()?;
-        let overload_count = self.worker_pool.total_overload_count();
+        let overload_count = self.processor.total_overload_count();
         let elapsed_ms = start_time.elapsed().as_millis() as u64;
 
         Ok(OfflineReport {
@@ -861,8 +785,8 @@ impl OfflinePipeline {
         match target_spec {
             TargetRateSpec::Dsd { .. } => {
                 let req_bytes = (chunk_frames * self.mult) / 8;
-                let dsd_l = self.worker_pool.channel_dsd(0);
-                let dsd_r = self.worker_pool.channel_dsd(1);
+                let dsd_l = self.processor.channel_dsd(0);
+                let dsd_r = self.processor.channel_dsd(1);
 
                 // Discard ramp-up / trim at byte boundary
                 if let Some((start_b, end_b)) = tail_manager
@@ -876,8 +800,8 @@ impl OfflinePipeline {
                 }
             }
             TargetRateSpec::Pcm { .. } => {
-                let pcm_l = self.worker_pool.channel_pcm(0);
-                let pcm_r = self.worker_pool.channel_pcm(1);
+                let pcm_l = self.processor.channel_pcm(0);
+                let pcm_r = self.processor.channel_pcm(1);
 
                 if let Some((start, end)) = tail_manager.process_slice_range(pcm_l.len()) {
                     if end > start {

@@ -10,7 +10,6 @@ use audigma_engine::traits::{AudioInput, EngineError};
 use audigma_engine::{
     IdleCarrierFormat, LifecycleController, OfflinePipeline, StreamSink,
 };
-use audigma_format::dop::DopContainerFormat;
 use audigma_io::alsa::{AlsaAudioOutput, AlsaOutputConfig};
 use audigma_io::file::FileAudioInput;
 use audigma_io::stdio::StdioAudioInput;
@@ -258,33 +257,7 @@ pub fn run_play(args: PlayArgs) -> Result<(), EngineError> {
         .map_err(|e| EngineError::Pipeline(format!("ALSA open failed: {e}")))?;
 
     // 6. Click-free Priming
-    let carrier = match target_spec {
-        TargetRateSpec::Dsd { .. } => {
-            let transport = settings
-                .output
-                .as_ref()
-                .and_then(|o| o.transport)
-                .unwrap_or(OutputTransport::Native);
-            match transport {
-                OutputTransport::Native => IdleCarrierFormat::NativeDsd,
-                OutputTransport::Dop => {
-                    let fmt = settings
-                        .output
-                        .as_ref()
-                        .and_then(|o| o.sample_format)
-                        .unwrap_or(SampleFormat::S32Le);
-                    let dop_fmt = match fmt {
-                        SampleFormat::S32Le => DopContainerFormat::S32Le,
-                        SampleFormat::S24Le => DopContainerFormat::S24Le,
-                        _ => DopContainerFormat::S24_3Le,
-                    };
-                    IdleCarrierFormat::DoP(dop_fmt)
-                }
-                OutputTransport::Pcm => IdleCarrierFormat::Pcm,
-            }
-        }
-        TargetRateSpec::Pcm { .. } => IdleCarrierFormat::Pcm,
-    };
+    let carrier = IdleCarrierFormat::from_settings(&settings, &target_spec);
 
     let mut lifecycle = LifecycleController::new(carrier, 256, 256);
     let prime_frames = (alsa_output.period_frames() * 2) as usize;

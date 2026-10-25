@@ -14,16 +14,21 @@
 
 use crate::asrc::{AdaptiveClockDriftController, ClockDriftConfig, ClockDriftError};
 use crate::lifecycle::{BlockAction, IdleCarrierFormat, LifecycleController, LifecycleState};
+use crate::processor::TileProcessor;
+use crate::topology::PipelineTopology;
 use crate::traits::{AudioInput, AudioOutput, EngineError};
-use crate::worker::{ChannelWorkerPool, TargetDsdConfig};
-use audigma_dsp::config::{SampleFormat, TargetRateSpec};
+use crate::transport::{
+    is_dsd_passthrough_eligible, pack_and_write_stereo_dsd, process_live_dsd_passthrough_tile,
+    write_output_all,
+};
+use audigma_dsp::config::{DspConfiguration, SampleFormat, TargetRateSpec};
 use audigma_dsp::fir::PolyphaseResampler;
 use audigma_dsp::ftz::ScopedFtzDaz;
 use audigma_dsp::modulator::TpdfDither;
 use audigma_dsp::rates::PcmRateHz;
-use audigma_format::dop::{DopContainerFormat, DopPacker};
-use audigma_format::dsd_u32::{STEREO_DSD_U32_FRAME_BYTES, pack_stereo_dsd_u32_be};
-use audigma_settings::{OutputTransport, ResolvedPipelinePlan, Settings};
+use audigma_format::dop::DopPacker;
+use audigma_format::dsd_u32::STEREO_DSD_U32_FRAME_BYTES;
+use audigma_settings::{ResolvedPipelinePlan, Settings};
 use smallvec::SmallVec;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -621,9 +626,7 @@ pub enum StreamExitReason {
 pub struct LivePipeline {
     settings: Settings,
     plan: ResolvedPipelinePlan,
-    input_rate: PcmRateHz,
-    intermediate_rate: PcmRateHz,
-    cascade_stages: usize,
+    topology: PipelineTopology,
     carrier: IdleCarrierFormat,
     thread_init_hook: Option<Arc<dyn Fn(usize) + Send + Sync>>,
 }
@@ -638,96 +641,24 @@ impl LivePipeline {
         input_rate: PcmRateHz,
         thread_init_hook: Option<Arc<dyn Fn(usize) + Send + Sync>>,
     ) -> Result<Self, EngineError> {
+        if let Some(gain) = settings.gain.as_ref() {
+            if gain.peak_analysis == audigma_settings::PeakAnalysisMode::TwoPass {
+                tracing::warn!(
+                    target: "audigma::engine",
+                    "two-pass peak analysis is not supported for live real-time output; using single-pass"
+                );
+            }
+        }
+
         let plan = settings.explain_for_input_rate(input_rate)?;
         let target_spec = plan.stream_spec.target;
-
-        let (intermediate_rate, stages) = match target_spec {
-            TargetRateSpec::Dsd { bit_rate } => {
-                let dsd_family = bit_rate.rate_family();
-                let in_family = input_rate.rate_family();
-                if in_family == dsd_family {
-                    let mult = bit_rate.get() / input_rate.get();
-                    let stages = (mult as f64).log2().round() as usize;
-                    (input_rate, stages)
-                } else {
-                    let matched_tier_rate = input_rate
-                        .corresponding_rate_in_family(dsd_family)
-                        .filter(|r| bit_rate.get() >= r.get())
-                        .or_else(|| dsd_family.base_pcm_rate())
-                        .ok_or_else(|| {
-                            EngineError::Pipeline(format!(
-                                "invalid rate family for DSD bit rate {bit_rate}"
-                            ))
-                        })?;
-                    let mult = bit_rate.get() / matched_tier_rate.get();
-                    let stages = (mult as f64).log2().round() as usize;
-                    (matched_tier_rate, stages)
-                }
-            }
-            TargetRateSpec::Pcm { rate, .. } => {
-                let target_family = rate.rate_family();
-                let in_family = input_rate.rate_family();
-                if in_family == target_family {
-                    let mult = rate.get() / input_rate.get();
-                    let stages = if mult >= 1 {
-                        (mult as f64).log2().round() as usize
-                    } else {
-                        0
-                    };
-                    (input_rate, stages)
-                } else {
-                    let matched_tier_rate = input_rate
-                        .corresponding_rate_in_family(target_family)
-                        .filter(|r| rate.get() >= r.get())
-                        .or_else(|| target_family.base_pcm_rate())
-                        .ok_or_else(|| {
-                            EngineError::Pipeline(format!("invalid target rate family for {rate}"))
-                        })?;
-                    let mult = rate.get() / matched_tier_rate.get();
-                    let stages = if mult >= 1 {
-                        (mult as f64).log2().round() as usize
-                    } else {
-                        0
-                    };
-                    (matched_tier_rate, stages)
-                }
-            }
-        };
-
-        let carrier = match target_spec {
-            TargetRateSpec::Dsd { .. } => {
-                let transport = settings
-                    .output
-                    .as_ref()
-                    .and_then(|o| o.transport)
-                    .unwrap_or(OutputTransport::Native);
-                match transport {
-                    OutputTransport::Native => IdleCarrierFormat::NativeDsd,
-                    OutputTransport::Dop => {
-                        let fmt = settings
-                            .output
-                            .as_ref()
-                            .and_then(|o| o.sample_format)
-                            .unwrap_or(SampleFormat::S32Le);
-                        let dop_fmt = match fmt {
-                            SampleFormat::S32Le => DopContainerFormat::S32Le,
-                            SampleFormat::S24Le => DopContainerFormat::S24Le,
-                            _ => DopContainerFormat::S24_3Le,
-                        };
-                        IdleCarrierFormat::DoP(dop_fmt)
-                    }
-                    OutputTransport::Pcm => IdleCarrierFormat::Pcm,
-                }
-            }
-            TargetRateSpec::Pcm { .. } => IdleCarrierFormat::Pcm,
-        };
+        let topology = PipelineTopology::resolve(input_rate, target_spec)?;
+        let carrier = IdleCarrierFormat::from_settings(&settings, &target_spec);
 
         Ok(Self {
             settings,
             plan,
-            input_rate,
-            intermediate_rate,
-            cascade_stages: stages,
+            topology,
             carrier,
             thread_init_hook,
         })
@@ -736,6 +667,30 @@ impl LivePipeline {
     /// Sets or replaces the thread initialization hook for channel worker threads.
     pub fn set_thread_init_hook(&mut self, hook: Option<Arc<dyn Fn(usize) + Send + Sync>>) {
         self.thread_init_hook = hook;
+    }
+
+    /// Returns the resolved input sample rate.
+    #[inline]
+    pub fn input_rate(&self) -> PcmRateHz {
+        self.topology.input_rate
+    }
+
+    /// Returns the resolved intermediate sample rate.
+    #[inline]
+    pub fn intermediate_rate(&self) -> PcmRateHz {
+        self.topology.intermediate_rate
+    }
+
+    /// Returns the resolved pipeline topology.
+    #[inline]
+    pub fn topology(&self) -> &PipelineTopology {
+        &self.topology
+    }
+
+    /// Returns the resolved pipeline plan.
+    #[inline]
+    pub fn plan(&self) -> &ResolvedPipelinePlan {
+        &self.plan
     }
 
     /// Runs the streaming loop reading from `input`, converting, and writing to `output`.
@@ -762,28 +717,21 @@ impl LivePipeline {
         let num_channels = self.plan.stream_spec.channels as usize;
 
         const TILE_BASEBAND_FRAMES: usize = 256;
-        let is_dsd = matches!(target_spec, TargetRateSpec::Dsd { .. });
-        let target_dsd = match target_spec {
-            TargetRateSpec::Dsd { bit_rate } => Some(TargetDsdConfig {
-                bit_rate,
-                dither: self.plan.dsp_config.dither,
-                overload_policy: self.plan.dsp_config.overload_policy,
-                seed_base: 12345,
-            }),
-            TargetRateSpec::Pcm { .. } => None,
-        };
+        let is_dsd = self.topology.is_dsd();
+        let target_dsd = self.topology.target_dsd_config(&self.plan.dsp_config, 12345);
 
-        let mut worker_pool = ChannelWorkerPool::new(
+        let mut processor = TileProcessor::new(
             num_channels,
             preset,
             self.plan.dsp_config.phase,
             self.plan.dsp_config.apodization,
-            self.cascade_stages,
+            self.topology,
             TILE_BASEBAND_FRAMES,
             target_dsd,
+            true,
             self.thread_init_hook.clone(),
         )?;
-        let mult = worker_pool.rate_multiplier();
+        let mult = processor.rate_multiplier();
 
         let pcm_sample_format = match target_spec {
             TargetRateSpec::Pcm { sample_format, .. } => sample_format,
@@ -820,19 +768,19 @@ impl LivePipeline {
                 .unwrap_or(500.0);
             for _ in 0..num_channels {
                 asrc_resamplers.push(PolyphaseResampler::new_asrc(
-                    self.input_rate,
-                    self.intermediate_rate,
+                    self.topology.input_rate,
+                    self.topology.intermediate_rate,
                 ));
             }
             asrc_drift_ctrl = Some(AdaptiveClockDriftController::new(ClockDriftConfig {
                 max_correction_ppm: max_ppm,
                 ..Default::default()
             }));
-        } else if self.input_rate != self.intermediate_rate {
+        } else if self.topology.requires_rational_src {
             for _ in 0..num_channels {
                 asrc_resamplers.push(PolyphaseResampler::new_rational(
-                    self.input_rate,
-                    self.intermediate_rate,
+                    self.topology.input_rate,
+                    self.topology.intermediate_rate,
                 )?);
             }
         }
@@ -855,6 +803,11 @@ impl LivePipeline {
 
         let staging_len = (cascade_tile_len * 4 * num_channels.max(2)).max(16384);
         let mut transport_staging = vec![0u8; staging_len];
+
+        // Pre-allocate DSD passthrough staging buffers for zero-allocation bit-exact transfer
+        let passthrough_bytes = (cascade_tile_len / 8).max(4096);
+        let mut dsd_passthrough_l = vec![0u8; passthrough_bytes];
+        let mut dsd_passthrough_r = vec![0u8; passthrough_bytes];
 
         // Pre-allocate the high-rate PCM output staging buffer so the streaming
         // loop never allocates per tile.
@@ -882,7 +835,7 @@ impl LivePipeline {
         let mut is_idle = false;
         // Require at least ~70-100 ms of continuous zero frames before declaring the stream stopped/idle.
         let idle_threshold_tiles =
-            (self.intermediate_rate.get() as usize / (TILE_BASEBAND_FRAMES * 10)).max(20);
+            (self.topology.intermediate_rate.get() as usize / (TILE_BASEBAND_FRAMES * 10)).max(20);
         let mut consecutive_empty_polls = 0usize;
         let mut empty_polls_total = 0u64;
         let mut idle_entries_total = 0u64;
@@ -892,11 +845,6 @@ impl LivePipeline {
         let mut asrc_in_starvation = false;
         let mut asrc_in_overrun = false;
         let mut current_drift_ppm = 0.0f64;
-        let mut max_dsp_tile_us = 0u64;
-        let mut late_dsp_tiles = 0u64;
-        let tile_budget = Duration::from_secs_f64(
-            TILE_BASEBAND_FRAMES as f64 / self.intermediate_rate.get() as f64,
-        );
         let mut pending_rate_switch: Option<PcmRateHz> = None;
         let mut last_telemetry_time = Instant::now();
 
@@ -932,8 +880,8 @@ impl LivePipeline {
                         asrc_starvations_total,
                         asrc_overruns_total,
                         asrc_in_starvation || asrc_in_overrun,
-                        max_dsp_tile_us,
-                        late_dsp_tiles,
+                        processor.max_dsp_tile_us(),
+                        processor.total_late_tiles(),
                         start_time.elapsed().as_secs(),
                     );
                 }
@@ -950,7 +898,7 @@ impl LivePipeline {
             // Check for dynamic rate changes
             if pending_rate_switch.is_none() {
                 if let Some(new_rate) = input.check_rate_change() {
-                    if new_rate != self.input_rate {
+                    if new_rate != self.topology.input_rate {
                         pending_rate_switch = Some(new_rate);
                         lifecycle.request_stop();
                     }
@@ -968,93 +916,6 @@ impl LivePipeline {
                     control.set_muted(muted);
                 }
             }
-
-            // Read input frames
-            let frames_read = if pending_rate_switch.is_some() && lifecycle.is_draining() {
-                for ch in in_channels.iter_mut() {
-                    ch.fill(0.0);
-                }
-                TILE_BASEBAND_FRAMES
-            } else {
-                let mut slices: ChannelMutSlices<'_> =
-                    in_channels.iter_mut().map(|v| v.as_mut_slice()).collect();
-                input.read_channels(&mut slices)?
-            };
-
-            if frames_read == 0 && pending_rate_switch.is_none() {
-                consecutive_empty_polls = consecutive_empty_polls.saturating_add(1);
-                empty_polls_total = empty_polls_total.saturating_add(1);
-                // During active streaming, allow a brief grace window (~15 ms, well within the
-                // ALSA hardware buffer cushion) for the next PipeWire quantum to arrive before
-                // synthesizing and writing idle silence tiles into the middle of the stream.
-                if total_input_frames > 0 && !is_idle && consecutive_empty_polls <= 30 {
-                    sync_telemetry!(false);
-                    std::thread::sleep(Duration::from_micros(500));
-                    continue;
-                }
-
-                // When input is temporarily idle or quiet in live streaming:
-                // Emit continuous idle / silence frames to keep DAC clock locked and prevent ALSA XRuns.
-                idle_tiles_total = idle_tiles_total.saturating_add(1);
-                let idle_tile_frames = TILE_BASEBAND_FRAMES;
-                let idle_bytes = match self.carrier {
-                    IdleCarrierFormat::NativeDsd => {
-                        let dsd_u32_frames = (idle_tile_frames * mult) / 32;
-                        dsd_u32_frames * STEREO_DSD_U32_FRAME_BYTES
-                    }
-                    IdleCarrierFormat::DoP(ref fmt) => {
-                        let dop_frames = (idle_tile_frames * mult) / 16;
-                        dop_frames * fmt.bytes_per_stereo_frame()
-                    }
-                    IdleCarrierFormat::Pcm => idle_tile_frames * mult * 4 * num_channels,
-                };
-
-                let to_write = idle_bytes.min(transport_staging.len());
-                let written = lifecycle.emit_idle_frames(&mut transport_staging[..to_write]);
-                if written > 0 {
-                    output
-                        .write_all(&transport_staging[..written])
-                        .map_err(|e| {
-                            let code = e.raw_os_error().unwrap_or(0);
-                            if e.kind() == std::io::ErrorKind::BrokenPipe
-                                || code == libc::ENODEV
-                                || code == -libc::ENODEV
-                                || code == libc::EBADFD
-                                || code == -libc::EBADFD
-                                || code == libc::EIO
-                                || code == -libc::EIO
-                            {
-                                EngineError::DeviceDisconnected(e.to_string())
-                            } else {
-                                EngineError::Io(e)
-                            }
-                        })?;
-                }
-                consecutive_empty_tiles = consecutive_empty_tiles.saturating_add(1);
-                if consecutive_empty_tiles >= idle_threshold_tiles && !is_idle {
-                    is_idle = true;
-                    idle_entries_total = idle_entries_total.saturating_add(1);
-                    // The ASRC is not updated while idle; clear the latched fault
-                    // state so status does not report a stale [FAULT ACTIVE].
-                    asrc_in_starvation = false;
-                    asrc_in_overrun = false;
-                }
-                sync_telemetry!(false);
-                let chunk_dur = Duration::from_secs_f64(
-                    idle_tile_frames as f64 / self.intermediate_rate.get() as f64,
-                );
-                std::thread::sleep((chunk_dur / 2).max(Duration::from_millis(1)));
-                continue;
-            }
-
-            if is_idle {
-                is_idle = false;
-                let _ = worker_pool.reset();
-                let _ = lifecycle.start();
-            }
-            consecutive_empty_polls = 0;
-            consecutive_empty_tiles = 0;
-            total_input_frames += frames_read as u64;
 
             // Compute current dynamic gain based on active volume mode
             let is_muted = control.is_muted();
@@ -1110,13 +971,116 @@ impl LivePipeline {
                 DaemonVolumeMode::Hardware | DaemonVolumeMode::None => 0.0,
                 DaemonVolumeMode::Software => target_db,
             };
-            let linear_gain =
-                if (is_muted && vol_mode != DaemonVolumeMode::Hardware) || target_db <= -119.0 {
-                    0.0
-                } else {
-                    let total_gain_db = base_preamp + profile_headroom + user_vol;
-                    10.0_f64.powf(total_gain_db / 20.0)
+            let is_digital_muted = is_muted && vol_mode != DaemonVolumeMode::Hardware;
+            let total_gain_db = base_preamp + profile_headroom + user_vol;
+            let linear_gain = DspConfiguration::compute_linear_gain(total_gain_db, is_digital_muted);
+
+            // Automatic Opportunistic Bit-Exact DSD Passthrough (Design.md §1.6)
+            let dsp_cfg_for_passthrough = DspConfiguration {
+                user_volume_db: user_vol,
+                preamp_db: base_preamp,
+                profile_headroom_db: profile_headroom,
+                ..self.plan.dsp_config.clone()
+            };
+            let can_passthrough = is_dsd
+                && !is_muted
+                && is_dsd_passthrough_eligible(&input.info(), &target_spec, &dsp_cfg_for_passthrough);
+
+            if can_passthrough && pending_rate_switch.is_none() && !lifecycle.is_draining() {
+                let dsd_bytes_to_read = (TILE_BASEBAND_FRAMES * mult) / 8;
+                if let Some(frames) = process_live_dsd_passthrough_tile(
+                    input,
+                    output,
+                    self.carrier,
+                    &mut dop_packer,
+                    &mut dsd_passthrough_l[..dsd_bytes_to_read],
+                    &mut dsd_passthrough_r[..dsd_bytes_to_read],
+                    &mut transport_staging,
+                )? {
+                    if is_idle {
+                        is_idle = false;
+                        let _ = processor.reset();
+                        let _ = lifecycle.start();
+                    }
+                    consecutive_empty_polls = 0;
+                    consecutive_empty_tiles = 0;
+                    total_input_frames += frames as u64;
+                    total_output_frames += frames as u64;
+                    sync_telemetry!(false);
+                    continue;
+                }
+            }
+
+            // Read input frames
+            let frames_read = if pending_rate_switch.is_some() && lifecycle.is_draining() {
+                for ch in in_channels.iter_mut() {
+                    ch.fill(0.0);
+                }
+                TILE_BASEBAND_FRAMES
+            } else {
+                let mut slices: ChannelMutSlices<'_> =
+                    in_channels.iter_mut().map(|v| v.as_mut_slice()).collect();
+                input.read_channels(&mut slices)?
+            };
+
+            if frames_read == 0 && pending_rate_switch.is_none() {
+                consecutive_empty_polls = consecutive_empty_polls.saturating_add(1);
+                empty_polls_total = empty_polls_total.saturating_add(1);
+                // During active streaming, allow a brief grace window (~15 ms, well within the
+                // ALSA hardware buffer cushion) for the next PipeWire quantum to arrive before
+                // synthesizing and writing idle silence tiles into the middle of the stream.
+                if total_input_frames > 0 && !is_idle && consecutive_empty_polls <= 30 {
+                    sync_telemetry!(false);
+                    std::thread::sleep(Duration::from_micros(500));
+                    continue;
+                }
+
+                // When input is temporarily idle or quiet in live streaming:
+                // Emit continuous idle / silence frames to keep DAC clock locked and prevent ALSA XRuns.
+                idle_tiles_total = idle_tiles_total.saturating_add(1);
+                let idle_tile_frames = TILE_BASEBAND_FRAMES;
+                let idle_bytes = match self.carrier {
+                    IdleCarrierFormat::NativeDsd => {
+                        let dsd_u32_frames = (idle_tile_frames * mult) / 32;
+                        dsd_u32_frames * STEREO_DSD_U32_FRAME_BYTES
+                    }
+                    IdleCarrierFormat::DoP(ref fmt) => {
+                        let dop_frames = (idle_tile_frames * mult) / 16;
+                        dop_frames * fmt.bytes_per_stereo_frame()
+                    }
+                    IdleCarrierFormat::Pcm => idle_tile_frames * mult * 4 * num_channels,
                 };
+
+                let to_write = idle_bytes.min(transport_staging.len());
+                let written = lifecycle.emit_idle_frames(&mut transport_staging[..to_write]);
+                if written > 0 {
+                    write_output_all(output, &transport_staging[..written])?;
+                }
+                consecutive_empty_tiles = consecutive_empty_tiles.saturating_add(1);
+                if consecutive_empty_tiles >= idle_threshold_tiles && !is_idle {
+                    is_idle = true;
+                    idle_entries_total = idle_entries_total.saturating_add(1);
+                    // The ASRC is not updated while idle; clear the latched fault
+                    // state so status does not report a stale [FAULT ACTIVE].
+                    asrc_in_starvation = false;
+                    asrc_in_overrun = false;
+                }
+                sync_telemetry!(false);
+                let chunk_dur = Duration::from_secs_f64(
+                    idle_tile_frames as f64 / self.topology.intermediate_rate.get() as f64,
+                );
+                std::thread::sleep((chunk_dur / 2).max(Duration::from_millis(1)));
+                continue;
+            }
+
+            if is_idle {
+                is_idle = false;
+                let _ = processor.reset();
+                let _ = lifecycle.start();
+            }
+            consecutive_empty_polls = 0;
+            consecutive_empty_tiles = 0;
+            total_input_frames += frames_read as u64;
 
             // Apply pre-SRC gain and lifecycle cosine ramping
             let mut active_slices: ChannelMutSlices<'_> = in_channels
@@ -1147,7 +1111,7 @@ impl LivePipeline {
             // Polyphase SRC / ASRC
             let proc_len = if !asrc_resamplers.is_empty() {
                 // Update drift controller BEFORE running resamplers
-                let dt = frames_read as f64 / self.input_rate.get() as f64;
+                let dt = frames_read as f64 / self.topology.input_rate.get() as f64;
                 if let Some(ref mut drift_ctrl) = asrc_drift_ctrl {
                     // Only control the ASRC when the input can report a real
                     // buffered duration. A slot-count fallback would assume a
@@ -1213,97 +1177,32 @@ impl LivePipeline {
                         .collect()
                 };
 
-                let dsp_start = Instant::now();
                 if is_dsd {
-                    worker_pool.process_tile_dsd(&tile_slices)?;
+                    processor.process_tile_dsd(&tile_slices)?;
                 } else {
-                    worker_pool.process_tile_pcm(&tile_slices)?;
-                }
-                let dsp_dur = dsp_start.elapsed();
-                let dsp_us = dsp_dur.as_micros() as u64;
-                if dsp_us > max_dsp_tile_us {
-                    max_dsp_tile_us = dsp_us;
-                }
-                // Only full-size tiles count as deadline misses. Partial tiles
-                // are dominated by fixed dispatch/futex overhead that does not
-                // scale with tile length, so counting them floods the metric
-                // whenever the input buffer is shallow.
-                if tile == TILE_BASEBAND_FRAMES && dsp_dur > tile_budget {
-                    late_dsp_tiles = late_dsp_tiles.saturating_add(1);
+                    processor.process_tile_pcm(&tile_slices)?;
                 }
 
                 if is_dsd {
-                    let out_l = worker_pool.channel_dsd(0);
-                    let out_r = worker_pool.channel_dsd(1);
+                    let out_l = processor.channel_dsd(0);
+                    let out_r = processor.channel_dsd(1);
 
-                    let ov = worker_pool.total_overload_count();
+                    let ov = processor.total_overload_count();
                     if ov > overload_events {
                         lifecycle.report_overload_trip();
                         overload_events = ov;
                     }
 
                     // Pack and emit
-                    let write_res: Result<(), EngineError> = match self.carrier {
-                        IdleCarrierFormat::NativeDsd => {
-                            let packed_bytes = pack_stereo_dsd_u32_be(
-                                out_l,
-                                out_r,
-                                false,
-                                &mut transport_staging,
-                            )?;
-                            output
-                                .write_all(&transport_staging[..packed_bytes])
-                                .map_err(|e| {
-                                    let code = e.raw_os_error().unwrap_or(0);
-                                    if e.kind() == std::io::ErrorKind::BrokenPipe
-                                        || code == libc::ENODEV
-                                        || code == -libc::ENODEV
-                                        || code == libc::EBADFD
-                                        || code == -libc::EBADFD
-                                        || code == libc::EIO
-                                        || code == -libc::EIO
-                                    {
-                                        EngineError::DeviceDisconnected(e.to_string())
-                                    } else {
-                                        EngineError::Io(e)
-                                    }
-                                })?;
-
-                            total_output_frames += req_out as u64;
-                            Ok(())
-                        }
-                        IdleCarrierFormat::DoP(_) => {
-                            if let Some(ref mut packer) = dop_packer {
-                                let packed_bytes = packer.pack_stereo_frames(
-                                    out_l,
-                                    out_r,
-                                    &mut transport_staging,
-                                )?;
-                                output
-                                    .write_all(&transport_staging[..packed_bytes])
-                                    .map_err(|e| {
-                                        let code = e.raw_os_error().unwrap_or(0);
-                                        if e.kind() == std::io::ErrorKind::BrokenPipe
-                                            || code == libc::ENODEV
-                                            || code == -libc::ENODEV
-                                            || code == libc::EBADFD
-                                            || code == -libc::EBADFD
-                                            || code == libc::EIO
-                                            || code == -libc::EIO
-                                        {
-                                            EngineError::DeviceDisconnected(e.to_string())
-                                        } else {
-                                            EngineError::Io(e)
-                                        }
-                                    })?;
-
-                                total_output_frames += req_out as u64;
-                            }
-                            Ok(())
-                        }
-                        IdleCarrierFormat::Pcm => Ok(()),
-                    };
-                    write_res?;
+                    let frames = pack_and_write_stereo_dsd(
+                        self.carrier,
+                        &mut dop_packer,
+                        out_l,
+                        out_r,
+                        &mut transport_staging,
+                        output,
+                    )?;
+                    total_output_frames += frames as u64;
                 } else {
                     // High-rate PCM output. Quantize to the configured target sample
                     // format. Writing f32 bit patterns into an integer ALSA stream
@@ -1311,7 +1210,7 @@ impl LivePipeline {
                     pcm_staging.clear();
                     for i in 0..req_out {
                         for c in 0..num_channels {
-                            let out_c = worker_pool.channel_pcm(c);
+                            let out_c = processor.channel_pcm(c);
                             let sample = out_c[i];
                             match pcm_sample_format {
                                 SampleFormat::F32 => {
@@ -1371,21 +1270,7 @@ impl LivePipeline {
                             }
                         }
                     }
-                    output.write_all(&pcm_staging).map_err(|e| {
-                        let code = e.raw_os_error().unwrap_or(0);
-                        if e.kind() == std::io::ErrorKind::BrokenPipe
-                            || code == libc::ENODEV
-                            || code == -libc::ENODEV
-                            || code == libc::EBADFD
-                            || code == -libc::EBADFD
-                            || code == libc::EIO
-                            || code == -libc::EIO
-                        {
-                            EngineError::DeviceDisconnected(e.to_string())
-                        } else {
-                            EngineError::Io(e)
-                        }
-                    })?;
+                    write_output_all(output, &pcm_staging)?;
 
                     total_output_frames += req_out as u64;
                 }

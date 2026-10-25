@@ -11,26 +11,35 @@
 
 pub mod asrc;
 pub mod lifecycle;
-pub mod live;
+pub mod live_pipeline;
+pub mod offline_pipeline;
 pub mod peak;
-pub mod pipeline;
+pub mod processor;
 pub mod queue;
 pub mod tail;
+pub mod topology;
 pub mod traits;
+pub mod transport;
 pub mod worker;
 
 pub use asrc::{AdaptiveClockDriftController, ClockDriftConfig, ClockDriftError};
 pub use lifecycle::{BlockAction, IdleCarrierFormat, LifecycleController, LifecycleState};
-pub use live::{
+pub use live_pipeline::{
     DaemonControlHandle, DaemonOutputFormat, DaemonState, DaemonTelemetry, DaemonVolumeMode,
     LivePipeline, StreamExitReason,
 };
+pub use offline_pipeline::{OfflinePipeline, OfflineReport};
 pub use peak::{Pass1PeakResult, measure_true_peak_pass1};
-pub use pipeline::{OfflinePipeline, OfflineReport};
+pub use processor::TileProcessor;
 pub use queue::{AudioSpscQueue, DEFAULT_CHUNK_SAMPLES, TaggedChunk};
 pub use tail::TailManager;
+pub use topology::PipelineTopology;
 pub use traits::{
     AudioInput, AudioOutput, DecoderInput, EngineError, HardwareVolumeBridge, MockAudioInput,
     SeekableSink, StreamSink, VolumeUpdate,
+};
+pub use transport::{
+    is_dsd_passthrough_eligible, pack_and_write_stereo_dsd, process_live_dsd_passthrough_tile,
+    transfer_offline_dsd_passthrough, write_output_all,
 };
 pub use worker::{ChannelWorkerPool, TargetDsdConfig};

@@ -1,5 +1,7 @@
 use audigma_dsp::rates::PcmRateHz;
-use audigma_engine::live::{DaemonControlHandle, DaemonOutputFormat, DaemonState, LivePipeline};
+use audigma_engine::live_pipeline::{
+    DaemonControlHandle, DaemonOutputFormat, DaemonState, LivePipeline,
+};
 use audigma_engine::traits::{AudioInput, AudioOutput, MockAudioInput};
 use audigma_format::AudioStreamInfo;
 use audigma_settings::{OutputContainer, Settings};

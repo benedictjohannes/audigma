@@ -161,6 +161,28 @@ impl DspConfiguration {
     pub fn db_to_linear(db: f64) -> f64 {
         10.0_f64.powf(db / 20.0)
     }
+
+    /// Returns `true` if software volume attenuation and preamp are at unity (0.0 dBFS within 1e-6 tolerance).
+    ///
+    /// When unity gain is satisfied and stream rates match, opportunistic bit-exact
+    /// DSD passthrough is eligible (`Design.md §1.6`).
+    #[inline]
+    pub fn is_volume_unity(&self) -> bool {
+        self.user_volume_db.abs() < 1e-6 && self.preamp_db.abs() < 1e-6
+    }
+
+    /// Computes the effective linear multiplier from a total configured gain in dB.
+    ///
+    /// If `is_muted` is true or `total_gain_db` is at or below the digital silence threshold
+    /// (-119.0 dB), returns 0.0 (complete silence). Otherwise, returns `10^(total_gain_db / 20)`.
+    #[inline]
+    pub fn compute_linear_gain(total_gain_db: f64, is_muted: bool) -> f64 {
+        if is_muted || total_gain_db <= -119.0 {
+            0.0
+        } else {
+            Self::db_to_linear(total_gain_db)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -189,5 +211,34 @@ mod tests {
         // L - M - P = -3.5 - 0.5 - (-1.0) = -3.0 dB, so configured -4.0 dB is kept
         let quiet_gain = cfg.resolve_two_pass_gain_db(-1.0);
         assert!((quiet_gain - (-4.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_volume_unity_and_linear_gain_computation() {
+        let mut cfg = PRESET_REFERENCE.to_default_dsp_config(
+            FilterPhase::Linear,
+            Apodization::Off,
+            0.0,
+            0.0,
+            OverloadPolicy::Error,
+        );
+        assert!(cfg.is_volume_unity());
+
+        cfg.user_volume_db = -0.5;
+        assert!(!cfg.is_volume_unity());
+
+        cfg.user_volume_db = 0.0;
+        cfg.preamp_db = -1.0;
+        assert!(!cfg.is_volume_unity());
+
+        cfg.preamp_db = 0.0;
+        assert!(cfg.is_volume_unity());
+
+        // compute_linear_gain tests
+        assert_eq!(DspConfiguration::compute_linear_gain(0.0, false), 1.0);
+        assert_eq!(DspConfiguration::compute_linear_gain(0.0, true), 0.0);
+        assert_eq!(DspConfiguration::compute_linear_gain(-119.0, false), 0.0);
+        assert_eq!(DspConfiguration::compute_linear_gain(-120.0, false), 0.0);
+        assert!((DspConfiguration::compute_linear_gain(-6.0, false) - 0.5011872336272722).abs() < 1e-9);
     }
 }

@@ -1,7 +1,7 @@
 //! Integration tests for Unified Volume Strategy & Hardware Mixer Bridge (`Design.md §1.8`, `Phase 5 Step 5.5`).
 
 use audigma_dsp::rates::PcmRateHz;
-use audigma_engine::live::{
+use audigma_engine::live_pipeline::{
     DaemonControlHandle, DaemonOutputFormat, DaemonVolumeMode, LivePipeline,
 };
 use audigma_engine::traits::{

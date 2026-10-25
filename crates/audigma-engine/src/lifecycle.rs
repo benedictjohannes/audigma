@@ -13,7 +13,9 @@
 //!    modulator boundary, resets integrators to zero, and fades pre-SRC gain back in once safe.
 
 use audigma_dsp::DSD_IDLE_BYTE;
+use audigma_dsp::config::{SampleFormat, TargetRateSpec};
 use audigma_format::dop::{DopContainerFormat, DopPacker};
+use audigma_settings::{OutputTransport, Settings};
 use serde::{Deserialize, Serialize};
 
 /// High-level lifecycle state of the audigma engine (`Design.md §4.5`).
@@ -46,6 +48,39 @@ pub enum IdleCarrierFormat {
     DoP(DopContainerFormat),
     /// Standard integer/floating-point multi-bit PCM (0x00 silence).
     Pcm,
+}
+
+impl IdleCarrierFormat {
+    /// Resolves the idle carrier format from the configured output settings and target rate spec.
+    pub fn from_settings(settings: &Settings, target_spec: &TargetRateSpec) -> Self {
+        match target_spec {
+            TargetRateSpec::Dsd { .. } => {
+                let transport = settings
+                    .output
+                    .as_ref()
+                    .and_then(|o| o.transport)
+                    .unwrap_or(OutputTransport::Native);
+                match transport {
+                    OutputTransport::Native => Self::NativeDsd,
+                    OutputTransport::Dop => {
+                        let fmt = settings
+                            .output
+                            .as_ref()
+                            .and_then(|o| o.sample_format)
+                            .unwrap_or(SampleFormat::S32Le);
+                        let dop_fmt = match fmt {
+                            SampleFormat::S32Le => DopContainerFormat::S32Le,
+                            SampleFormat::S24Le => DopContainerFormat::S24Le,
+                            _ => DopContainerFormat::S24_3Le,
+                        };
+                        Self::DoP(dop_fmt)
+                    }
+                    OutputTransport::Pcm => Self::Pcm,
+                }
+            }
+            TargetRateSpec::Pcm { .. } => Self::Pcm,
+        }
+    }
 }
 
 /// Action indicator returned after processing a block of pre-SRC PCM frames.

@@ -1,7 +1,9 @@
 //! Integration tests for output device resilience and hotplug lifecycle transitions (`Plan.md Step 5.2`).
 
 use audigma_dsp::rates::PcmRateHz;
-use audigma_engine::live::{DaemonControlHandle, DaemonOutputFormat, DaemonState, LivePipeline};
+use audigma_engine::live_pipeline::{
+    DaemonControlHandle, DaemonOutputFormat, DaemonState, LivePipeline,
+};
 use audigma_engine::traits::{AudioOutput, EngineError, MockAudioInput};
 use audigma_format::AudioStreamInfo;
 use audigma_io::alsa::{AlsaDeviceWatcher, wait_for_alsa_device};

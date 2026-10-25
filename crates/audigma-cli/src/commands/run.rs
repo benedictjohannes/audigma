@@ -7,11 +7,11 @@ use std::time::{Duration, Instant};
 
 use audigma_dsp::config::TargetRateSpec;
 use audigma_dsp::rates::PcmRateHz;
-use audigma_engine::live::{
+use audigma_engine::StreamExitReason;
+use audigma_engine::live_pipeline::{
     DaemonControlHandle, DaemonOutputFormat, DaemonState, DaemonVolumeMode, LivePipeline,
 };
 use audigma_engine::traits::{AudioInput, AudioOutput, EngineError};
-use audigma_engine::StreamExitReason;
 use audigma_io::alsa::{
     AlsaAudioOutput, AlsaHardwareMixer, AlsaOutputConfig, is_alsa_device_present,
     resolve_card_index, wait_for_alsa_device,
@@ -23,8 +23,8 @@ use audigma_io::pipewire::{PipeWirePcmOutput, PipeWireVirtualSink};
 use audigma_settings::{InputBackend, OutputBackend, Settings};
 use clap::Args;
 
-use crate::ipc::{ControlServer, default_socket_path};
 use super::resolve_config_path;
+use crate::ipc::{ControlServer, default_socket_path};
 
 /// Atomic pointer to the daemon running flag for signal handler shutdown (§9, §13.12).
 static DAEMON_RUNNING_PTR: AtomicPtr<AtomicBool> = AtomicPtr::new(std::ptr::null_mut());
@@ -249,8 +249,14 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
     // Install SIGINT / SIGTERM handler to stop daemon cleanly (§9, §13.12)
     DAEMON_RUNNING_PTR.store(Arc::as_ptr(&control.running) as *mut _, Ordering::SeqCst);
     unsafe {
-        libc::signal(libc::SIGINT, sigint_sigterm_handler as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, sigint_sigterm_handler as *const () as libc::sighandler_t);
+        libc::signal(
+            libc::SIGINT,
+            sigint_sigterm_handler as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGTERM,
+            sigint_sigterm_handler as *const () as libc::sighandler_t,
+        );
     }
 
     // Start Unix Control Socket
