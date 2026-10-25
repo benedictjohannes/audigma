@@ -359,7 +359,7 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
                 Some(m)
             }
             Err(e) => {
-                tracing::warn!(
+                tracing::info!(
                     target: "audigma::alsa",
                     event = audigma_log::HARDWARE_MIXER_UNAVAILABLE,
                     device = %target_device,
