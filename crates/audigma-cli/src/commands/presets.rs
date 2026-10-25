@@ -1,6 +1,7 @@
 //! Handler for `audigma presets` subcommand.
 
 use audigma_dsp::presets::{ALL_PRESETS, by_name};
+use audigma_engine::EngineError;
 use clap::{Args, Subcommand};
 
 #[derive(Args, Debug)]
@@ -21,7 +22,7 @@ pub enum PresetsCommands {
     },
 }
 
-pub fn run_presets(args: PresetsArgs) {
+pub fn run_presets(args: PresetsArgs) -> Result<(), EngineError> {
     match args.command {
         PresetsCommands::List => {
             println!(
@@ -35,6 +36,7 @@ pub fn run_presets(args: PresetsArgs) {
                     p.name, p.passband_ripple_max_db, p.stopband_rejection_min_db, p.description
                 );
             }
+            Ok(())
         }
         PresetsCommands::Show { name } => {
             if let Some(p) = by_name(&name) {
@@ -62,10 +64,11 @@ pub fn run_presets(args: PresetsArgs) {
                     "Baseline Headroom:       {:.2} dB",
                     p.modulator.baseline_headroom_db
                 );
+                Ok(())
             } else {
-                eprintln!("audigma error: unknown preset '{}'", name);
-                eprintln!("Available presets: balanced, reference, low-latency");
-                std::process::exit(1);
+                Err(EngineError::Pipeline(format!(
+                    "unknown preset '{name}'; available presets: balanced, reference, low-latency"
+                )))
             }
         }
     }

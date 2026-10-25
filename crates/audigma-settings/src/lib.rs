@@ -490,6 +490,13 @@ pub struct OfflineConfig {
     pub dsf_pad_mode: DsfPadMode,
 }
 
+/// `[logging]` options (`StructuredLogging.md §7.4`, `§13.3`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct LoggingConfig {
+    pub format: Option<String>,
+    pub level: Option<String>,
+}
+
 /// Top-level `Schema v1` configuration (`Design.md §6`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -504,6 +511,7 @@ pub struct Settings {
     pub clock: Option<ClockConfig>,
     pub runtime: Option<RuntimeConfig>,
     pub offline: Option<OfflineConfig>,
+    pub logging: Option<LoggingConfig>,
 }
 
 /// Concrete resolution produced by `Settings::explain_for_input_rate` (`audigma config explain`).
@@ -584,6 +592,7 @@ impl Settings {
                     write_report: Some(false),
                     dsf_pad_mode: DsfPadMode::SpecZero,
                 }),
+                logging: None,
             },
             OutputContainer::Wav => Self {
                 schema_version: SCHEMA_VERSION_V1,
@@ -644,6 +653,7 @@ impl Settings {
                     write_report: Some(false),
                     dsf_pad_mode: DsfPadMode::SpecZero,
                 }),
+                logging: None,
             },
             OutputContainer::Flac => Self {
                 schema_version: SCHEMA_VERSION_V1,
@@ -704,6 +714,7 @@ impl Settings {
                     write_report: Some(false),
                     dsf_pad_mode: DsfPadMode::SpecZero,
                 }),
+                logging: None,
             },
             OutputContainer::Raw => Self {
                 schema_version: SCHEMA_VERSION_V1,
@@ -759,6 +770,7 @@ impl Settings {
                 clock: None,
                 runtime: None,
                 offline: None,
+                logging: None,
             },
         }
     }
@@ -1019,6 +1031,26 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_logging_config_section() {
+        let toml_str = r#"
+schema_version = 1
+
+[logging]
+format = "json"
+level = "debug"
+
+[target]
+format = "dsd"
+rate_family = "44100"
+dsd_rate = "dsd128"
+"#;
+        let settings = Settings::from_toml_str(toml_str).unwrap();
+        let log_cfg = settings.logging.as_ref().unwrap();
+        assert_eq!(log_cfg.format.as_deref(), Some("json"));
+        assert_eq!(log_cfg.level.as_deref(), Some("debug"));
+    }
     use audigma_dsp::DsdBitRateHz;
 
     #[test]

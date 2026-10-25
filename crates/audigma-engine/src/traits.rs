@@ -132,6 +132,21 @@ pub trait AudioInput: Send {
 
     /// Sets the target preroll cushion duration in seconds before playback begins or resumes.
     fn set_preroll_secs(&mut self, _secs: f64) {}
+
+    /// Takes any real-time log event consumer registered on this input.
+    fn take_rt_consumer(&mut self) -> Option<audigma_log::RtLogConsumer> {
+        None
+    }
+
+    /// Returns the dropped event counter associated with this input's RT logger, if any.
+    fn dropped_rt_events(&self) -> Option<std::sync::Arc<std::sync::atomic::AtomicU64>> {
+        None
+    }
+
+    /// Returns the decimation error recorder for high-rate audio loop errors, if any.
+    fn decimation_recorder(&self) -> Option<std::sync::Arc<audigma_log::DecimationErrorRecorder>> {
+        None
+    }
 }
 
 /// Abstract hardware volume bridge for synchronized analog attenuation (`Design.md §1.8`).

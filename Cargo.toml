@@ -7,6 +7,7 @@ members = [
     "crates/audigma-engine",
     "crates/audigma-io",
     "crates/audigma-cli",
+    "crates/audigma-log",
 ]
 
 [workspace.package]
@@ -33,6 +34,9 @@ pipewire = "0.10.1"
 libspa = "0.10.1"
 libc = "0.2"
 tempfile = "3.17"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "json", "env-filter"] }
+tracing-appender = "0.2"
 
 
 

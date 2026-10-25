@@ -23,6 +23,9 @@ audigma-format = { path = "../audigma-format" }
 audigma-settings = { path = "../audigma-settings" }
 audigma-engine = { path = "../audigma-engine" }
 audigma-io = { path = "../audigma-io" }
+audigma-log = { path = "../audigma-log" }
+tracing = { workspace = true }
+libc = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

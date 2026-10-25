@@ -11,6 +11,8 @@ description = "Pure-Rust audio pipeline planner, offline converter, and abstract
 audigma-dsp = { path = "../audigma-dsp" }
 audigma-format = { path = "../audigma-format" }
 audigma-settings = { path = "../audigma-settings" }
+audigma-log = { path = "../audigma-log" }
+tracing = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 rtrb = { workspace = true }

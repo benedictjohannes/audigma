@@ -31,6 +31,14 @@ pub use crate::volume::parse_volume_to_db;
     long_about = "audigma is a high-precision Rust audio engine, CLI, and Linux audio service for high-precision PCM resampling and PCM-to-1-bit Delta-Sigma Modulation (DSD)."
 )]
 pub struct Cli {
+    /// Log renderer format ("text", "json", "auto")
+    #[arg(long = "log-format", global = true)]
+    pub log_format: Option<audigma_log::LogFormat>,
+
+    /// Diagnostic log level filter ("error", "warn", "info", "debug", "trace")
+    #[arg(long = "log-level", global = true)]
+    pub log_level: Option<audigma_log::LogLevel>,
+
     #[command(subcommand)]
     pub command: Commands,
 }

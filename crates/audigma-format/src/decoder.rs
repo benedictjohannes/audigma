@@ -243,7 +243,12 @@ impl AudioDecoder {
                 }
                 Err(SymphoniaError::DecodeError(msg)) => {
                     // Recoverable packet decode error: log and skip
-                    eprintln!("audigma warning: skipped corrupted packet: {msg}");
+                    tracing::warn!(
+                        target: "audigma::format::decoder",
+                        event = "corrupted_packet_skipped",
+                        error = %msg,
+                        "skipped corrupted packet"
+                    );
                     continue;
                 }
                 Err(SymphoniaError::ResetRequired) => {

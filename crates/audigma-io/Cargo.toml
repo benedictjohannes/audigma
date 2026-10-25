@@ -18,6 +18,8 @@ audigma-dsp = { path = "../audigma-dsp" }
 audigma-format = { path = "../audigma-format" }
 audigma-settings = { path = "../audigma-settings" }
 audigma-engine = { path = "../audigma-engine" }
+audigma-log = { path = "../audigma-log" }
+tracing = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

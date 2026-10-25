@@ -564,6 +564,9 @@ pub struct PipeWireVirtualSink {
     dsd_residue: Vec<Vec<u8>>,
     prerolled: bool,
     preroll_secs: f64,
+    rt_consumer: Option<audigma_log::RtLogConsumer>,
+    dropped_rt_events: Arc<AtomicU64>,
+    decimation_recorder: Arc<audigma_log::DecimationErrorRecorder>,
 }
 
 impl PipeWireVirtualSink {
@@ -647,6 +650,12 @@ impl PipeWireVirtualSink {
         let processed_chunks = Arc::new(AtomicU64::new(0));
         let buffered_units = Arc::new(AtomicU64::new(0));
 
+        let (rt_producer, rt_consumer, dropped_rt_events) =
+            audigma_log::rt_log_channel(audigma_log::DEFAULT_RT_QUEUE_CAPACITY);
+        let rt_producer = Arc::new(Mutex::new(rt_producer));
+        let rt_producer_cb = rt_producer.clone();
+        let decimation_recorder = Arc::new(audigma_log::DecimationErrorRecorder::new());
+
         let gen_clone = generation.clone();
         let active_rate_cb = active_rate.clone();
         let pending_rate_cb = pending_rate.clone();
@@ -727,7 +736,6 @@ impl PipeWireVirtualSink {
                         if id == libspa::param::ParamType::Format.as_raw() {
                             let bytes = param.as_bytes();
                             let parsed = parse_format_pod(bytes);
-                            eprintln!("[audigma-pw-in] format param_changed: parsed={:?}", parsed);
                             let mut negotiated_stream_rate_and_stride: Option<(u32, u32)> = None;
                             if let Some(parsed) = parsed {
                                 is_dsd_cb.store(parsed.is_dsd, Ordering::SeqCst);
@@ -741,14 +749,16 @@ impl PipeWireVirtualSink {
                                         .map(|r| audigma_dsp::rates::select_dsd_intermediate_rate(r, None, None).get())
                                         .unwrap_or(176_400);
 
-                                    eprintln!(
-                                        "[audigma-pw-in] DSD format negotiated: bit_rate={} Hz, bitorder={}, interleave={}, channels={}, intermediate_rate={} Hz",
-                                        bit_rate,
-                                        if parsed.is_lsb { "lsb" } else { "msb" },
-                                        parsed.interleave,
-                                        parsed.channels,
-                                        intermediate_rate
-                                    );
+                                    if let Ok(mut p) = rt_producer_cb.try_lock() {
+                                        let _ = p.try_push(audigma_log::RtLogEvent::FormatNegotiated {
+                                            is_dsd: true,
+                                            rate_hz: parsed.rate,
+                                            bit_rate_hz: bit_rate,
+                                            intermediate_rate_hz: intermediate_rate,
+                                            channels: parsed.channels as u8,
+                                            interleave: parsed.interleave,
+                                        });
+                                    }
                                     let stride = parsed.channels.max(1)
                                         * parsed.interleave.unsigned_abs().max(1);
                                     negotiated_stream_rate_and_stride = Some((parsed.rate, stride));
@@ -758,10 +768,16 @@ impl PipeWireVirtualSink {
                                     }
                                 } else {
                                     active_dsd_rate_cb.store(0, Ordering::SeqCst);
-                                    eprintln!(
-                                        "[audigma-pw-in] PCM format negotiated: rate={} Hz, channels={}",
-                                        parsed.rate, parsed.channels
-                                    );
+                                    if let Ok(mut p) = rt_producer_cb.try_lock() {
+                                        let _ = p.try_push(audigma_log::RtLogEvent::FormatNegotiated {
+                                            is_dsd: false,
+                                            rate_hz: parsed.rate,
+                                            bit_rate_hz: parsed.rate,
+                                            intermediate_rate_hz: parsed.rate,
+                                            channels: parsed.channels as u8,
+                                            interleave: 1,
+                                        });
+                                    }
                                     let stride = parsed.channels.max(1) * 4;
                                     negotiated_stream_rate_and_stride = Some((parsed.rate, stride));
                                     let cur_active = active_rate_cb.load(Ordering::Relaxed);
@@ -777,12 +793,16 @@ impl PipeWireVirtualSink {
                                     active_dsd_rate_cb.store(0, Ordering::SeqCst);
                                     let negotiated_rate = info.rate();
                                     let negotiated_channels = info.channels();
-                                    eprintln!(
-                                        "[audigma-pw-in] format negotiated: rate={}, channels={}, pos={:?}",
-                                        negotiated_rate,
-                                        negotiated_channels,
-                                        &info.position()[..negotiated_channels as usize]
-                                    );
+                                    if let Ok(mut p) = rt_producer_cb.try_lock() {
+                                        let _ = p.try_push(audigma_log::RtLogEvent::FormatNegotiated {
+                                            is_dsd: false,
+                                            rate_hz: negotiated_rate,
+                                            bit_rate_hz: negotiated_rate,
+                                            intermediate_rate_hz: negotiated_rate,
+                                            channels: negotiated_channels as u8,
+                                            interleave: 1,
+                                        });
+                                    }
                                     if negotiated_rate > 0 {
                                         let stride = negotiated_channels.max(1) * 4;
                                         negotiated_stream_rate_and_stride =
@@ -807,10 +827,13 @@ impl PipeWireVirtualSink {
                         } else if id == libspa::param::ParamType::Props.as_raw() {
                             let bytes = param.as_bytes();
                             if let Some(vol_update) = parse_props_pod(bytes) {
-                                eprintln!(
-                                    "[audigma-pw-in] stream volume event: pct={:?}%, vol={:?} dB, mute={:?}",
-                                    vol_update.volume_percent, vol_update.volume_db, vol_update.is_muted
-                                );
+                                if let Ok(mut p) = rt_producer_cb.try_lock() {
+                                    let _ = p.try_push(audigma_log::RtLogEvent::VolumeEvent {
+                                        volume_percent: vol_update.volume_percent.map(|v| v as f32),
+                                        volume_db: vol_update.volume_db.map(|v| v as f32),
+                                        muted: vol_update.is_muted,
+                                    });
+                                }
                                 let mut pending = pending_vol_cb.lock().unwrap();
                                 let prev: VolumeUpdate = pending.unwrap_or_default();
                                 *pending = Some(VolumeUpdate {
@@ -1133,6 +1156,9 @@ impl PipeWireVirtualSink {
             dsd_residue: Vec::new(),
             prerolled: false,
             preroll_secs: DEFAULT_INPUT_PREROLL_SECS,
+            rt_consumer: Some(rt_consumer),
+            dropped_rt_events,
+            decimation_recorder,
         })
     }
 
@@ -1400,7 +1426,13 @@ impl AudioInput for PipeWireVirtualSink {
                         &scratch[c][..aligned_bytes],
                         &mut ch_slice[..pcm_frames_produced],
                     ) {
-                        eprintln!("[audigma-pw-in] decimation error on channel {c}: {e:?}");
+                        let code = match e {
+                            audigma_dsp::FirError::OutputBufferTooSmall { .. } => 1,
+                            audigma_dsp::FirError::TileSizeExceeded { .. } => 2,
+                            audigma_dsp::FirError::UnsupportedRatio { .. } => 3,
+                            audigma_dsp::FirError::UnalignedDecimationInput { .. } => 4,
+                        };
+                        self.decimation_recorder.record(c as u8, code);
                         ch_slice[..pcm_frames_produced].fill(0.0);
                     }
                 } else {
@@ -1589,6 +1621,18 @@ impl AudioInput for PipeWireVirtualSink {
 
     fn set_preroll_secs(&mut self, secs: f64) {
         PipeWireVirtualSink::set_preroll_secs(self, secs);
+    }
+
+    fn take_rt_consumer(&mut self) -> Option<audigma_log::RtLogConsumer> {
+        self.rt_consumer.take()
+    }
+
+    fn dropped_rt_events(&self) -> Option<Arc<AtomicU64>> {
+        Some(Arc::clone(&self.dropped_rt_events))
+    }
+
+    fn decimation_recorder(&self) -> Option<Arc<audigma_log::DecimationErrorRecorder>> {
+        Some(Arc::clone(&self.decimation_recorder))
     }
 }
 
