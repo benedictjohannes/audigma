@@ -2,13 +2,11 @@
 
 use std::path::PathBuf;
 
-use audigma_engine::traits::EngineError;
 use clap::{Args, Subcommand};
 use serde_json::json;
 
-use crate::ipc::{
-    ControlClient, IpcError, IpcRequest, IpcResponse, default_socket_path,
-};
+use crate::error::CliError;
+use crate::ipc::{ControlClient, IpcError, IpcRequest, IpcResponse, default_socket_path};
 use crate::volume::{VolumeArg, parse_volume_arg, validate_volume_db};
 
 #[derive(Args, Debug)]
@@ -55,26 +53,24 @@ pub enum SetCommands {
     Preset { name: String },
 }
 
-pub fn run_stop(args: StopArgs) -> Result<(), EngineError> {
+pub fn run_stop(args: StopArgs) -> Result<(), CliError> {
     let socket_path = args.socket.unwrap_or_else(default_socket_path);
     match ControlClient::send(&socket_path, IpcRequest::Stop) {
         Ok(IpcResponse::Ok) => {
             eprintln!("audigma: stop request sent to daemon.");
             Ok(())
         }
-        Ok(IpcResponse::Error(msg)) => Err(EngineError::Pipeline(format!(
-            "daemon returned error: {msg}"
-        ))),
+        Ok(IpcResponse::Error(msg)) => Err(CliError::Daemon(msg)),
         Ok(_) => Ok(()),
         Err(IpcError::DaemonNotRunning(_)) => {
             eprintln!("audigma: daemon is not running.");
             Ok(())
         }
-        Err(e) => Err(EngineError::Pipeline(format!("failed to stop daemon: {e}"))),
+        Err(e) => Err(CliError::Ipc(e)),
     }
 }
 
-pub fn run_status(args: StatusArgs) -> Result<(), EngineError> {
+pub fn run_status(args: StatusArgs) -> Result<(), CliError> {
     let socket_path = args.socket.unwrap_or_else(default_socket_path);
 
     loop {
@@ -82,7 +78,7 @@ pub fn run_status(args: StatusArgs) -> Result<(), EngineError> {
             Ok(IpcResponse::Telemetry(telem)) => {
                 if args.json {
                     let json_val = serde_json::to_string_pretty(&telem)
-                        .map_err(|e| EngineError::Pipeline(e.to_string()))?;
+                        .map_err(|e| CliError::Serialization(e.to_string()))?;
                     println!("{json_val}");
                 } else {
                     println!("Audigma Daemon Status:");
@@ -119,7 +115,11 @@ pub fn run_status(args: StatusArgs) -> Result<(), EngineError> {
                         "  Input Ring Chunks:   {} processed, {} dropped",
                         telem.processed_chunks, telem.dropped_chunks
                     );
-                    let fault_str = if telem.asrc_fault_active { " [FAULT ACTIVE]" } else { "" };
+                    let fault_str = if telem.asrc_fault_active {
+                        " [FAULT ACTIVE]"
+                    } else {
+                        ""
+                    };
                     println!(
                         "  ASRC Clock Drift:    {:.1} ppm (starvations: {}, overruns: {}){fault_str}",
                         telem.drift_ppm, telem.asrc_starvations, telem.asrc_overruns
@@ -140,9 +140,7 @@ pub fn run_status(args: StatusArgs) -> Result<(), EngineError> {
                 }
             }
             Ok(IpcResponse::Error(msg)) => {
-                return Err(EngineError::Pipeline(format!(
-                    "daemon returned error: {msg}"
-                )));
+                return Err(CliError::Daemon(msg));
             }
             Ok(_) => {}
             Err(IpcError::DaemonNotRunning(_)) => {
@@ -153,7 +151,7 @@ pub fn run_status(args: StatusArgs) -> Result<(), EngineError> {
                 }
                 return Ok(());
             }
-            Err(e) => return Err(EngineError::Pipeline(format!("IPC query failed: {e}"))),
+            Err(e) => return Err(CliError::Ipc(e)),
         }
 
         if !args.watch {
@@ -165,14 +163,14 @@ pub fn run_status(args: StatusArgs) -> Result<(), EngineError> {
     Ok(())
 }
 
-pub fn run_set(args: SetArgs) -> Result<(), EngineError> {
+pub fn run_set(args: SetArgs) -> Result<(), CliError> {
     let socket_path = args.socket.unwrap_or_else(default_socket_path);
     let req = match args.command {
         SetCommands::Volume { value } => {
-            match parse_volume_arg(&value).map_err(EngineError::Pipeline)? {
+            match parse_volume_arg(&value).map_err(CliError::Volume)? {
                 VolumeArg::Percent(percent) => IpcRequest::SetVolumePercent { percent },
                 VolumeArg::Db(volume_db) => IpcRequest::SetVolume {
-                    volume_db: validate_volume_db(volume_db).map_err(EngineError::Pipeline)?,
+                    volume_db: validate_volume_db(volume_db).map_err(CliError::Volume)?,
                 },
             }
         }
@@ -184,10 +182,8 @@ pub fn run_set(args: SetArgs) -> Result<(), EngineError> {
             eprintln!("audigma: setting updated successfully.");
             Ok(())
         }
-        Ok(IpcResponse::Error(msg)) => Err(EngineError::Pipeline(format!("daemon error: {msg}"))),
+        Ok(IpcResponse::Error(msg)) => Err(CliError::Daemon(msg)),
         Ok(_) => Ok(()),
-        Err(e) => Err(EngineError::Pipeline(format!(
-            "failed to communicate with daemon: {e}"
-        ))),
+        Err(e) => Err(CliError::Ipc(e)),
     }
 }

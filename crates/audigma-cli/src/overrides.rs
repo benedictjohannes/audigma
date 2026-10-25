@@ -1,16 +1,16 @@
 //! Ad-hoc TOML configuration override parsing and manipulation.
 
-use audigma_engine::traits::EngineError;
+use crate::error::CliError;
 
 /// Recursively sets a dotted key (e.g. "output.transport" or "gain.preamp_db") on a `toml::Table`.
 pub fn apply_toml_override(
     root: &mut toml::Table,
     key_path: &str,
     raw_value: &str,
-) -> Result<(), EngineError> {
+) -> Result<(), CliError> {
     let parts: Vec<&str> = key_path.split('.').map(str::trim).collect();
     if parts.iter().any(|p| p.is_empty()) {
-        return Err(EngineError::Pipeline(format!(
+        return Err(CliError::Override(format!(
             "invalid override key '{key_path}' (expected e.g. output.device)"
         )));
     }
@@ -29,7 +29,7 @@ pub fn apply_toml_override(
         match entry {
             toml::Value::Table(tbl) => current = tbl,
             _ => {
-                return Err(EngineError::Pipeline(format!(
+                return Err(CliError::Override(format!(
                     "cannot set nested key '{key_path}': segment '{part}' is not a table"
                 )));
             }

@@ -259,3 +259,29 @@ fn test_pipewire_virtual_sink_initial_volume_state() {
         }
     }
 }
+
+#[test]
+#[cfg(feature = "pipewire")]
+fn test_pipewire_error_conversion_to_engine_error() {
+    use audigma_engine::traits::EngineError;
+    use audigma_io::pipewire::PipeWireError;
+
+    let err1 = PipeWireError::StreamFailed;
+    let engine_err1: EngineError = err1.into();
+    match engine_err1 {
+        EngineError::DeviceDisconnected(msg) => {
+            assert!(msg.contains("PipeWire stream disconnected"));
+        }
+        _ => panic!("expected DeviceDisconnected"),
+    }
+
+    let err2 = PipeWireError::FormatPod("invalid layout".into());
+    let engine_err2: EngineError = err2.into();
+    match engine_err2 {
+        EngineError::AudioBackend { backend, message } => {
+            assert_eq!(backend, "pipewire");
+            assert!(message.contains("invalid layout"));
+        }
+        _ => panic!("expected AudioBackend"),
+    }
+}

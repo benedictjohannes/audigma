@@ -3,12 +3,12 @@
 use std::path::PathBuf;
 
 use audigma_dsp::rates::PcmRateHz;
-use audigma_engine::traits::EngineError;
 use audigma_settings::Settings;
 use clap::{Args, Subcommand};
 use serde_json::json;
 
 use super::resolve_config_path;
+use crate::error::CliError;
 
 #[derive(Args, Debug)]
 pub struct ConfigArgs {
@@ -41,14 +41,14 @@ pub enum ConfigCommands {
     },
 }
 
-pub fn run_config(args: ConfigArgs) -> Result<(), EngineError> {
+pub fn run_config(args: ConfigArgs) -> Result<(), CliError> {
     match args.command {
         ConfigCommands::Check { config } => {
             let path = resolve_config_path(config.as_deref());
             let content = std::fs::read_to_string(&path).map_err(|e| {
-                EngineError::Io(std::io::Error::new(
-                    e.kind(),
-                    format!("failed to read config file '{}': {e}", path.display()),
+                CliError::Config(format!(
+                    "failed to read config file '{}': {e}",
+                    path.display()
                 ))
             })?;
             let settings = Settings::from_toml_str(&content)?;
@@ -63,16 +63,16 @@ pub fn run_config(args: ConfigArgs) -> Result<(), EngineError> {
         } => {
             let path = resolve_config_path(config.as_deref());
             let content = std::fs::read_to_string(&path).map_err(|e| {
-                EngineError::Io(std::io::Error::new(
-                    e.kind(),
-                    format!("failed to read config file '{}': {e}", path.display()),
+                CliError::Config(format!(
+                    "failed to read config file '{}': {e}",
+                    path.display()
                 ))
             })?;
             let settings = Settings::from_toml_str(&content)?;
             settings.validate()?;
 
             let pcm_rate = PcmRateHz::new(input_rate).ok_or_else(|| {
-                EngineError::Pipeline(format!("unsupported input sample rate {input_rate} Hz"))
+                CliError::Config(format!("unsupported input sample rate {input_rate} Hz"))
             })?;
             let plan = settings.explain_for_input_rate(pcm_rate)?;
 

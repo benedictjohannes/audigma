@@ -34,6 +34,24 @@ pub enum EngineError {
     #[error("unsupported rate conversion from {in_rate} Hz to {out_rate} Hz")]
     UnsupportedRateConversion { in_rate: u32, out_rate: u32 },
 
+    #[error("device '{device}' unavailable: {reason}")]
+    DeviceUnavailable { device: String, reason: String },
+
+    #[error("mixer control '{control}' error: {reason}")]
+    Mixer { control: String, reason: String },
+
+    #[error("{backend} audio backend error: {message}")]
+    AudioBackend {
+        backend: &'static str,
+        message: String,
+    },
+
+    #[error("invalid pipeline topology: {message}")]
+    InvalidTopology { message: String },
+
+    #[error("worker thread {channel} error: {reason}")]
+    WorkerThread { channel: usize, reason: String },
+
     #[error("pipeline error: {0}")]
     Pipeline(String),
 
@@ -66,10 +84,12 @@ pub trait AudioInput: Send {
             let (first, second) = channels.split_at_mut(1);
             self.read_stereo(first[0], second[0])
         } else {
-            Err(EngineError::Pipeline(format!(
-                "audio input driver does not support {} channels",
-                channels.len()
-            )))
+            Err(EngineError::InvalidTopology {
+                message: format!(
+                    "audio input driver does not support {} channels",
+                    channels.len()
+                ),
+            })
         }
     }
 
@@ -79,9 +99,9 @@ pub trait AudioInput: Send {
     /// Returns `Ok(bytes_read)`. Returns `Ok(0)` when end-of-stream (EOF) is reached.
     fn read_dsd_bytes(&mut self, channels: &mut [&mut [u8]]) -> Result<usize, EngineError> {
         let _ = channels;
-        Err(EngineError::Pipeline(
-            "audio input driver does not support raw DSD reading".into(),
-        ))
+        Err(EngineError::InvalidTopology {
+            message: "audio input driver does not support raw DSD reading".into(),
+        })
     }
 
     /// Checks if a dynamic input sample rate change has been negotiated.
@@ -469,9 +489,9 @@ impl AudioInput for MockAudioInput {
 
     fn read_dsd_bytes(&mut self, channels: &mut [&mut [u8]]) -> Result<usize, EngineError> {
         if self.dsd_channels.is_empty() {
-            return Err(EngineError::Pipeline(
-                "mock audio input has no DSD channels".into(),
-            ));
+            return Err(EngineError::InvalidTopology {
+                message: "mock audio input has no DSD channels".into(),
+            });
         }
         let total = self.dsd_channels[0].len();
         let remaining = total.saturating_sub(self.dsd_pos);
@@ -606,5 +626,86 @@ mod tests {
         let mut stream = StreamSink(&mut out);
         assert!(!stream.can_seek());
         assert!(stream.seek_sink(SeekFrom::Start(10)).is_err());
+    }
+
+    #[test]
+    fn test_typed_engine_errors_formatting_and_matching() {
+        let err1 = EngineError::DeviceUnavailable {
+            device: "hw:CARD=DAC,DEV=0".into(),
+            reason: "device or resource busy".into(),
+        };
+        assert_eq!(
+            err1.to_string(),
+            "device 'hw:CARD=DAC,DEV=0' unavailable: device or resource busy"
+        );
+        match err1 {
+            EngineError::DeviceUnavailable { device, reason } => {
+                assert_eq!(device, "hw:CARD=DAC,DEV=0");
+                assert_eq!(reason, "device or resource busy");
+            }
+            _ => panic!("unexpected variant"),
+        }
+
+        let err2 = EngineError::Mixer {
+            control: "Master".into(),
+            reason: "element not found".into(),
+        };
+        assert_eq!(
+            err2.to_string(),
+            "mixer control 'Master' error: element not found"
+        );
+        match err2 {
+            EngineError::Mixer { control, reason } => {
+                assert_eq!(control, "Master");
+                assert_eq!(reason, "element not found");
+            }
+            _ => panic!("unexpected variant"),
+        }
+
+        let err3 = EngineError::AudioBackend {
+            backend: "pipewire",
+            message: "context connection lost".into(),
+        };
+        assert_eq!(
+            err3.to_string(),
+            "pipewire audio backend error: context connection lost"
+        );
+        match err3 {
+            EngineError::AudioBackend { backend, message } => {
+                assert_eq!(backend, "pipewire");
+                assert_eq!(message, "context connection lost");
+            }
+            _ => panic!("unexpected variant"),
+        }
+
+        let err4 = EngineError::InvalidTopology {
+            message: "incompatible rate family cascade".into(),
+        };
+        assert_eq!(
+            err4.to_string(),
+            "invalid pipeline topology: incompatible rate family cascade"
+        );
+        match err4 {
+            EngineError::InvalidTopology { message } => {
+                assert_eq!(message, "incompatible rate family cascade");
+            }
+            _ => panic!("unexpected variant"),
+        }
+
+        let err5 = EngineError::WorkerThread {
+            channel: 1,
+            reason: "worker thread 1 terminated unexpectedly".into(),
+        };
+        assert_eq!(
+            err5.to_string(),
+            "worker thread 1 error: worker thread 1 terminated unexpectedly"
+        );
+        match err5 {
+            EngineError::WorkerThread { channel, reason } => {
+                assert_eq!(channel, 1);
+                assert_eq!(reason, "worker thread 1 terminated unexpectedly");
+            }
+            _ => panic!("unexpected variant"),
+        }
     }
 }

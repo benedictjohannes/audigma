@@ -154,9 +154,9 @@ impl AudioInput for FileAudioInput {
 
     fn read_dsd_bytes(&mut self, channels: &mut [&mut [u8]]) -> Result<usize, EngineError> {
         match &mut self.source {
-            FileInputSource::Pcm(_) => Err(EngineError::Pipeline(
-                "PCM file input does not provide raw DSD bytes".into(),
-            )),
+            FileInputSource::Pcm(_) => Err(EngineError::InvalidTopology {
+                message: "PCM file input does not provide raw DSD bytes".into(),
+            }),
             FileInputSource::Dsf { reader, .. } => Ok(reader.read_dsd_bytes(channels)?),
         }
     }

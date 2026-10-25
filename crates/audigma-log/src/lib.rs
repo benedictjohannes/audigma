@@ -6,9 +6,9 @@ pub mod rt;
 
 use std::io::IsTerminal;
 use tracing_appender::non_blocking::{NonBlockingBuilder, WorkerGuard};
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::EnvFilter;
 
 pub use config::{LogConfig, LogConfigError, LogFormat, LogLevel};
 pub use events::*;
@@ -36,11 +36,7 @@ pub fn init(config: &LogConfig) -> Result<WorkerGuard, LogConfigError> {
 }
 
 /// Internal subscriber registration with custom non-blocking writer.
-fn init_internal<W>(
-    config: &LogConfig,
-    writer: W,
-    is_terminal: bool,
-) -> Result<(), LogConfigError>
+fn init_internal<W>(config: &LogConfig, writer: W, is_terminal: bool) -> Result<(), LogConfigError>
 where
     W: for<'writer> tracing_subscriber::fmt::MakeWriter<'writer> + Send + Sync + 'static,
 {

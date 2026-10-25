@@ -21,7 +21,9 @@ use thiserror::Error;
 /// Errors arising from adaptive clock drift tracking.
 #[derive(Debug, Error, PartialEq)]
 pub enum ClockDriftError {
-    #[error("Buffer underrun / starvation threshold reached (fill {fill_ms:.1} ms < min {min_ms:.1} ms)")]
+    #[error(
+        "Buffer underrun / starvation threshold reached (fill {fill_ms:.1} ms < min {min_ms:.1} ms)"
+    )]
     Starvation { fill_ms: f64, min_ms: f64 },
 
     #[error("Buffer overrun threshold reached (fill {fill_ms:.1} ms > max {max_ms:.1} ms)")]
@@ -131,11 +133,7 @@ impl AdaptiveClockDriftController {
     /// A safety fault is only reported once the buffer has stayed past the rail for
     /// `fault_debounce_secs`; before that the rail correction is still returned as a
     /// normal `Ok` value so the buffer is actively restored.
-    pub fn update(
-        &mut self,
-        fill_secs: f64,
-        dt_seconds: f64,
-    ) -> Result<f64, ClockDriftError> {
+    pub fn update(&mut self, fill_secs: f64, dt_seconds: f64) -> Result<f64, ClockDriftError> {
         if !fill_secs.is_finite() {
             return Ok(self.last_correction_ppm);
         }
@@ -184,8 +182,7 @@ impl AdaptiveClockDriftController {
         } else {
             1.0
         };
-        self.smoothed_fill_secs =
-            (1.0 - alpha) * self.smoothed_fill_secs + alpha * fill_secs;
+        self.smoothed_fill_secs = (1.0 - alpha) * self.smoothed_fill_secs + alpha * fill_secs;
 
         // Relative error: a low buffer yields a negative correction (consume
         // input more slowly), a high buffer yields a positive correction.
@@ -250,12 +247,18 @@ mod tests {
         // Below target but above the starvation rail: consume input more slowly.
         let mut low = AdaptiveClockDriftController::new(test_config());
         let ppm = low.update(0.060, 0.005).unwrap();
-        assert!(ppm < 0.0, "low buffer should request negative ppm, got {ppm}");
+        assert!(
+            ppm < 0.0,
+            "low buffer should request negative ppm, got {ppm}"
+        );
 
         // Above target but below the overrun rail: consume input faster.
         let mut high = AdaptiveClockDriftController::new(test_config());
         let ppm = high.update(0.100, 0.005).unwrap();
-        assert!(ppm > 0.0, "high buffer should request positive ppm, got {ppm}");
+        assert!(
+            ppm > 0.0,
+            "high buffer should request positive ppm, got {ppm}"
+        );
     }
 
     #[test]

@@ -24,6 +24,7 @@ use audigma_settings::{InputBackend, OutputBackend, Settings};
 use clap::Args;
 
 use super::resolve_config_path;
+use crate::error::CliError;
 use crate::ipc::{ControlServer, default_socket_path};
 
 /// Atomic pointer to the daemon running flag for signal handler shutdown (§9, §13.12).
@@ -45,14 +46,11 @@ pub struct RunArgs {
     pub config: Option<PathBuf>,
 }
 
-pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
+pub fn run_run(args: RunArgs) -> Result<(), CliError> {
     let daemon_start_time = Instant::now();
     let config_path = resolve_config_path(args.config.as_deref());
     if !config_path.exists() {
-        return Err(EngineError::Pipeline(format!(
-            "configuration file not found at: {}",
-            config_path.display()
-        )));
+        return Err(CliError::ConfigNotFound { path: config_path });
     }
 
     let content = std::fs::read_to_string(&config_path)?;
@@ -62,11 +60,11 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
     let in_cfg = settings
         .input
         .as_ref()
-        .ok_or_else(|| EngineError::Pipeline("missing [input] section in config".to_string()))?;
+        .ok_or_else(|| CliError::Config("missing [input] section in config".to_string()))?;
     let out_cfg = settings
         .output
         .as_ref()
-        .ok_or_else(|| EngineError::Pipeline("missing [output] section in config".to_string()))?;
+        .ok_or_else(|| CliError::Config("missing [output] section in config".to_string()))?;
 
     let input_rate = in_cfg.rate_hz.unwrap_or(PcmRateHz::PCM_48000);
     let channels = in_cfg.channels.unwrap_or(2);
@@ -158,24 +156,26 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
                 InputBackend::Pipewire => {
                     let mut sink =
                         PipeWireVirtualSink::from_input_config(in_cfg, input_rate.get(), 128)
-                            .map_err(|e| {
-                                EngineError::Pipeline(format!(
-                                    "failed to bind PipeWire virtual sink: {e}"
-                                ))
+                            .map_err(|e| EngineError::AudioBackend {
+                                backend: "pipewire",
+                                message: format!("failed to bind PipeWire virtual sink: {e}"),
                             })?;
                     sink.set_preroll_secs(target_preroll_secs);
                     Ok(Box::new(sink))
                 }
-                InputBackend::Alsa => Err(EngineError::Pipeline(
-                    "ALSA live capture input not yet configured".to_string(),
-                )),
-                InputBackend::File | InputBackend::Stdio => Err(EngineError::Pipeline(
-                    "File/Stdio backend is for offline mode; use 'audigma convert'".to_string(),
-                )),
+                InputBackend::Alsa => Err(EngineError::AudioBackend {
+                    backend: "alsa",
+                    message: "ALSA live capture input not yet configured".to_string(),
+                }),
+                InputBackend::File | InputBackend::Stdio => Err(EngineError::InvalidTopology {
+                    message: "File/Stdio backend is for offline mode; use 'audigma convert'"
+                        .to_string(),
+                }),
                 #[cfg(not(feature = "pipewire"))]
-                InputBackend::Pipewire => Err(EngineError::Pipeline(
-                    "PipeWire feature is disabled in this build".to_string(),
-                )),
+                InputBackend::Pipewire => Err(EngineError::AudioBackend {
+                    backend: "pipewire",
+                    message: "PipeWire feature is disabled in this build".to_string(),
+                }),
             }
         };
 
@@ -189,10 +189,25 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
             OutputBackend::Alsa => {
                 let alsa_config =
                     AlsaOutputConfig::from_settings(&settings, target).map_err(|e| {
-                        EngineError::Pipeline(format!("failed to configure ALSA output: {e}"))
+                        EngineError::DeviceUnavailable {
+                            device: settings
+                                .output
+                                .as_ref()
+                                .and_then(|o| o.device.clone())
+                                .unwrap_or_else(|| "default".to_string()),
+                            reason: format!("failed to configure ALSA output: {e}"),
+                        }
                     })?;
-                let alsa_out = AlsaAudioOutput::open(alsa_config).map_err(|e| {
-                    EngineError::Pipeline(format!("failed to open ALSA output: {e}"))
+                let target_device = alsa_config.device.clone();
+                let alsa_out = AlsaAudioOutput::open(alsa_config).map_err(|e| match e {
+                    audigma_io::AlsaOutputError::DeviceDisconnected(reason) => {
+                        EngineError::DeviceDisconnected(reason)
+                    }
+                    audigma_io::AlsaOutputError::Io(err) => EngineError::Io(err),
+                    other => EngineError::DeviceUnavailable {
+                        device: target_device,
+                        reason: format!("failed to open ALSA output: {other}"),
+                    },
                 })?;
                 Ok(Box::new(alsa_out))
             }
@@ -202,9 +217,11 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
                 let pw_rate = match target {
                     TargetRateSpec::Pcm { rate, .. } => rate.get(),
                     TargetRateSpec::Dsd { bit_rate } => {
-                        return Err(EngineError::Pipeline(format!(
-                            "PipeWire PCM output cannot carry DSD bit rate {bit_rate}"
-                        )));
+                        return Err(EngineError::InvalidTopology {
+                            message: format!(
+                                "PipeWire PCM output cannot carry DSD bit rate {bit_rate}"
+                            ),
+                        });
                     }
                 };
                 let pw_out = PipeWirePcmOutput::new(
@@ -214,18 +231,21 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
                     channels as u32,
                     32,
                 )
-                .map_err(|e| {
-                    EngineError::Pipeline(format!("failed to initialize PipeWire output: {e}"))
+                .map_err(|e| EngineError::AudioBackend {
+                    backend: "pipewire",
+                    message: format!("failed to initialize PipeWire output: {e}"),
                 })?;
                 Ok(Box::new(pw_out))
             }
             #[cfg(not(feature = "pipewire"))]
-            OutputBackend::Pipewire => Err(EngineError::Pipeline(
-                "PipeWire feature is disabled in this build".to_string(),
-            )),
-            OutputBackend::File | OutputBackend::Stdio => Err(EngineError::Pipeline(
-                "File/Stdio backend is for offline mode; use 'audigma convert'".to_string(),
-            )),
+            OutputBackend::Pipewire => Err(EngineError::AudioBackend {
+                backend: "pipewire",
+                message: "PipeWire feature is disabled in this build".to_string(),
+            }),
+            OutputBackend::File | OutputBackend::Stdio => Err(EngineError::InvalidTopology {
+                message: "File/Stdio backend is for offline mode; use 'audigma convert'"
+                    .to_string(),
+            }),
         }
     };
 
@@ -261,8 +281,8 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
 
     // Start Unix Control Socket
     let socket_path = default_socket_path();
-    let _server = ControlServer::start(socket_path.clone(), control.clone())
-        .map_err(|e| EngineError::Pipeline(format!("failed to start control socket: {e}")))?;
+    let _server =
+        ControlServer::start(socket_path.clone(), control.clone()).map_err(CliError::Ipc)?;
     tracing::info!(
         target: "audigma::ipc",
         event = audigma_log::CONTROL_SOCKET_BOUND,
@@ -393,7 +413,8 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
                 if device_wait_ms == 0 {
                     return Err(EngineError::DeviceDisconnected(format!(
                         "target ALSA device '{target_device}' is not present at startup"
-                    )));
+                    ))
+                    .into());
                 }
 
                 tracing::info!(
@@ -443,7 +464,7 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
                         );
                         return Err(EngineError::DeviceDisconnected(format!(
                             "timed out waiting for device '{target_device}' after {device_wait_ms} ms"
-                        )));
+                        )).into());
                     }
 
                     // Check keep_audio_sink_ms grace period
@@ -692,7 +713,7 @@ pub fn run_run(args: RunArgs) -> Result<(), EngineError> {
                     error_kind = "runtime",
                     "runtime streaming error"
                 );
-                return Err(e);
+                return Err(e.into());
             }
         }
     }

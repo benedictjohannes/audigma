@@ -1,7 +1,7 @@
 //! Real-time safe logging bridge and event definitions (`StructuredLogging.md §8`).
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -132,11 +132,7 @@ impl RtLogDrainer {
         }
     }
 
-    pub fn add_channel(
-        &mut self,
-        consumer: RtLogConsumer,
-        dropped_counter: Arc<AtomicU64>,
-    ) {
+    pub fn add_channel(&mut self, consumer: RtLogConsumer, dropped_counter: Arc<AtomicU64>) {
         self.consumers.push(consumer);
         self.dropped_counters.push(dropped_counter);
     }

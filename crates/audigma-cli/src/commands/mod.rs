@@ -9,8 +9,8 @@ pub mod presets;
 pub mod probe;
 pub mod run;
 
-use std::path::{Path, PathBuf};
 use clap::{Parser, Subcommand};
+use std::path::{Path, PathBuf};
 
 pub use benchmark::{BenchmarkArgs, run_benchmark};
 pub use config::{ConfigArgs, ConfigCommands, run_config};

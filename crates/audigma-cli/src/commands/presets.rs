@@ -1,8 +1,9 @@
 //! Handler for `audigma presets` subcommand.
 
 use audigma_dsp::presets::{ALL_PRESETS, by_name};
-use audigma_engine::EngineError;
 use clap::{Args, Subcommand};
+
+use crate::error::CliError;
 
 #[derive(Args, Debug)]
 pub struct PresetsArgs {
@@ -22,7 +23,7 @@ pub enum PresetsCommands {
     },
 }
 
-pub fn run_presets(args: PresetsArgs) -> Result<(), EngineError> {
+pub fn run_presets(args: PresetsArgs) -> Result<(), CliError> {
     match args.command {
         PresetsCommands::List => {
             println!(
@@ -66,9 +67,7 @@ pub fn run_presets(args: PresetsArgs) -> Result<(), EngineError> {
                 );
                 Ok(())
             } else {
-                Err(EngineError::Pipeline(format!(
-                    "unknown preset '{name}'; available presets: balanced, reference, low-latency"
-                )))
+                Err(CliError::PresetNotFound { name })
             }
         }
     }

@@ -59,10 +59,11 @@ impl AlsaHardwareMixer {
         let mixer_card = resolve_card_mixer_name(device_or_card);
         let mixer = Mixer::new(&mixer_card, false)
             .or_else(|_| Mixer::new(device_or_card, false))
-            .map_err(|e| {
-                EngineError::Pipeline(format!(
+            .map_err(|e| EngineError::DeviceUnavailable {
+                device: mixer_card.clone(),
+                reason: format!(
                     "failed to open ALSA mixer on '{mixer_card}' (or '{device_or_card}'): {e}"
-                ))
+                ),
             })?;
 
         // 1. If explicit control name is configured, probe it directly
@@ -72,14 +73,20 @@ impl AlsaHardwareMixer {
                 if selem.has_playback_volume() || selem.has_playback_switch() {
                     Some((custom.to_string(), 0))
                 } else {
-                    return Err(EngineError::Pipeline(format!(
-                        "configured mixer control '{custom}' on '{mixer_card}' lacks playback capabilities"
-                    )));
+                    return Err(EngineError::Mixer {
+                        control: custom.to_string(),
+                        reason: format!(
+                            "configured mixer control '{custom}' on '{mixer_card}' lacks playback capabilities"
+                        ),
+                    });
                 }
             } else {
-                return Err(EngineError::Pipeline(format!(
-                    "configured mixer control '{custom}' not found on '{mixer_card}'"
-                )));
+                return Err(EngineError::Mixer {
+                    control: custom.to_string(),
+                    reason: format!(
+                        "configured mixer control '{custom}' not found on '{mixer_card}'"
+                    ),
+                });
             }
         } else {
             // 2. Candidate probe order: Master > PCM > Playback > Headphone > Speaker (first match wins)
@@ -112,17 +119,17 @@ impl AlsaHardwareMixer {
             matched
         };
 
-        let (elem_name, elem_idx) = bound_elem_info.ok_or_else(|| {
-            EngineError::Pipeline(format!(
+        let (elem_name, elem_idx) = bound_elem_info.ok_or_else(|| EngineError::Mixer {
+            control: "Master".to_string(),
+            reason: format!(
                 "no hardware playback volume mixer controls found on card '{mixer_card}'"
-            ))
+            ),
         })?;
 
         let id = SelemId::new(&elem_name, elem_idx);
-        let selem = mixer.find_selem(&id).ok_or_else(|| {
-            EngineError::Pipeline(format!(
-                "internal error: element '{elem_name}' vanished during open"
-            ))
+        let selem = mixer.find_selem(&id).ok_or_else(|| EngineError::Mixer {
+            control: elem_name.clone(),
+            reason: format!("internal error: element '{elem_name}' vanished during open"),
         })?;
 
         let has_volume = selem.has_playback_volume();
@@ -162,9 +169,10 @@ impl AlsaHardwareMixer {
         _device_or_card: &str,
         _configured_control: Option<&str>,
     ) -> Result<Self, EngineError> {
-        Err(EngineError::Pipeline(
-            "ALSA feature is disabled in this build".to_string(),
-        ))
+        Err(EngineError::AudioBackend {
+            backend: "alsa",
+            message: "ALSA feature is disabled in this build".to_string(),
+        })
     }
 
     /// Returns the name of the bound ALSA mixer control element (e.g. `"Master"`, `"PCM"`).
@@ -190,30 +198,38 @@ impl AlsaHardwareMixer {
         }
 
         let id = SelemId::new(&self.element_name, self.element_index);
-        let selem = self.mixer.find_selem(&id).ok_or_else(|| {
-            EngineError::Pipeline(format!("mixer element '{}' not found", self.element_name))
-        })?;
+        let selem = self
+            .mixer
+            .find_selem(&id)
+            .ok_or_else(|| EngineError::Mixer {
+                control: self.element_name.clone(),
+                reason: format!("mixer element '{}' not found", self.element_name),
+            })?;
 
         if self.has_db {
             let target_mb = MilliBel::from_db(db as f32);
             let clamped_mb = MilliBel(target_mb.0.clamp(self.min_mb, self.max_mb));
             selem
                 .set_playback_db_all(clamped_mb, Round::Floor)
-                .map_err(|e| {
-                    EngineError::Pipeline(format!(
+                .map_err(|e| EngineError::Mixer {
+                    control: self.element_name.clone(),
+                    reason: format!(
                         "failed to set ALSA playback dB on '{}': {e}",
                         self.element_name
-                    ))
+                    ),
                 })?;
         } else if self.max_vol > self.min_vol {
             let linear = 10.0_f64.powf(db / 20.0).clamp(0.0, 1.0);
             let raw = self.min_vol + (linear * (self.max_vol - self.min_vol) as f64).round() as i64;
-            selem.set_playback_volume_all(raw).map_err(|e| {
-                EngineError::Pipeline(format!(
-                    "failed to set ALSA playback volume on '{}': {e}",
-                    self.element_name
-                ))
-            })?;
+            selem
+                .set_playback_volume_all(raw)
+                .map_err(|e| EngineError::Mixer {
+                    control: self.element_name.clone(),
+                    reason: format!(
+                        "failed to set ALSA playback volume on '{}': {e}",
+                        self.element_name
+                    ),
+                })?;
         }
 
         Ok(())
@@ -232,28 +248,34 @@ impl AlsaHardwareMixer {
         }
 
         let id = SelemId::new(&self.element_name, self.element_index);
-        let selem = self.mixer.find_selem(&id).ok_or_else(|| {
-            EngineError::Pipeline(format!("mixer element '{}' not found", self.element_name))
-        })?;
+        let selem = self
+            .mixer
+            .find_selem(&id)
+            .ok_or_else(|| EngineError::Mixer {
+                control: self.element_name.clone(),
+                reason: format!("mixer element '{}' not found", self.element_name),
+            })?;
 
         if self.has_db {
             let mb = selem
                 .get_playback_vol_db(self.active_channel)
-                .map_err(|e| {
-                    EngineError::Pipeline(format!(
+                .map_err(|e| EngineError::Mixer {
+                    control: self.element_name.clone(),
+                    reason: format!(
                         "failed to read ALSA playback dB on '{}': {e}",
                         self.element_name
-                    ))
+                    ),
                 })?;
             Ok(mb.to_db() as f64)
         } else if self.max_vol > self.min_vol {
             let raw = selem
                 .get_playback_volume(self.active_channel)
-                .map_err(|e| {
-                    EngineError::Pipeline(format!(
+                .map_err(|e| EngineError::Mixer {
+                    control: self.element_name.clone(),
+                    reason: format!(
                         "failed to read ALSA playback volume on '{}': {e}",
                         self.element_name
-                    ))
+                    ),
                 })?;
             let norm = (raw - self.min_vol) as f64 / (self.max_vol - self.min_vol) as f64;
             if norm <= 1e-6 {
@@ -275,18 +297,23 @@ impl AlsaHardwareMixer {
     #[cfg(feature = "alsa")]
     pub fn set_mute(&mut self, muted: bool) -> Result<(), EngineError> {
         let id = SelemId::new(&self.element_name, self.element_index);
-        let selem = self.mixer.find_selem(&id).ok_or_else(|| {
-            EngineError::Pipeline(format!("mixer element '{}' not found", self.element_name))
-        })?;
+        let selem = self
+            .mixer
+            .find_selem(&id)
+            .ok_or_else(|| EngineError::Mixer {
+                control: self.element_name.clone(),
+                reason: format!("mixer element '{}' not found", self.element_name),
+            })?;
 
         if self.has_switch {
             selem
                 .set_playback_switch_all(if muted { 0 } else { 1 })
-                .map_err(|e| {
-                    EngineError::Pipeline(format!(
+                .map_err(|e| EngineError::Mixer {
+                    control: self.element_name.clone(),
+                    reason: format!(
                         "failed to set ALSA playback switch on '{}': {e}",
                         self.element_name
-                    ))
+                    ),
                 })?;
         } else if self.has_volume && muted {
             // Fallback for hardware without a dedicated mute switch: set to minimum volume
@@ -306,16 +333,21 @@ impl AlsaHardwareMixer {
     pub fn is_muted(&self) -> Result<bool, EngineError> {
         if self.has_switch {
             let id = SelemId::new(&self.element_name, self.element_index);
-            let selem = self.mixer.find_selem(&id).ok_or_else(|| {
-                EngineError::Pipeline(format!("mixer element '{}' not found", self.element_name))
-            })?;
+            let selem = self
+                .mixer
+                .find_selem(&id)
+                .ok_or_else(|| EngineError::Mixer {
+                    control: self.element_name.clone(),
+                    reason: format!("mixer element '{}' not found", self.element_name),
+                })?;
             let sw = selem
                 .get_playback_switch(self.active_channel)
-                .map_err(|e| {
-                    EngineError::Pipeline(format!(
+                .map_err(|e| EngineError::Mixer {
+                    control: self.element_name.clone(),
+                    reason: format!(
                         "failed to read ALSA playback switch on '{}': {e}",
                         self.element_name
-                    ))
+                    ),
                 })?;
             Ok(sw == 0)
         } else {

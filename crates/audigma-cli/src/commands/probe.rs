@@ -1,8 +1,9 @@
 //! Handler for `audigma probe` subcommand.
 
-use audigma_engine::traits::EngineError;
 use clap::Args;
 use serde_json::json;
+
+use crate::error::CliError;
 
 #[derive(Args, Debug)]
 pub struct ProbeArgs {
@@ -15,15 +16,15 @@ pub struct ProbeArgs {
     pub json: bool,
 }
 
-pub fn run_probe(args: ProbeArgs) -> Result<(), EngineError> {
+pub fn run_probe(args: ProbeArgs) -> Result<(), CliError> {
     match args.backend.to_lowercase().as_str() {
         "alsa" => {
             let report = audigma_io::alsa::probe_alsa_devices()
-                .map_err(|e| EngineError::Pipeline(format!("ALSA probe failed: {e}")))?;
+                .map_err(|e| CliError::Other(format!("ALSA probe failed: {e}")))?;
 
             if args.json {
                 let json_val = serde_json::to_string_pretty(&report).map_err(|e| {
-                    EngineError::Pipeline(format!("JSON serialization failed: {e}"))
+                    CliError::Serialization(format!("JSON serialization failed: {e}"))
                 })?;
                 println!("{json_val}");
             } else {
@@ -50,9 +51,9 @@ pub fn run_probe(args: ProbeArgs) -> Result<(), EngineError> {
             }
             Ok(())
         }
-        other => Err(EngineError::Pipeline(format!(
-            "unknown audio backend '{other}'; supported backends: 'alsa', 'pipewire'"
-        ))),
+        other => Err(CliError::UnknownBackend {
+            backend: other.to_string(),
+        }),
     }
 }
 

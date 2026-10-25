@@ -6,15 +6,15 @@ use std::time::Instant;
 
 use audigma_dsp::presets::by_name;
 use audigma_dsp::rates::PcmRateHz;
-use audigma_engine::traits::{AudioInput, DecoderInput, EngineError};
-use audigma_engine::{
-    ChannelWorkerPool, MockAudioInput, OfflinePipeline, TargetDsdConfig,
-};
+use audigma_engine::traits::{AudioInput, DecoderInput};
+use audigma_engine::{ChannelWorkerPool, MockAudioInput, OfflinePipeline, TargetDsdConfig};
 use audigma_format::AudioStreamInfo;
 use audigma_format::decoder::AudioDecoder;
 use audigma_settings::{OutputContainer, Settings};
 use clap::Args;
 use serde_json::json;
+
+use crate::error::CliError;
 
 #[derive(Args, Debug)]
 pub struct BenchmarkArgs {
@@ -35,7 +35,7 @@ pub struct BenchmarkArgs {
     pub json: bool,
 }
 
-pub fn run_benchmark(args: BenchmarkArgs) -> Result<(), EngineError> {
+pub fn run_benchmark(args: BenchmarkArgs) -> Result<(), CliError> {
     let mut settings = if let Some(ref cfg_path) = args.config {
         let content = std::fs::read_to_string(cfg_path)?;
         let s = Settings::from_toml_str(&content)?;
@@ -46,8 +46,9 @@ pub fn run_benchmark(args: BenchmarkArgs) -> Result<(), EngineError> {
     };
 
     if let Some(ref preset_name) = args.preset {
-        let preset_def = by_name(preset_name)
-            .ok_or_else(|| EngineError::Pipeline(format!("unknown preset '{preset_name}'")))?;
+        let preset_def = by_name(preset_name).ok_or_else(|| CliError::PresetNotFound {
+            name: preset_name.clone(),
+        })?;
         if let Some(ref mut resampler) = settings.resampler {
             resampler.preset = preset_def.preset;
         } else {

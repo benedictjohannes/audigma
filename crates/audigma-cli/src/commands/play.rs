@@ -6,10 +6,8 @@ use std::path::PathBuf;
 use audigma_dsp::config::{SampleFormat, TargetRateSpec};
 use audigma_dsp::presets::by_name;
 use audigma_dsp::rates::PcmRateHz;
-use audigma_engine::traits::{AudioInput, EngineError};
-use audigma_engine::{
-    IdleCarrierFormat, LifecycleController, OfflinePipeline, StreamSink,
-};
+use audigma_engine::traits::AudioInput;
+use audigma_engine::{IdleCarrierFormat, LifecycleController, OfflinePipeline, StreamSink};
 use audigma_io::alsa::{AlsaAudioOutput, AlsaOutputConfig};
 use audigma_io::file::FileAudioInput;
 use audigma_io::stdio::StdioAudioInput;
@@ -17,6 +15,7 @@ use audigma_settings::{OutputContainer, OutputTransport, Settings};
 use clap::Args;
 use serde_json::json;
 
+use crate::error::CliError;
 use crate::overrides::apply_toml_override;
 use crate::volume::{VolumeArg, parse_volume_arg, validate_volume_db};
 
@@ -53,19 +52,19 @@ pub struct PlayArgs {
     pub json: bool,
 }
 
-pub fn run_play(args: PlayArgs) -> Result<(), EngineError> {
+pub fn run_play(args: PlayArgs) -> Result<(), CliError> {
     // 1. Resolve base settings as a toml::Table for flexible layered overriding
     let default_settings = Settings::default_offline(OutputContainer::Raw);
     let mut toml_table: toml::Table = if let Some(ref cfg_path) = args.config {
         let content = std::fs::read_to_string(cfg_path)?;
         toml::from_str(&content)
-            .map_err(|e| EngineError::Pipeline(format!("failed to parse config TOML: {e}")))?
+            .map_err(|e| CliError::Config(format!("failed to parse config TOML: {e}")))?
     } else {
         let serialized = toml::to_string(&default_settings).map_err(|e| {
-            EngineError::Pipeline(format!("failed to serialize default settings: {e}"))
+            CliError::Serialization(format!("failed to serialize default settings: {e}"))
         })?;
         toml::from_str(&serialized)
-            .map_err(|e| EngineError::Pipeline(format!("failed to parse default TOML: {e}")))?
+            .map_err(|e| CliError::Config(format!("failed to parse default TOML: {e}")))?
     };
 
     // 2. Configure output as exclusive ALSA Raw container
@@ -114,25 +113,21 @@ pub fn run_play(args: PlayArgs) -> Result<(), EngineError> {
     //    `-v` is the user-facing playback volume.
     let user_volume_db: Option<f64> = match args.volume.as_deref() {
         None => None,
-        Some(raw) => Some(
-            match parse_volume_arg(raw).map_err(EngineError::Pipeline)? {
-                VolumeArg::Db(db) => validate_volume_db(db).map_err(EngineError::Pipeline)?,
-                // `play` has no hardware mixer bridge, so the software ALSA curve is
-                // the analogue of the daemon's `volume_control = "software"` mode.
-                VolumeArg::Percent(pct) => audigma_dsp::alsamixer_percentage_to_db(
-                    pct,
-                    audigma_dsp::DEFAULT_SOFTWARE_MIN_DB,
-                ),
-            },
-        ),
+        Some(raw) => Some(match parse_volume_arg(raw).map_err(CliError::Volume)? {
+            VolumeArg::Db(db) => validate_volume_db(db).map_err(CliError::Volume)?,
+            // `play` has no hardware mixer bridge, so the software ALSA curve is
+            // the analogue of the daemon's `volume_control = "software"` mode.
+            VolumeArg::Percent(pct) => {
+                audigma_dsp::alsamixer_percentage_to_db(pct, audigma_dsp::DEFAULT_SOFTWARE_MIN_DB)
+            }
+        }),
     };
 
     if let Some(ref dev) = args.device {
         apply_toml_override(&mut toml_table, "output.device", dev)?;
     }
     if let Some(ref p) = args.preset {
-        let preset = by_name(p)
-            .ok_or_else(|| EngineError::Pipeline(format!("unknown filter preset '{p}'")))?;
+        let preset = by_name(p).ok_or_else(|| CliError::PresetNotFound { name: p.clone() })?;
         let preset_str = match preset.preset {
             audigma_dsp::FilterPreset::Balanced => "balanced",
             audigma_dsp::FilterPreset::Reference => "reference",
@@ -144,7 +139,7 @@ pub fn run_play(args: PlayArgs) -> Result<(), EngineError> {
     // 4. Apply ad-hoc CLI overrides (-O key=value)
     for ovr in &args.overrides {
         let (key, val) = ovr.split_once('=').ok_or_else(|| {
-            EngineError::Pipeline(format!(
+            CliError::Override(format!(
                 "invalid override syntax '{ovr}' (expected key=value)"
             ))
         })?;
@@ -153,7 +148,7 @@ pub fn run_play(args: PlayArgs) -> Result<(), EngineError> {
 
     // 5. Deserialize merged TOML table into typed Settings and validate
     let settings_str = toml::to_string(&toml_table)
-        .map_err(|e| EngineError::Pipeline(format!("failed to serialize merged TOML: {e}")))?;
+        .map_err(|e| CliError::Serialization(format!("failed to serialize merged TOML: {e}")))?;
     let settings = Settings::from_toml_str(&settings_str)?;
     settings.validate()?;
 
@@ -200,7 +195,7 @@ pub fn run_play(args: PlayArgs) -> Result<(), EngineError> {
 
     // 5. Build ALSA Output Driver
     let alsa_config = AlsaOutputConfig::from_settings(&settings, &target_spec)
-        .map_err(|e| EngineError::Pipeline(format!("failed to configure ALSA output: {e}")))?;
+        .map_err(|e| CliError::Other(format!("failed to configure ALSA output: {e}")))?;
 
     if !args.json {
         eprintln!("audigma: starting hardware playback");
@@ -254,7 +249,7 @@ pub fn run_play(args: PlayArgs) -> Result<(), EngineError> {
     }
 
     let mut alsa_output = AlsaAudioOutput::open(alsa_config)
-        .map_err(|e| EngineError::Pipeline(format!("ALSA open failed: {e}")))?;
+        .map_err(|e| CliError::Other(format!("ALSA open failed: {e}")))?;
 
     // 6. Click-free Priming
     let carrier = IdleCarrierFormat::from_settings(&settings, &target_spec);
@@ -272,7 +267,7 @@ pub fn run_play(args: PlayArgs) -> Result<(), EngineError> {
     // 8. Drain hardware
     alsa_output
         .drain()
-        .map_err(|e| EngineError::Pipeline(format!("ALSA drain failed: {e}")))?;
+        .map_err(|e| CliError::Other(format!("ALSA drain failed: {e}")))?;
 
     let xruns = alsa_output.xrun_count();
 

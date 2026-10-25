@@ -1,8 +1,8 @@
-use std::sync::{Arc, Mutex};
 use audigma_log::{
     DecimationErrorRecorder, LogConfig, LogFormat, LogLevel, RtLogDrainer, RtLogEvent,
     rt_log_channel,
 };
+use std::sync::{Arc, Mutex};
 use tracing_subscriber::layer::SubscriberExt;
 
 #[derive(Clone, Default)]

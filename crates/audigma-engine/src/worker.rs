@@ -142,9 +142,9 @@ impl ChannelWorkerPool {
         thread_init_hook: Option<Arc<dyn Fn(usize) + Send + Sync>>,
     ) -> Result<Self, EngineError> {
         if channels == 0 {
-            return Err(EngineError::Pipeline(
-                "ChannelWorkerPool requires at least 1 channel".into(),
-            ));
+            return Err(EngineError::InvalidTopology {
+                message: "ChannelWorkerPool requires at least 1 channel".into(),
+            });
         }
 
         let cascade_probe =
@@ -274,8 +274,9 @@ impl ChannelWorkerPool {
                         futex_wake(&thread_sync.completed_generation);
                     }
                 })
-                .map_err(|e| {
-                    EngineError::Pipeline(format!("failed to spawn worker thread {ch}: {e}"))
+                .map_err(|e| EngineError::WorkerThread {
+                    channel: ch,
+                    reason: format!("failed to spawn worker thread {ch}: {e}"),
                 })?;
 
             thread_handles.push(handle);
@@ -340,7 +341,7 @@ impl ChannelWorkerPool {
             futex_wake(&slot.sync.target_generation);
         }
 
-        for slot in &self.slots {
+        for (ch, slot) in self.slots.iter().enumerate() {
             let mut spins = 0;
             while slot.sync.completed_generation.load(Ordering::Acquire) != next_gen && spins < 2048
             {
@@ -348,6 +349,12 @@ impl ChannelWorkerPool {
                 spins += 1;
             }
             while slot.sync.completed_generation.load(Ordering::Acquire) != next_gen {
+                if self.thread_handles[ch].is_finished() {
+                    return Err(EngineError::WorkerThread {
+                        channel: ch,
+                        reason: format!("worker thread {ch} terminated unexpectedly"),
+                    });
+                }
                 futex_wait(&slot.sync.completed_generation, self.current_generation);
             }
         }
@@ -640,5 +647,25 @@ mod tests {
 
         // After reset, processing the exact same initial block must yield the exact same output as the initial clean state
         assert_eq!(out_dirty, out_reset);
+    }
+
+    #[test]
+    fn test_worker_pool_zero_channels_returns_invalid_topology() {
+        let res = ChannelWorkerPool::new(
+            0,
+            PRESET_BALANCED.preset,
+            FilterPhase::Linear,
+            Apodization::Off,
+            2,
+            128,
+            None,
+            None,
+        );
+        match res {
+            Err(EngineError::InvalidTopology { message }) => {
+                assert!(message.contains("requires at least 1 channel"));
+            }
+            _ => panic!("expected InvalidTopology"),
+        }
     }
 }

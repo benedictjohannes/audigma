@@ -153,10 +153,7 @@ fn test_parity_pcm_rate_stages() {
             offline.topology().intermediate_rate,
             live.topology().intermediate_rate
         );
-        assert_eq!(
-            offline.topology().intermediate_rate,
-            expected_intermediate
-        );
+        assert_eq!(offline.topology().intermediate_rate, expected_intermediate);
         assert_eq!(
             offline.topology().cascade_stages,
             live.topology().cascade_stages

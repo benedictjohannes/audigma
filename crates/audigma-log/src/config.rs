@@ -1,8 +1,8 @@
 //! Configuration types for logging and filtering.
 
+use serde::{Deserialize, Serialize};
 use std::io::IsTerminal;
 use std::str::FromStr;
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Output renderer format.

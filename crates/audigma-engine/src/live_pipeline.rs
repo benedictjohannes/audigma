@@ -718,7 +718,9 @@ impl LivePipeline {
 
         const TILE_BASEBAND_FRAMES: usize = 256;
         let is_dsd = self.topology.is_dsd();
-        let target_dsd = self.topology.target_dsd_config(&self.plan.dsp_config, 12345);
+        let target_dsd = self
+            .topology
+            .target_dsd_config(&self.plan.dsp_config, 12345);
 
         let mut processor = TileProcessor::new(
             num_channels,
@@ -860,9 +862,9 @@ impl LivePipeline {
                         control.set_lifecycle_state(cur_state);
                         reported_state = cur_state;
                     }
-                    let q_pct = input
-                        .buffer_occupancy()
-                        .and_then(|(fill, cap)| (cap > 0).then(|| fill as f64 / cap as f64 * 100.0));
+                    let q_pct = input.buffer_occupancy().and_then(|(fill, cap)| {
+                        (cap > 0).then(|| fill as f64 / cap as f64 * 100.0)
+                    });
                     let b_ms = input.buffer_fill_secs().map(|s| s * 1000.0);
                     control.update_runtime_stats(
                         total_input_frames,
@@ -973,7 +975,8 @@ impl LivePipeline {
             };
             let is_digital_muted = is_muted && vol_mode != DaemonVolumeMode::Hardware;
             let total_gain_db = base_preamp + profile_headroom + user_vol;
-            let linear_gain = DspConfiguration::compute_linear_gain(total_gain_db, is_digital_muted);
+            let linear_gain =
+                DspConfiguration::compute_linear_gain(total_gain_db, is_digital_muted);
 
             // Automatic Opportunistic Bit-Exact DSD Passthrough (Design.md §1.6)
             let dsp_cfg_for_passthrough = DspConfiguration {
@@ -984,7 +987,11 @@ impl LivePipeline {
             };
             let can_passthrough = is_dsd
                 && !is_muted
-                && is_dsd_passthrough_eligible(&input.info(), &target_spec, &dsp_cfg_for_passthrough);
+                && is_dsd_passthrough_eligible(
+                    input.info(),
+                    &target_spec,
+                    &dsp_cfg_for_passthrough,
+                );
 
             if can_passthrough && pending_rate_switch.is_none() && !lifecycle.is_draining() {
                 let dsd_bytes_to_read = (TILE_BASEBAND_FRAMES * mult) / 8;
@@ -1126,7 +1133,8 @@ impl LivePipeline {
                             Err(ClockDriftError::Starvation { .. }) => {
                                 if !asrc_in_starvation {
                                     asrc_in_starvation = true;
-                                    asrc_starvations_total = asrc_starvations_total.saturating_add(1);
+                                    asrc_starvations_total =
+                                        asrc_starvations_total.saturating_add(1);
                                 }
                                 asrc_in_overrun = false;
                                 drift_ctrl.last_drift_ppm()

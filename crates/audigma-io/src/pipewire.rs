@@ -41,7 +41,15 @@ pub enum PipeWireError {
 
 impl From<PipeWireError> for EngineError {
     fn from(err: PipeWireError) -> Self {
-        EngineError::Pipeline(err.to_string())
+        match err {
+            PipeWireError::StreamFailed => {
+                EngineError::DeviceDisconnected("PipeWire stream disconnected or failed".into())
+            }
+            other => EngineError::AudioBackend {
+                backend: "pipewire",
+                message: other.to_string(),
+            },
+        }
     }
 }
 
@@ -746,18 +754,24 @@ impl PipeWireVirtualSink {
                                     active_dsd_rate_cb.store(bit_rate, Ordering::SeqCst);
                                     let dsd_rate_opt = DsdBitRateHz::new(bit_rate);
                                     let intermediate_rate = dsd_rate_opt
-                                        .map(|r| audigma_dsp::rates::select_dsd_intermediate_rate(r, None, None).get())
+                                        .map(|r| {
+                                            audigma_dsp::rates::select_dsd_intermediate_rate(
+                                                r, None, None,
+                                            )
+                                            .get()
+                                        })
                                         .unwrap_or(176_400);
 
                                     if let Ok(mut p) = rt_producer_cb.try_lock() {
-                                        let _ = p.try_push(audigma_log::RtLogEvent::FormatNegotiated {
-                                            is_dsd: true,
-                                            rate_hz: parsed.rate,
-                                            bit_rate_hz: bit_rate,
-                                            intermediate_rate_hz: intermediate_rate,
-                                            channels: parsed.channels as u8,
-                                            interleave: parsed.interleave,
-                                        });
+                                        let _ =
+                                            p.try_push(audigma_log::RtLogEvent::FormatNegotiated {
+                                                is_dsd: true,
+                                                rate_hz: parsed.rate,
+                                                bit_rate_hz: bit_rate,
+                                                intermediate_rate_hz: intermediate_rate,
+                                                channels: parsed.channels as u8,
+                                                interleave: parsed.interleave,
+                                            });
                                     }
                                     let stride = parsed.channels.max(1)
                                         * parsed.interleave.unsigned_abs().max(1);
@@ -769,14 +783,15 @@ impl PipeWireVirtualSink {
                                 } else {
                                     active_dsd_rate_cb.store(0, Ordering::SeqCst);
                                     if let Ok(mut p) = rt_producer_cb.try_lock() {
-                                        let _ = p.try_push(audigma_log::RtLogEvent::FormatNegotiated {
-                                            is_dsd: false,
-                                            rate_hz: parsed.rate,
-                                            bit_rate_hz: parsed.rate,
-                                            intermediate_rate_hz: parsed.rate,
-                                            channels: parsed.channels as u8,
-                                            interleave: 1,
-                                        });
+                                        let _ =
+                                            p.try_push(audigma_log::RtLogEvent::FormatNegotiated {
+                                                is_dsd: false,
+                                                rate_hz: parsed.rate,
+                                                bit_rate_hz: parsed.rate,
+                                                intermediate_rate_hz: parsed.rate,
+                                                channels: parsed.channels as u8,
+                                                interleave: 1,
+                                            });
                                     }
                                     let stride = parsed.channels.max(1) * 4;
                                     negotiated_stream_rate_and_stride = Some((parsed.rate, stride));
@@ -794,14 +809,15 @@ impl PipeWireVirtualSink {
                                     let negotiated_rate = info.rate();
                                     let negotiated_channels = info.channels();
                                     if let Ok(mut p) = rt_producer_cb.try_lock() {
-                                        let _ = p.try_push(audigma_log::RtLogEvent::FormatNegotiated {
-                                            is_dsd: false,
-                                            rate_hz: negotiated_rate,
-                                            bit_rate_hz: negotiated_rate,
-                                            intermediate_rate_hz: negotiated_rate,
-                                            channels: negotiated_channels as u8,
-                                            interleave: 1,
-                                        });
+                                        let _ =
+                                            p.try_push(audigma_log::RtLogEvent::FormatNegotiated {
+                                                is_dsd: false,
+                                                rate_hz: negotiated_rate,
+                                                bit_rate_hz: negotiated_rate,
+                                                intermediate_rate_hz: negotiated_rate,
+                                                channels: negotiated_channels as u8,
+                                                interleave: 1,
+                                            });
                                     }
                                     if negotiated_rate > 0 {
                                         let stride = negotiated_channels.max(1) * 4;
@@ -809,7 +825,8 @@ impl PipeWireVirtualSink {
                                             Some((negotiated_rate, stride));
                                         let cur_active = active_rate_cb.load(Ordering::Relaxed);
                                         if cur_active != negotiated_rate {
-                                            pending_rate_cb.store(negotiated_rate, Ordering::SeqCst);
+                                            pending_rate_cb
+                                                .store(negotiated_rate, Ordering::SeqCst);
                                         }
                                     }
                                 }
@@ -838,7 +855,9 @@ impl PipeWireVirtualSink {
                                 let prev: VolumeUpdate = pending.unwrap_or_default();
                                 *pending = Some(VolumeUpdate {
                                     volume_db: vol_update.volume_db.or(prev.volume_db),
-                                    volume_percent: vol_update.volume_percent.or(prev.volume_percent),
+                                    volume_percent: vol_update
+                                        .volume_percent
+                                        .or(prev.volume_percent),
                                     is_muted: vol_update.is_muted.or(prev.is_muted),
                                 });
                             }
@@ -875,7 +894,8 @@ impl PipeWireVirtualSink {
                                             let off = chunk.offset() as usize;
                                             let size = chunk.size() as usize;
                                             if let Some(bytes) = data.data() {
-                                                let valid_len = bytes.len().saturating_sub(off).min(size);
+                                                let valid_len =
+                                                    bytes.len().saturating_sub(off).min(size);
                                                 &bytes[off..off + valid_len]
                                             } else {
                                                 &[]
@@ -895,7 +915,11 @@ impl PipeWireVirtualSink {
                                         for i in 0..min_bytes {
                                             for slice in &channel_slices {
                                                 let b = slice[i];
-                                                byte_buf.push(if reverse_bits { b.reverse_bits() } else { b });
+                                                byte_buf.push(if reverse_bits {
+                                                    b.reverse_bits()
+                                                } else {
+                                                    b
+                                                });
                                             }
                                         }
                                         chunk.set_dsd(cur_gen, n_ch, &byte_buf);
@@ -917,7 +941,8 @@ impl PipeWireVirtualSink {
                                         if valid_len > 0 {
                                             let valid_bytes = &bytes[off..off + valid_len];
                                             let abs_iv = iv.unsigned_abs() as usize;
-                                            let group_size = (if abs_iv == 0 { 1 } else { abs_iv }) * n_ch;
+                                            let group_size =
+                                                (if abs_iv == 0 { 1 } else { abs_iv }) * n_ch;
                                             let complete_groups = valid_len / group_size;
 
                                             if complete_groups > 0 {
@@ -928,7 +953,11 @@ impl PipeWireVirtualSink {
                                                 if abs_iv <= 1 {
                                                     // Standard 1-byte interleaved: [L, R, L, R...]
                                                     for &b in &valid_bytes[..usable_len] {
-                                                        byte_buf.push(if reverse_bits { b.reverse_bits() } else { b });
+                                                        byte_buf.push(if reverse_bits {
+                                                            b.reverse_bits()
+                                                        } else {
+                                                            b
+                                                        });
                                                     }
                                                 } else {
                                                     // Block interleaved: K bytes per channel [L0..LK, R0..RK, ...]
@@ -938,15 +967,21 @@ impl PipeWireVirtualSink {
                                                     for g in 0..complete_groups {
                                                         let g_off = g * group_size;
                                                         for byte_idx in 0..k {
-                                                            let effective_idx = if reverse_group_bytes {
-                                                                k - 1 - byte_idx
-                                                            } else {
-                                                                byte_idx
-                                                            };
+                                                            let effective_idx =
+                                                                if reverse_group_bytes {
+                                                                    k - 1 - byte_idx
+                                                                } else {
+                                                                    byte_idx
+                                                                };
                                                             for c in 0..n_ch {
-                                                                let src_idx = g_off + c * k + effective_idx;
+                                                                let src_idx =
+                                                                    g_off + c * k + effective_idx;
                                                                 let b = valid_bytes[src_idx];
-                                                                byte_buf.push(if reverse_bits { b.reverse_bits() } else { b });
+                                                                byte_buf.push(if reverse_bits {
+                                                                    b.reverse_bits()
+                                                                } else {
+                                                                    b
+                                                                });
                                                             }
                                                         }
                                                     }
@@ -954,7 +989,8 @@ impl PipeWireVirtualSink {
                                                 chunk.set_dsd(cur_gen, n_ch, &byte_buf);
                                                 let units = chunk.frames() as u64;
                                                 if producer.push(chunk).is_err() {
-                                                    dropped_chunks_cb.fetch_add(1, Ordering::Relaxed);
+                                                    dropped_chunks_cb
+                                                        .fetch_add(1, Ordering::Relaxed);
                                                 } else {
                                                     buffered_units_cb
                                                         .fetch_add(units, Ordering::Relaxed);
@@ -1030,8 +1066,10 @@ impl PipeWireVirtualSink {
                                             let total_floats = valid_bytes.len() / sample_size;
                                             if total_floats > 0 {
                                                 let mut chunk = TaggedChunk::new(total_floats);
-                                                let mut float_buf = Vec::with_capacity(total_floats);
-                                                for chunk_bytes in valid_bytes.chunks_exact(sample_size)
+                                                let mut float_buf =
+                                                    Vec::with_capacity(total_floats);
+                                                for chunk_bytes in
+                                                    valid_bytes.chunks_exact(sample_size)
                                                 {
                                                     let f = f32::from_le_bytes(
                                                         chunk_bytes.try_into().unwrap(),
@@ -1042,7 +1080,8 @@ impl PipeWireVirtualSink {
                                                 chunk.set(cur_gen, n_ch, &float_buf);
                                                 let units = chunk.frames() as u64;
                                                 if producer.push(chunk).is_err() {
-                                                    dropped_chunks_cb.fetch_add(1, Ordering::Relaxed);
+                                                    dropped_chunks_cb
+                                                        .fetch_add(1, Ordering::Relaxed);
                                                 } else {
                                                     buffered_units_cb
                                                         .fetch_add(units, Ordering::Relaxed);

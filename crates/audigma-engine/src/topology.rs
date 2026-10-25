@@ -25,7 +25,10 @@ pub struct PipelineTopology {
 
 impl PipelineTopology {
     /// Resolves intermediate baseband rate and power-of-two half-band stages.
-    pub fn resolve(input_rate: PcmRateHz, target_spec: TargetRateSpec) -> Result<Self, EngineError> {
+    pub fn resolve(
+        input_rate: PcmRateHz,
+        target_spec: TargetRateSpec,
+    ) -> Result<Self, EngineError> {
         let (intermediate_rate, stages) = match target_spec {
             TargetRateSpec::Dsd { bit_rate } => {
                 let dsd_family = bit_rate.rate_family();
@@ -36,9 +39,11 @@ impl PipelineTopology {
                         let stages = (mult as f64).log2().round() as usize;
                         (input_rate, stages)
                     } else {
-                        return Err(EngineError::Pipeline(format!(
-                            "input rate {input_rate} exceeds DSD bit rate {bit_rate}"
-                        )));
+                        return Err(EngineError::InvalidTopology {
+                            message: format!(
+                                "input rate {input_rate} exceeds DSD bit rate {bit_rate}"
+                            ),
+                        });
                     }
                 } else {
                     // Cross-family conversion (e.g. 192k 48-family -> 44.1-family DSD):
@@ -48,10 +53,8 @@ impl PipelineTopology {
                         .corresponding_rate_in_family(dsd_family)
                         .filter(|r| bit_rate.get() >= r.get())
                         .or_else(|| dsd_family.base_pcm_rate())
-                        .ok_or_else(|| {
-                            EngineError::Pipeline(format!(
-                                "invalid rate family for DSD bit rate {bit_rate}"
-                            ))
+                        .ok_or_else(|| EngineError::InvalidTopology {
+                            message: format!("invalid rate family for DSD bit rate {bit_rate}"),
                         })?;
                     let mult = bit_rate.get() / matched_tier_rate.get();
                     let stages = (mult as f64).log2().round() as usize;
@@ -76,8 +79,8 @@ impl PipelineTopology {
                         .corresponding_rate_in_family(target_family)
                         .filter(|r| rate.get() >= r.get())
                         .or_else(|| target_family.base_pcm_rate())
-                        .ok_or_else(|| {
-                            EngineError::Pipeline(format!("invalid target rate family for {rate}"))
+                        .ok_or_else(|| EngineError::InvalidTopology {
+                            message: format!("invalid target rate family for {rate}"),
                         })?;
                     let mult = rate.get() / matched_tier_rate.get();
                     let stages = if mult >= 1 {
@@ -132,9 +135,9 @@ pub use crate::transport::is_dsd_passthrough_eligible;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use audigma_dsp::rates::{DsdBitRateHz, PcmRateHz};
-    use audigma_dsp::config::{FilterPhase, Apodization, OverloadPolicy, SampleFormat};
+    use audigma_dsp::config::{Apodization, FilterPhase, OverloadPolicy, SampleFormat};
     use audigma_dsp::presets::PRESET_REFERENCE;
+    use audigma_dsp::rates::{DsdBitRateHz, PcmRateHz};
     use audigma_format::decoder::AudioStreamInfo;
 
     #[test]
@@ -227,6 +230,25 @@ mod tests {
         let other_target = TargetRateSpec::Dsd {
             bit_rate: DsdBitRateHz::DSD128,
         };
-        assert!(!is_dsd_passthrough_eligible(&dsd_info, &other_target, &dsp_cfg));
+        assert!(!is_dsd_passthrough_eligible(
+            &dsd_info,
+            &other_target,
+            &dsp_cfg
+        ));
+    }
+
+    #[test]
+    fn test_topology_plan_rate_error_returns_invalid_topology() {
+        let high_pcm_rate = PcmRateHz::new(5_644_800).unwrap();
+        let target = TargetRateSpec::Dsd {
+            bit_rate: DsdBitRateHz::DSD64,
+        };
+        let err = PipelineTopology::resolve(high_pcm_rate, target).unwrap_err();
+        match err {
+            EngineError::InvalidTopology { message } => {
+                assert!(message.contains("exceeds DSD bit rate"));
+            }
+            _ => panic!("expected InvalidTopology"),
+        }
     }
 }

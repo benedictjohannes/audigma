@@ -109,9 +109,9 @@ impl<'a> ContainerWriter<'a> {
                 let bit_rate = match target_spec {
                     TargetRateSpec::Dsd { bit_rate } => *bit_rate,
                     TargetRateSpec::Pcm { .. } => {
-                        return Err(EngineError::Pipeline(
-                            "cannot write DSF container for PCM target format".into(),
-                        ));
+                        return Err(EngineError::InvalidTopology {
+                            message: "cannot write DSF container for PCM target format".into(),
+                        });
                     }
                 };
                 let pad_mode = settings
@@ -133,9 +133,9 @@ impl<'a> ContainerWriter<'a> {
                         valid_bits,
                     } => (*rate, *sample_format, *valid_bits),
                     TargetRateSpec::Dsd { .. } => {
-                        return Err(EngineError::Pipeline(
-                            "cannot write WAV container for DSD target format".into(),
-                        ));
+                        return Err(EngineError::InvalidTopology {
+                            message: "cannot write WAV container for DSD target format".into(),
+                        });
                     }
                 };
                 let writer = PcmWavWriter::new(output, pcm_rate, sample_format, valid_bits)?;
@@ -149,9 +149,9 @@ impl<'a> ContainerWriter<'a> {
                         ..
                     } => (*rate, *sample_format),
                     TargetRateSpec::Dsd { .. } => {
-                        return Err(EngineError::Pipeline(
-                            "cannot write FLAC container for DSD target format".into(),
-                        ));
+                        return Err(EngineError::InvalidTopology {
+                            message: "cannot write FLAC container for DSD target format".into(),
+                        });
                     }
                 };
                 let bits_per_sample = match sample_format {
@@ -274,9 +274,9 @@ impl<'a> ContainerWriter<'a> {
                 *bytes_written += staging_pcm.len() as u64;
             }
             _ => {
-                return Err(EngineError::Pipeline(
-                    "attempted to write PCM samples to DSD container".into(),
-                ));
+                return Err(EngineError::InvalidTopology {
+                    message: "attempted to write PCM samples to DSD container".into(),
+                });
             }
         }
         Ok(())
@@ -375,9 +375,9 @@ impl<'a> ContainerWriter<'a> {
                 }
             }
             _ => {
-                return Err(EngineError::Pipeline(
-                    "attempted to write DSD bytes to PCM container".into(),
-                ));
+                return Err(EngineError::InvalidTopology {
+                    message: "attempted to write DSD bytes to PCM container".into(),
+                });
             }
         }
         Ok(())
@@ -563,7 +563,7 @@ impl OfflinePipeline {
         let target_spec = self.plan.stream_spec.target;
         let is_dsd = matches!(target_spec, TargetRateSpec::Dsd { .. });
 
-        if is_dsd_passthrough_eligible(&input.info(), &target_spec, &self.plan.dsp_config) {
+        if is_dsd_passthrough_eligible(input.info(), &target_spec, &self.plan.dsp_config) {
             // Automatic Opportunistic Bit-Exact DSD Passthrough (Design.md §1.6):
             // The input is DSD, target matches input rate, and software volume attenuation is unity (100%).
             // Direct bit-exact transfer bypassing decimation, filtering, and remodulation.

@@ -239,6 +239,8 @@ mod tests {
         assert_eq!(DspConfiguration::compute_linear_gain(0.0, true), 0.0);
         assert_eq!(DspConfiguration::compute_linear_gain(-119.0, false), 0.0);
         assert_eq!(DspConfiguration::compute_linear_gain(-120.0, false), 0.0);
-        assert!((DspConfiguration::compute_linear_gain(-6.0, false) - 0.5011872336272722).abs() < 1e-9);
+        assert!(
+            (DspConfiguration::compute_linear_gain(-6.0, false) - 0.5011872336272722).abs() < 1e-9
+        );
     }
 }

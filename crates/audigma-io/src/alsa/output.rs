@@ -14,7 +14,7 @@ use alsa::pcm::{Access, Format, HwParams, PCM, State};
 use alsa::{Direction, ValueOr};
 
 use audigma_dsp::config::SampleFormat;
-use audigma_engine::traits::AudioOutput;
+use audigma_engine::traits::{AudioOutput, EngineError};
 use std::io::{ErrorKind, Result as IoResult, Write};
 use thiserror::Error;
 
@@ -44,6 +44,23 @@ pub enum AlsaOutputError {
 
     #[error("ALSA device disconnected: {0}")]
     DeviceDisconnected(String),
+}
+
+impl From<AlsaOutputError> for EngineError {
+    fn from(err: AlsaOutputError) -> Self {
+        match err {
+            AlsaOutputError::DeviceDisconnected(reason) => EngineError::DeviceDisconnected(reason),
+            AlsaOutputError::Io(e) => EngineError::Io(e),
+            AlsaOutputError::Disabled => EngineError::AudioBackend {
+                backend: "alsa",
+                message: "ALSA backend feature is disabled".to_string(),
+            },
+            other => EngineError::DeviceUnavailable {
+                device: "alsa".to_string(),
+                reason: other.to_string(),
+            },
+        }
+    }
 }
 
 /// Parameters for configuring an ALSA output stream.
@@ -654,5 +671,35 @@ mod tests {
         assert_eq!(cfg.alsa_format, "S32_LE");
         assert_eq!(cfg.buffer_ms, 40);
         assert_eq!(cfg.period_ms, 5);
+    }
+
+    #[test]
+    fn test_alsa_output_error_conversion_to_engine_error() {
+        let err1 = AlsaOutputError::DeviceDisconnected("ENODEV".into());
+        let engine_err1: EngineError = err1.into();
+        match engine_err1 {
+            EngineError::DeviceDisconnected(msg) => assert_eq!(msg, "ENODEV"),
+            _ => panic!("expected DeviceDisconnected"),
+        }
+
+        let err2 = AlsaOutputError::Disabled;
+        let engine_err2: EngineError = err2.into();
+        match engine_err2 {
+            EngineError::AudioBackend { backend, message } => {
+                assert_eq!(backend, "alsa");
+                assert!(message.contains("disabled"));
+            }
+            _ => panic!("expected AudioBackend"),
+        }
+
+        let err3 = AlsaOutputError::HwParamsFailed("channels unsupported".into());
+        let engine_err3: EngineError = err3.into();
+        match engine_err3 {
+            EngineError::DeviceUnavailable { device, reason } => {
+                assert_eq!(device, "alsa");
+                assert!(reason.contains("channels unsupported"));
+            }
+            _ => panic!("expected DeviceUnavailable"),
+        }
     }
 }

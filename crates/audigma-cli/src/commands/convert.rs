@@ -11,6 +11,8 @@ use audigma_settings::{OutputContainer, Settings};
 use clap::Args;
 use serde_json::json;
 
+use crate::error::CliError;
+
 #[derive(Args, Debug)]
 pub struct ConvertArgs {
     /// Input file path (or '-' for stdin)
@@ -30,7 +32,7 @@ pub struct ConvertArgs {
     pub json: bool,
 }
 
-pub fn run_convert(args: ConvertArgs) -> Result<(), EngineError> {
+pub fn run_convert(args: ConvertArgs) -> Result<(), CliError> {
     // 1. Resolve Settings
     let settings = if let Some(ref cfg_path) = args.config {
         let content = std::fs::read_to_string(cfg_path)?;
@@ -54,10 +56,10 @@ pub fn run_convert(args: ConvertArgs) -> Result<(), EngineError> {
         let container = settings.output.as_ref().and_then(|o| o.container);
         match container {
             Some(OutputContainer::Dsf) => {
-                return Err(EngineError::SeekableOutputRequired { container: "dsf" });
+                return Err(EngineError::SeekableOutputRequired { container: "dsf" }.into());
             }
             Some(OutputContainer::Wav) => {
-                return Err(EngineError::SeekableOutputRequired { container: "wav" });
+                return Err(EngineError::SeekableOutputRequired { container: "wav" }.into());
             }
             _ => {}
         }
