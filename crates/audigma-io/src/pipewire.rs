@@ -26,8 +26,12 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use thiserror::Error;
 
-mod dsd_clock;
-use dsd_clock::{DsdCaptureClock, GraphCycle};
+mod capture_pull;
+use capture_pull::{PullClock, PullDemand, TriggerDone, advance_driver_clock};
+
+/// A pull whose cycle has not completed within this window is presumed lost
+/// (e.g. the follower vanished mid-cycle) so capture cannot stall forever.
+const PULL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Errors arising from PipeWire I/O backend operations.
 #[derive(Debug, Error)]
@@ -293,7 +297,7 @@ fn input_preroll_ready(
     capacity: usize,
 ) -> bool {
     buffered_secs >= target_secs
-        // Small graph quanta can fill the DSD ring before reaching the time
+        // Small capture buffers can fill the DSD ring before reaching the time
         // cushion. Start consuming with half the slots still free instead of
         // waiting forever for a duration the ring cannot hold.
         || (is_dsd && occupied_slots >= (capacity / 2).max(1))
@@ -598,6 +602,7 @@ pub struct PipeWireVirtualSink {
     dsd_residue: Vec<Vec<u8>>,
     prerolled: bool,
     preroll_secs: f64,
+    capture_cushion_ns: Arc<AtomicU64>,
     rt_consumer: Option<audigma_log::RtLogConsumer>,
     dropped_rt_events: Arc<AtomicU64>,
     decimation_recorder: Arc<audigma_log::DecimationErrorRecorder>,
@@ -683,6 +688,10 @@ impl PipeWireVirtualSink {
         let dropped_chunks = Arc::new(AtomicU64::new(0));
         let processed_chunks = Arc::new(AtomicU64::new(0));
         let buffered_units = Arc::new(AtomicU64::new(0));
+        let capture_cushion_ns =
+            Arc::new(AtomicU64::new((DEFAULT_INPUT_PREROLL_SECS * 1e9) as u64));
+        let capture_cushion_worker = capture_cushion_ns.clone();
+        let buffered_units_worker = buffered_units.clone();
 
         let (rt_producer, rt_consumer, dropped_rt_events) =
             audigma_log::rt_log_channel(audigma_log::DEFAULT_RT_QUEUE_CAPACITY);
@@ -747,6 +756,11 @@ impl PipeWireVirtualSink {
                     *pipewire::keys::MEDIA_ROLE => "Music",
                     *pipewire::keys::AUDIO_CHANNELS => format!("{channels}"),
                     "audio.position" => pos_str.as_str(),
+                    // The sink always drives its own graph and pulls input as
+                    // the engine consumes it. It never joins (or switches
+                    // between) hardware drivers, so input timing follows the
+                    // output and a source's requested size is in its own units.
+                    *pipewire::keys::NODE_DRIVER => "true",
                 };
                 if rate_mode == RateMode::Dynamic || allow_dsd {
                     stream_props.insert("audio.allowed-rates", format!("[ {allowed_rates_str} ]"));
@@ -761,18 +775,20 @@ impl PipeWireVirtualSink {
                 let is_dsd_process_cb = is_dsd_cb.clone();
                 let is_lsb_process_cb = is_lsb_cb.clone();
                 let interleave_process_cb = interleave_cb.clone();
-                let dsd_rate_process_cb = active_dsd_rate_cb.clone();
+                let pull_pending = Arc::new(AtomicBool::new(false));
+                let pull_pending_state = pull_pending.clone();
+                let _trigger_done = TriggerDone::new(&stream, pull_pending.clone());
+                // Negotiated capture rate in units per second (PCM frames or
+                // DSD bytes per channel); zero until a format is negotiated.
+                let capture_rate = Arc::new(AtomicU32::new(0));
+                let capture_rate_format = capture_rate.clone();
+                let capture_units = Arc::new(AtomicU64::new(0));
+                let capture_units_cb = capture_units.clone();
+                let capture_units_format = capture_units.clone();
                 let position = Arc::new(AtomicPtr::<libspa::sys::spa_io_position>::new(
                     std::ptr::null_mut(),
                 ));
                 let position_io = position.clone();
-                // High 32 bits: buffer bytes; low 32 bits: frame stride.
-                let buffer_request = Arc::new(AtomicU64::new(0));
-                let buffer_request_cb = buffer_request.clone();
-                let buffer_request_format = buffer_request.clone();
-                let format_epoch = Arc::new(AtomicU64::new(1));
-                let format_epoch_cb = format_epoch.clone();
-                let mut dsd_clock = DsdCaptureClock::default();
                 let _listener = match stream
                     .add_local_listener_with_user_data(())
                     .io_changed(move |_, _, id, area, size| {
@@ -787,11 +803,16 @@ impl PipeWireVirtualSink {
                             position_io.store(ptr, Ordering::Release);
                         }
                     })
-                    .param_changed(move |stream, _, id, param| {
-                        if id == libspa::param::ParamType::Format.as_raw() {
-                            format_epoch.fetch_add(1, Ordering::Release);
+                    .state_changed(move |_, _, _, state| {
+                        if state != pipewire::stream::StreamState::Streaming {
+                            pull_pending_state.store(false, Ordering::Release);
                         }
+                    })
+                    .param_changed(move |stream, _, id, param| {
                         let Some(param) = param else {
+                            if id == libspa::param::ParamType::Format.as_raw() {
+                                capture_rate_format.store(0, Ordering::Release);
+                            }
                             return;
                         };
                         if id == libspa::param::ParamType::Format.as_raw() {
@@ -804,9 +825,6 @@ impl PipeWireVirtualSink {
                                 interleave_cb.store(parsed.interleave, Ordering::SeqCst);
                                 if parsed.is_dsd {
                                     let bit_rate = parsed.rate * 8;
-                                    if active_dsd_rate_cb.load(Ordering::Acquire) != bit_rate {
-                                        buffer_request_format.store(0, Ordering::Release);
-                                    }
                                     active_dsd_rate_cb.store(bit_rate, Ordering::SeqCst);
                                     let dsd_rate_opt = DsdBitRateHz::new(bit_rate);
                                     let intermediate_rate = dsd_rate_opt
@@ -837,7 +855,6 @@ impl PipeWireVirtualSink {
                                         pending_rate_cb.store(intermediate_rate, Ordering::SeqCst);
                                     }
                                 } else {
-                                    buffer_request_format.store(0, Ordering::Release);
                                     active_dsd_rate_cb.store(0, Ordering::SeqCst);
                                     if let Ok(mut p) = rt_producer_cb.try_lock() {
                                         let _ =
@@ -860,7 +877,6 @@ impl PipeWireVirtualSink {
                             } else {
                                 let mut info = AudioInfoRaw::new();
                                 if info.parse(param).is_ok() {
-                                    buffer_request_format.store(0, Ordering::Release);
                                     is_dsd_cb.store(false, Ordering::SeqCst);
                                     is_lsb_cb.store(false, Ordering::SeqCst);
                                     active_dsd_rate_cb.store(0, Ordering::SeqCst);
@@ -892,9 +908,15 @@ impl PipeWireVirtualSink {
 
                             if let Some((stream_rate, stride)) = negotiated_stream_rate_and_stride {
                                 let quantum_frames = quantum_frames_for_rate(stream_rate);
-                                let request = buffer_request_format.load(Ordering::Acquire);
-                                let buffers = if request != 0 {
-                                    let size = (request >> 32) as i32;
+                                let native_dsd = is_dsd_cb.load(Ordering::Acquire);
+                                capture_units_format
+                                    .store(u64::from(quantum_frames), Ordering::Release);
+                                capture_rate_format.store(stream_rate, Ordering::Release);
+                                let buffers = if native_dsd {
+                                    let iv =
+                                        interleave_cb.load(Ordering::Relaxed).unsigned_abs().max(1);
+                                    let size =
+                                        quantum_frames.div_ceil(iv).saturating_mul(stride) as i32;
                                     build_buffers_pod_bounds(stride as i32, size, size, size)
                                 } else {
                                     build_buffers_pod(quantum_frames, stride)
@@ -933,45 +955,9 @@ impl PipeWireVirtualSink {
                             return;
                         }
 
-                        let dsd_byte_rate = dsd_rate_process_cb.load(Ordering::Acquire) / 8;
-                        if is_dsd_process_cb.load(Ordering::Relaxed) {
-                            let ptr = position.load(Ordering::Acquire);
-                            if ptr.is_null() {
-                                return;
-                            }
-                            // PipeWire owns this IO area and publishes the graph
-                            // clock before invoking process. Never retain a reference
-                            // beyond this callback; io_changed replaces/clears it.
-                            let clock = unsafe { &(*ptr).clock };
-                            let cycle = GraphCycle {
-                                id: clock.id,
-                                position: clock.position,
-                                duration: clock.duration,
-                                rate_num: clock.rate.num,
-                                rate_denom: clock.rate.denom,
-                            };
-                            let iv = interleave_process_cb
-                                .load(Ordering::Relaxed)
-                                .unsigned_abs()
-                                .max(1);
-                            let Some(size) = cycle.buffer_bytes(dsd_byte_rate, channels, iv) else {
-                                return;
-                            };
-                            let stride = channels.saturating_mul(iv);
-                            buffer_request_cb.store(
-                                (u64::from(size) << 32) | u64::from(stride),
-                                Ordering::Release,
-                            );
-                            if !dsd_clock.can_dequeue(
-                                cycle,
-                                format_epoch_cb.load(Ordering::Acquire),
-                                producer.is_full(),
-                            ) {
-                                // A smaller quantum also reduces the duration
-                                // held by each ring slot. Retain upstream buffers
-                                // while the engine drains the previous cushion.
-                                return;
-                            }
+                        if producer.is_full() {
+                            // Leave the buffer queued; the next pull retries it.
+                            return;
                         }
 
                         if let Some(mut buffer) = stream.dequeue_buffer() {
@@ -1015,7 +1001,6 @@ impl PipeWireVirtualSink {
                                     }
 
                                     if min_bytes > 0 && min_bytes != usize::MAX {
-                                        dsd_clock.consume(min_bytes, dsd_byte_rate);
                                         let total_bytes = min_bytes * n_ch;
                                         let mut chunk = TaggedChunk::new(total_bytes);
                                         let mut byte_buf = Vec::with_capacity(total_bytes);
@@ -1031,10 +1016,15 @@ impl PipeWireVirtualSink {
                                         }
                                         chunk.set_dsd(cur_gen, n_ch, &byte_buf);
                                         let units = chunk.frames() as u64;
+                                        capture_units_cb.store(units, Ordering::Release);
+                                        buffered_units_cb.fetch_add(units, Ordering::Relaxed);
                                         if producer.push(chunk).is_err() {
+                                            let _ = buffered_units_cb.fetch_update(
+                                                Ordering::Relaxed,
+                                                Ordering::Relaxed,
+                                                |cur| Some(cur.saturating_sub(units)),
+                                            );
                                             dropped_chunks_cb.fetch_add(1, Ordering::Relaxed);
-                                        } else {
-                                            buffered_units_cb.fetch_add(units, Ordering::Relaxed);
                                         }
                                     }
                                 } else if !datas.is_empty() {
@@ -1054,7 +1044,6 @@ impl PipeWireVirtualSink {
 
                                             if complete_groups > 0 {
                                                 let usable_len = complete_groups * group_size;
-                                                dsd_clock.consume(usable_len / n_ch, dsd_byte_rate);
                                                 let mut chunk = TaggedChunk::new(usable_len);
                                                 let mut byte_buf = Vec::with_capacity(usable_len);
 
@@ -1096,12 +1085,17 @@ impl PipeWireVirtualSink {
                                                 }
                                                 chunk.set_dsd(cur_gen, n_ch, &byte_buf);
                                                 let units = chunk.frames() as u64;
+                                                capture_units_cb.store(units, Ordering::Release);
+                                                buffered_units_cb
+                                                    .fetch_add(units, Ordering::Relaxed);
                                                 if producer.push(chunk).is_err() {
+                                                    let _ = buffered_units_cb.fetch_update(
+                                                        Ordering::Relaxed,
+                                                        Ordering::Relaxed,
+                                                        |cur| Some(cur.saturating_sub(units)),
+                                                    );
                                                     dropped_chunks_cb
                                                         .fetch_add(1, Ordering::Relaxed);
-                                                } else {
-                                                    buffered_units_cb
-                                                        .fetch_add(units, Ordering::Relaxed);
                                                 }
                                             }
                                         }
@@ -1155,10 +1149,15 @@ impl PipeWireVirtualSink {
 
                                         chunk.set(cur_gen, n_ch, &float_buf);
                                         let units = chunk.frames() as u64;
+                                        capture_units_cb.store(units, Ordering::Release);
+                                        buffered_units_cb.fetch_add(units, Ordering::Relaxed);
                                         if producer.push(chunk).is_err() {
+                                            let _ = buffered_units_cb.fetch_update(
+                                                Ordering::Relaxed,
+                                                Ordering::Relaxed,
+                                                |cur| Some(cur.saturating_sub(units)),
+                                            );
                                             dropped_chunks_cb.fetch_add(1, Ordering::Relaxed);
-                                        } else {
-                                            buffered_units_cb.fetch_add(units, Ordering::Relaxed);
                                         }
                                     }
                                 } else {
@@ -1187,12 +1186,17 @@ impl PipeWireVirtualSink {
 
                                                 chunk.set(cur_gen, n_ch, &float_buf);
                                                 let units = chunk.frames() as u64;
+                                                capture_units_cb.store(units, Ordering::Release);
+                                                buffered_units_cb
+                                                    .fetch_add(units, Ordering::Relaxed);
                                                 if producer.push(chunk).is_err() {
+                                                    let _ = buffered_units_cb.fetch_update(
+                                                        Ordering::Relaxed,
+                                                        Ordering::Relaxed,
+                                                        |cur| Some(cur.saturating_sub(units)),
+                                                    );
                                                     dropped_chunks_cb
                                                         .fetch_add(1, Ordering::Relaxed);
-                                                } else {
-                                                    buffered_units_cb
-                                                        .fetch_add(units, Ordering::Relaxed);
                                                 }
                                             }
                                         }
@@ -1264,45 +1268,64 @@ impl PipeWireVirtualSink {
                     return;
                 }
 
-                let mut applied_buffer_request = 0;
+                let mut pull_clock = PullClock::default();
+                let mut pull_started: Option<std::time::Instant> = None;
                 while running_clone.load(Ordering::Relaxed) {
                     mainloop.loop_().iterate(pipewire::loop_::Timeout::Finite(
                         std::time::Duration::from_millis(1),
                     ));
-                    let request = buffer_request.load(Ordering::Acquire);
-                    if request != applied_buffer_request {
-                        if request == 0 {
-                            applied_buffer_request = 0;
+                    let now = std::time::Instant::now();
+                    if pull_pending.load(Ordering::Acquire) {
+                        if pull_started.is_some_and(|t| now.duration_since(t) >= PULL_TIMEOUT) {
+                            tracing::debug!(
+                                target: "audigma::pipewire",
+                                event = "capture_pull_timeout",
+                                "capture cycle did not complete; re-arming pull"
+                            );
+                            pull_pending.store(false, Ordering::Release);
+                        } else {
                             continue;
                         }
-                        let size = (request >> 32) as i32;
-                        let stride = request as u32 as i32;
-                        if let Ok(bytes) = build_buffers_pod_bounds(stride, size, size, size) {
-                            if let Some(pod) = Pod::from_bytes(&bytes) {
-                                // Buffer params alone do not reallocate an active
-                                // link. Invalidate EnumFormat as well so PipeWire
-                                // re-prepares it with the new allocation bounds.
-                                let mut params = vec![pod];
-                                if let Some(pcm) = Pod::from_bytes(&pcm_pod_bytes) {
-                                    params.push(pcm);
-                                }
-                                if let Some(ref bytes) = dsd_bytes {
-                                    if let Some(dsd) = Pod::from_bytes(bytes) {
-                                        params.push(dsd);
-                                    }
-                                }
-                                if stream.update_params(&mut params).is_ok() {
-                                    applied_buffer_request = request;
-                                    tracing::debug!(
-                                        target: "audigma::pipewire",
-                                        event = "dsd_capture_buffer_resize",
-                                        bytes = size,
-                                        stride,
-                                        "requested graph-paced DSD capture buffers"
-                                    );
-                                }
-                            }
-                        }
+                    }
+                    pull_started = None;
+
+                    let units_per_sec = capture_rate.load(Ordering::Acquire);
+                    if units_per_sec == 0
+                        || stream.state() != pipewire::stream::StreamState::Streaming
+                        || !stream.is_driving()
+                    {
+                        pull_clock.reset();
+                        continue;
+                    }
+                    if !pull_clock.ready(now)
+                        || !PullDemand::needs_buffer(
+                            buffered_units_worker.load(Ordering::Acquire),
+                            units_per_sec,
+                            capture_cushion_worker.load(Ordering::Relaxed),
+                        )
+                    {
+                        continue;
+                    }
+
+                    let ptr = position.load(Ordering::Acquire);
+                    if !ptr.is_null() {
+                        // SAFETY: PipeWire owns this IO area for as long as
+                        // io_changed has not replaced it; both run on this
+                        // thread. No cycle is in flight (one pull at a time),
+                        // so followers are not reading the clock concurrently.
+                        let clock = unsafe { &mut (*ptr).clock };
+                        let now_ns =
+                            unsafe { pipewire::sys::pw_stream_get_nsec(stream.as_raw_ptr()) };
+                        advance_driver_clock(clock, now_ns);
+                    }
+
+                    pull_pending.store(true, Ordering::Release);
+                    pull_started = Some(now);
+                    let units = capture_units.load(Ordering::Acquire).max(1);
+                    pull_clock.pulled(now, units, units_per_sec);
+                    if stream.trigger_process().is_err() {
+                        pull_pending.store(false, Ordering::Release);
+                        pull_started = None;
                     }
                 }
             })
@@ -1339,6 +1362,7 @@ impl PipeWireVirtualSink {
             dsd_residue: Vec::new(),
             prerolled: false,
             preroll_secs: DEFAULT_INPUT_PREROLL_SECS,
+            capture_cushion_ns,
             rt_consumer: Some(rt_consumer),
             dropped_rt_events,
             decimation_recorder,
@@ -1349,6 +1373,8 @@ impl PipeWireVirtualSink {
     #[inline]
     pub fn set_preroll_secs(&mut self, secs: f64) {
         self.preroll_secs = secs.clamp(0.040, 1.0);
+        self.capture_cushion_ns
+            .store((self.preroll_secs * 1e9) as u64, Ordering::Relaxed);
     }
 
     /// Returns whether the currently negotiated DSD bitstream is LSB bit order.
@@ -2186,7 +2212,7 @@ mod input_clock_tests {
     use super::*;
 
     #[test]
-    fn dsd_buffer_size_cannot_negotiate_above_graph_demand() {
+    fn fixed_dsd_buffer_bounds_are_exact() {
         let bytes = build_buffers_pod_bounds(2, 512, 512, 512).unwrap();
         let (_, Value::Object(object)) = PodDeserializer::deserialize_any_from(&bytes).unwrap()
         else {
