@@ -1,4 +1,4 @@
-//! Stable event name constants according to the initial catalog (`StructuredLogging.md §10`).
+//! Stable event name constants according to the initial catalog.
 
 pub const DAEMON_START: &str = "daemon_start";
 pub const DAEMON_STOP: &str = "daemon_stop";
@@ -17,3 +17,10 @@ pub const OUTPUT_REOPENED: &str = "output_reopened";
 pub const STREAMING_ERROR: &str = "streaming_error";
 pub const DECIMATION_ERROR_SUMMARY: &str = "decimation_error_summary";
 pub const RT_EVENTS_DROPPED: &str = "rt_events_dropped";
+
+/// Stable target for DSP deadline-miss telemetry.
+pub const LATE_TARGET: &str = "audigma::late";
+
+pub const LATE_START: &str = "late_start";
+pub const LATE_SLICE: &str = "late_slice";
+pub const LATE_END: &str = "late_end";

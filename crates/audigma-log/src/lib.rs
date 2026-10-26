@@ -1,4 +1,4 @@
-//! `audigma-log`: Structured logging and real-time safe telemetry foundation (`StructuredLogging.md`).
+//! `audigma-log`: Structured logging and real-time safe telemetry foundation.
 
 pub mod config;
 pub mod events;
@@ -23,7 +23,7 @@ pub const NON_BLOCKING_BUFFER_LIMIT: usize = 10_000;
 /// Initializes the global tracing subscriber according to `LogConfig` writing to stderr.
 ///
 /// Configures a single non-blocking writer with `lossy: true` and 10,000 capacity
-/// to eliminate stderr lock contention from application threads (`StructuredLogging.md §4`, `§9`).
+/// to eliminate stderr lock contention from application threads.
 pub fn init(config: &LogConfig) -> Result<WorkerGuard, LogConfigError> {
     let (non_blocking, guard) = NonBlockingBuilder::default()
         .lossy(true)

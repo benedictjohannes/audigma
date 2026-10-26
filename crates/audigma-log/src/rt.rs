@@ -1,4 +1,4 @@
-//! Real-time safe logging bridge and event definitions (`StructuredLogging.md §8`).
+//! Real-time safe logging bridge and event definitions.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU64, Ordering};
@@ -116,7 +116,7 @@ impl DecimationErrorRecorder {
     }
 }
 
-/// Drains RT queues and emits `tracing` records from a non-RT thread (`StructuredLogging.md §8.4`).
+/// Drains RT queues and emits `tracing` records from a non-RT thread.
 pub struct RtLogDrainer {
     consumers: Vec<RtLogConsumer>,
     dropped_counters: Vec<Arc<AtomicU64>>,

@@ -1,4 +1,4 @@
-//! Integration tests for structured logging and CLI flags (`StructuredLogging.md §12`).
+//! Integration tests for structured logging and CLI flags.
 
 use std::process::Command;
 

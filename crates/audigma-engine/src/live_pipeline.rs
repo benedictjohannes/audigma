@@ -13,6 +13,7 @@
 //! - Monitored live telemetry exported via shared state.
 
 use crate::asrc::{AdaptiveClockDriftController, ClockDriftConfig, ClockDriftError};
+use crate::late::{LateCounterSource, LateCounters, LateTileMonitor};
 use crate::lifecycle::{BlockAction, IdleCarrierFormat, LifecycleController, LifecycleState};
 use crate::processor::TileProcessor;
 use crate::topology::PipelineTopology;
@@ -506,6 +507,19 @@ impl DaemonControlHandle {
             .store(duration_ms.unwrap_or(DISCONNECT_NONE), Ordering::Relaxed);
     }
 
+    /// Returns a cumulative backend counter snapshot for late-tile deltas.
+    #[inline]
+    pub fn late_counters(&self) -> LateCounters {
+        LateCounters {
+            xruns: self.telemetry.xrun_count.load(Ordering::Relaxed),
+            overruns: self.telemetry.asrc_overruns.load(Ordering::Relaxed),
+            starvations: self.telemetry.asrc_starvations.load(Ordering::Relaxed),
+            empty_polls: self.telemetry.empty_polls.load(Ordering::Relaxed),
+            dropped_chunks: self.telemetry.dropped_chunks.load(Ordering::Relaxed),
+            processed_chunks: self.telemetry.processed_chunks.load(Ordering::Relaxed),
+        }
+    }
+
     /// Updates the input/output stream rates and target format after a reconfiguration.
     #[inline]
     pub fn set_stream_config(
@@ -734,6 +748,21 @@ impl LivePipeline {
             self.thread_init_hook.clone(),
         )?;
         let mult = processor.rate_multiplier();
+
+        // Deadline-miss aggregation is enabled for every live streaming pipeline. The
+        // aggregator owns its own non-real-time thread and only reads atomics updated by
+        // the audio loop.
+        let late_counters: LateCounterSource = {
+            let control = control.clone();
+            Arc::new(move || control.late_counters())
+        };
+        let _late_monitor = processor.late_telemetry().map(|telemetry| {
+            LateTileMonitor::spawn(
+                telemetry,
+                late_counters,
+                self.settings.late_tile_report_interval(),
+            )
+        });
 
         let pcm_sample_format = match target_spec {
             TargetRateSpec::Pcm { sample_format, .. } => sample_format,
@@ -1166,6 +1195,10 @@ impl LivePipeline {
             } else {
                 frames_read
             };
+
+            // Update the buffer-fill context used by late-tile capture. This is a
+            // lock-free atomic publish; the audio loop adds no I/O or formatting.
+            processor.set_buffer_fill_ms(input.buffer_fill_secs().map(|s| s * 1000.0));
 
             // Interpolation & Modulation in bounded tiles via ChannelWorkerPool
             let mut offset = 0;

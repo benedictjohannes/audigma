@@ -10,6 +10,7 @@
 //! - Deterministic seeding, gapless `trim-to-duration` phase-alignment, and `preserve-tail` flushing.
 
 pub mod asrc;
+pub mod late;
 pub mod lifecycle;
 pub mod live_pipeline;
 pub mod offline_pipeline;
@@ -23,6 +24,10 @@ pub mod transport;
 pub mod worker;
 
 pub use asrc::{AdaptiveClockDriftController, ClockDriftConfig, ClockDriftError};
+pub use late::{
+    LateCounterSource, LateCounters, LateEpisodeAggregator, LateRecord, LateTileMonitor,
+    LateTileTelemetry,
+};
 pub use lifecycle::{BlockAction, IdleCarrierFormat, LifecycleController, LifecycleState};
 pub use live_pipeline::{
     DaemonControlHandle, DaemonOutputFormat, DaemonState, DaemonTelemetry, DaemonVolumeMode,

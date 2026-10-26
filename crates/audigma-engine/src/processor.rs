@@ -1,11 +1,12 @@
-//! Centralized DSP tile execution, multi-channel cascade dispatch, and deadline tracking (`Design.md §4.2`, `LateTileLogging.md`).
+//! Centralized DSP tile execution, multi-channel cascade dispatch, and deadline tracking (`Design.md §4.2`).
 
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use audigma_dsp::config::{Apodization, FilterPhase, FilterPreset};
+use audigma_dsp::config::{Apodization, FilterPhase, FilterPreset, TargetRateSpec};
 
+use crate::late::LateTileTelemetry;
 use crate::topology::PipelineTopology;
 use crate::traits::EngineError;
 use crate::worker::{ChannelWorkerPool, TargetDsdConfig};
@@ -17,17 +18,14 @@ pub struct TileProcessor {
     topology: PipelineTopology,
     tile_baseband_frames: usize,
     tile_budget: Option<Duration>,
-    total_tiles_processed: u64,
-    total_late_tiles: u64,
-    max_dsp_tile_us: u64,
+    late_telemetry: Option<Arc<LateTileTelemetry>>,
 }
 
 impl TileProcessor {
     /// Creates a new `TileProcessor` configured for the specified channel count, filter parameters, and topology.
     ///
     /// If `is_realtime` is `true`, execution time is measured against `tile_baseband_frames / intermediate_rate`
-    /// and late tile deadline misses are tracked (`LateTileLogging.md`). If `false` (offline mode),
-    /// timing overhead is bypassed completely.
+    /// and late tile deadline misses are tracked. If `false` (offline mode), timing overhead is bypassed completely.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         channels: usize,
@@ -59,14 +57,25 @@ impl TileProcessor {
             None
         };
 
+        let late_telemetry = tile_budget.map(|budget| {
+            let output_rate_hz = match topology.target_spec {
+                TargetRateSpec::Dsd { bit_rate } => bit_rate.get(),
+                TargetRateSpec::Pcm { rate, .. } => rate.get(),
+            };
+            Arc::new(LateTileTelemetry::new(
+                tile_baseband_frames,
+                budget,
+                topology.input_rate.get(),
+                output_rate_hz,
+            ))
+        });
+
         Ok(Self {
             worker_pool,
             topology,
             tile_baseband_frames,
             tile_budget,
-            total_tiles_processed: 0,
-            total_late_tiles: 0,
-            max_dsp_tile_us: 0,
+            late_telemetry,
         })
     }
 
@@ -97,18 +106,21 @@ impl TileProcessor {
     }
 
     #[inline]
-    fn record_tile_metrics(&mut self, frames: usize, elapsed: Duration, budget: Duration) {
-        let us = elapsed.as_micros() as u64;
-        if us > self.max_dsp_tile_us {
-            self.max_dsp_tile_us = us;
-        }
-        self.total_tiles_processed = self.total_tiles_processed.saturating_add(1);
+    fn record_tile_metrics(&self, frames: usize, elapsed: Duration, budget: Duration) {
+        let Some(telemetry) = self.late_telemetry.as_ref() else {
+            return;
+        };
 
-        // Only full-size tiles count as deadline misses (`LateTileLogging.md §2`). Partial tiles
-        // are dominated by fixed dispatch/futex overhead that does not scale with tile length.
-        if frames == self.tile_baseband_frames && elapsed > budget {
-            self.total_late_tiles = self.total_late_tiles.saturating_add(1);
-        }
+        let us = elapsed.as_micros() as u64;
+        let is_full = frames == self.tile_baseband_frames;
+
+        // Only full-size tiles count as deadline misses. Partial tiles are dominated by
+        // fixed dispatch/futex overhead that does not scale with tile length.
+        let is_late = is_full && elapsed > budget;
+
+        // Reading the monotonic clock is deferred to the rare late path only.
+        let mono_ns = is_late.then(|| telemetry.mono_ns());
+        telemetry.record_tile(is_full, us, is_late, mono_ns);
     }
 
     /// Returns the pipeline topology for this processor.
@@ -132,19 +144,42 @@ impl TileProcessor {
     /// Returns the maximum observed single-tile DSP execution time in microseconds.
     #[inline]
     pub fn max_dsp_tile_us(&self) -> u64 {
-        self.max_dsp_tile_us
+        self.late_telemetry
+            .as_ref()
+            .map(|t| t.max_tile_us())
+            .unwrap_or(0)
     }
 
     /// Returns the total number of full tiles whose execution exceeded `tile_budget`.
     #[inline]
     pub fn total_late_tiles(&self) -> u64 {
-        self.total_late_tiles
+        self.late_telemetry
+            .as_ref()
+            .map(|t| t.total_late_tiles())
+            .unwrap_or(0)
     }
 
     /// Returns the total number of tiles processed since initialization.
     #[inline]
     pub fn total_tiles_processed(&self) -> u64 {
-        self.total_tiles_processed
+        self.late_telemetry
+            .as_ref()
+            .map(|t| t.total_tiles_processed())
+            .unwrap_or(0)
+    }
+
+    /// Returns the shared deadline-miss telemetry, if this processor is real-time.
+    #[inline]
+    pub fn late_telemetry(&self) -> Option<Arc<LateTileTelemetry>> {
+        self.late_telemetry.clone()
+    }
+
+    /// Updates the buffer-fill context sampled for the next late tile.
+    #[inline]
+    pub fn set_buffer_fill_ms(&self, fill_ms: Option<f64>) {
+        if let Some(telemetry) = self.late_telemetry.as_ref() {
+            telemetry.set_current_fill_ms(fill_ms);
+        }
     }
 }
 
