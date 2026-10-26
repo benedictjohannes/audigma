@@ -309,3 +309,67 @@ fn test_offline_pipeline_user_volume_layers_on_preamp() {
 
     assert!((report.applied_gain_db - expected_gain_db).abs() < 1e-9);
 }
+
+#[test]
+fn test_offline_pipeline_same_family_192k_to_48k_wav() {
+    let in_rate = PcmRateHz::PCM_192000;
+    let (left, right) = generate_synthetic_stereo_sine(in_rate, 0.05, 1000.0, 0.5);
+    let total_frames = left.len() as u64;
+    let info = AudioStreamInfo::new_pcm(in_rate, 2, Some(total_frames), Some(24));
+
+    let mut input = MockAudioInput::new(info, left, right, true);
+    let mut out_buffer = Cursor::new(Vec::new());
+
+    let mut settings = Settings::default_offline(OutputContainer::Wav);
+    if let Some(ref mut target) = settings.target {
+        target.format = TargetFormat::Pcm;
+        target.pcm_rate_hz = Some(PcmRateHz::PCM_48000);
+        target.rate_family = audigma_settings::TargetRateFamily::Source;
+    }
+
+    let pipeline = OfflinePipeline::prepare(settings, in_rate).expect("prepare failed");
+    assert_eq!(pipeline.topology().decimation_stages, 2);
+    assert_eq!(pipeline.topology().intermediate_rate, PcmRateHz::PCM_48000);
+
+    let report = pipeline
+        .run(&mut input, Box::new(SeekableSink(&mut out_buffer)))
+        .expect("conversion failed");
+
+    assert_eq!(report.input_rate, in_rate);
+    assert_eq!(report.target_format, TargetFormat::Pcm);
+    assert_eq!(report.total_input_frames, total_frames);
+    // 192k / 4 = 48k frames
+    assert_eq!(report.total_output_frames, total_frames / 4);
+}
+
+#[test]
+fn test_offline_pipeline_same_family_176k_to_44k_wav() {
+    let in_rate = PcmRateHz::PCM_176400;
+    let (left, right) = generate_synthetic_stereo_sine(in_rate, 0.05, 1000.0, 0.5);
+    let total_frames = left.len() as u64;
+    let info = AudioStreamInfo::new_pcm(in_rate, 2, Some(total_frames), Some(24));
+
+    let mut input = MockAudioInput::new(info, left, right, true);
+    let mut out_buffer = Cursor::new(Vec::new());
+
+    let mut settings = Settings::default_offline(OutputContainer::Wav);
+    if let Some(ref mut target) = settings.target {
+        target.format = TargetFormat::Pcm;
+        target.pcm_rate_hz = Some(PcmRateHz::PCM_48000); // 48k config with "source" resolves to 44.1k
+        target.rate_family = audigma_settings::TargetRateFamily::Source;
+    }
+
+    let pipeline = OfflinePipeline::prepare(settings, in_rate).expect("prepare failed");
+    assert_eq!(pipeline.topology().decimation_stages, 2);
+    assert_eq!(pipeline.topology().intermediate_rate, PcmRateHz::PCM_44100);
+
+    let report = pipeline
+        .run(&mut input, Box::new(SeekableSink(&mut out_buffer)))
+        .expect("conversion failed");
+
+    assert_eq!(report.input_rate, in_rate);
+    assert_eq!(report.target_format, TargetFormat::Pcm);
+    assert_eq!(report.total_input_frames, total_frames);
+    // 176.4k / 4 = 44.1k frames
+    assert_eq!(report.total_output_frames, total_frames / 4);
+}

@@ -29,7 +29,7 @@ libc = { workspace = true }
 
 
 zbus = { workspace = true, optional = true }
-pipewire = { workspace = true, optional = true }
+pipewire = { workspace = true, optional = true, features = ["v0_3_50"] }
 libspa = { workspace = true, optional = true }
 
 
@@ -37,4 +37,3 @@ libspa = { workspace = true, optional = true }
 [dev-dependencies]
 hound = { workspace = true }
 tempfile = { workspace = true }
-

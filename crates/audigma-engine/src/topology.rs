@@ -15,6 +15,8 @@ pub struct PipelineTopology {
     pub intermediate_rate: PcmRateHz,
     /// Number of 2x power-of-two half-band FIR upsampling stages.
     pub cascade_stages: usize,
+    /// Number of 2x power-of-two half-band FIR decimation stages.
+    pub decimation_stages: usize,
     /// Effective rate multiplier of the half-band cascade (`1 << cascade_stages`).
     pub rate_multiplier: usize,
     /// Whether polyphase rational SRC is required between input rate and intermediate rate.
@@ -29,7 +31,7 @@ impl PipelineTopology {
         input_rate: PcmRateHz,
         target_spec: TargetRateSpec,
     ) -> Result<Self, EngineError> {
-        let (intermediate_rate, stages) = match target_spec {
+        let (intermediate_rate, stages, dec_stages) = match target_spec {
             TargetRateSpec::Dsd { bit_rate } => {
                 let dsd_family = bit_rate.rate_family();
                 let in_family = input_rate.rate_family();
@@ -37,7 +39,7 @@ impl PipelineTopology {
                     if bit_rate.get() >= input_rate.get() {
                         let mult = bit_rate.get() / input_rate.get();
                         let stages = (mult as f64).log2().round() as usize;
-                        (input_rate, stages)
+                        (input_rate, stages, 0)
                     } else {
                         return Err(EngineError::InvalidTopology {
                             message: format!(
@@ -58,20 +60,34 @@ impl PipelineTopology {
                         })?;
                     let mult = bit_rate.get() / matched_tier_rate.get();
                     let stages = (mult as f64).log2().round() as usize;
-                    (matched_tier_rate, stages)
+                    (matched_tier_rate, stages, 0)
                 }
             }
             TargetRateSpec::Pcm { rate, .. } => {
                 let target_family = rate.rate_family();
                 let in_family = input_rate.rate_family();
                 if in_family == target_family {
-                    let mult = rate.get() / input_rate.get();
-                    let stages = if mult >= 1 {
-                        (mult as f64).log2().round() as usize
+                    if rate.get() >= input_rate.get() {
+                        let mult = rate.get() / input_rate.get();
+                        let stages = if mult >= 1 {
+                            (mult as f64).log2().round() as usize
+                        } else {
+                            0
+                        };
+                        (input_rate, stages, 0)
                     } else {
-                        0
-                    };
-                    (input_rate, stages)
+                        let div = input_rate.get() / rate.get();
+                        if div > 0 && div.is_power_of_two() {
+                            let dec = div.trailing_zeros() as usize;
+                            (rate, 0, dec)
+                        } else {
+                            return Err(EngineError::InvalidTopology {
+                                message: format!(
+                                    "cannot downsample {input_rate} to {rate}: ratio {div} is not a power of two"
+                                ),
+                            });
+                        }
+                    }
                 } else {
                     // Cross-family PCM conversion:
                     // If target rate allows, resample at matched tier first, then power-of-two stages
@@ -88,22 +104,29 @@ impl PipelineTopology {
                     } else {
                         0
                     };
-                    (matched_tier_rate, stages)
+                    (matched_tier_rate, stages, 0)
                 }
             }
         };
 
         let rate_multiplier = 1usize << stages;
-        let requires_rational_src = input_rate != intermediate_rate;
+        let requires_rational_src = input_rate != intermediate_rate && dec_stages == 0;
 
         Ok(Self {
             input_rate,
             intermediate_rate,
             cascade_stages: stages,
+            decimation_stages: dec_stages,
             rate_multiplier,
             requires_rational_src,
             target_spec,
         })
+    }
+
+    /// Returns the effective decimation divider (`1 << decimation_stages`).
+    #[inline]
+    pub const fn decimation_divider(&self) -> usize {
+        1 << self.decimation_stages
     }
 
     /// Returns `true` if the target is a 1-bit DSD stream.
@@ -179,9 +202,79 @@ mod tests {
         let topo = PipelineTopology::resolve(in_rate, target).unwrap();
         assert_eq!(topo.intermediate_rate, in_rate);
         assert_eq!(topo.cascade_stages, 3); // 2^3 = 8
+        assert_eq!(topo.decimation_stages, 0);
         assert_eq!(topo.rate_multiplier, 8);
+        assert_eq!(topo.decimation_divider(), 1);
         assert!(!topo.requires_rational_src);
         assert!(!topo.is_dsd());
+    }
+
+    #[test]
+    fn test_topology_same_family_pcm_downsample_176k_to_44k() {
+        let in_rate = PcmRateHz::PCM_176400;
+        let target = TargetRateSpec::Pcm {
+            rate: PcmRateHz::PCM_44100,
+            sample_format: SampleFormat::S32Le,
+            valid_bits: None,
+        };
+        let topo = PipelineTopology::resolve(in_rate, target).unwrap();
+        assert_eq!(topo.intermediate_rate, PcmRateHz::PCM_44100);
+        assert_eq!(topo.cascade_stages, 0);
+        assert_eq!(topo.decimation_stages, 2); // 176.4k / 44.1k = 4 = 2^2
+        assert_eq!(topo.rate_multiplier, 1);
+        assert_eq!(topo.decimation_divider(), 4);
+        assert!(!topo.requires_rational_src);
+        assert!(!topo.is_dsd());
+    }
+
+    #[test]
+    fn test_topology_same_family_pcm_downsample_192k_to_48k() {
+        let in_rate = PcmRateHz::PCM_192000;
+        let target = TargetRateSpec::Pcm {
+            rate: PcmRateHz::PCM_48000,
+            sample_format: SampleFormat::S32Le,
+            valid_bits: None,
+        };
+        let topo = PipelineTopology::resolve(in_rate, target).unwrap();
+        assert_eq!(topo.intermediate_rate, PcmRateHz::PCM_48000);
+        assert_eq!(topo.cascade_stages, 0);
+        assert_eq!(topo.decimation_stages, 2); // 192k / 48k = 4 = 2^2
+        assert_eq!(topo.rate_multiplier, 1);
+        assert_eq!(topo.decimation_divider(), 4);
+        assert!(!topo.requires_rational_src);
+    }
+
+    #[test]
+    fn test_topology_same_family_pcm_downsample_96k_to_48k() {
+        let in_rate = PcmRateHz::PCM_96000;
+        let target = TargetRateSpec::Pcm {
+            rate: PcmRateHz::PCM_48000,
+            sample_format: SampleFormat::S32Le,
+            valid_bits: None,
+        };
+        let topo = PipelineTopology::resolve(in_rate, target).unwrap();
+        assert_eq!(topo.intermediate_rate, PcmRateHz::PCM_48000);
+        assert_eq!(topo.cascade_stages, 0);
+        assert_eq!(topo.decimation_stages, 1); // 96k / 48k = 2 = 2^1
+        assert_eq!(topo.rate_multiplier, 1);
+        assert_eq!(topo.decimation_divider(), 2);
+        assert!(!topo.requires_rational_src);
+    }
+
+    #[test]
+    fn test_topology_cross_family_pcm_downsample_176k_to_48k() {
+        let in_rate = PcmRateHz::PCM_176400;
+        let target = TargetRateSpec::Pcm {
+            rate: PcmRateHz::PCM_48000,
+            sample_format: SampleFormat::S32Le,
+            valid_bits: None,
+        };
+        let topo = PipelineTopology::resolve(in_rate, target).unwrap();
+        assert_eq!(topo.intermediate_rate, PcmRateHz::PCM_48000);
+        assert_eq!(topo.cascade_stages, 0);
+        assert_eq!(topo.decimation_stages, 0);
+        assert_eq!(topo.rate_multiplier, 1);
+        assert!(topo.requires_rational_src);
     }
 
     #[test]

@@ -13,6 +13,7 @@
 //! - Monitored live telemetry exported via shared state.
 
 use crate::asrc::{AdaptiveClockDriftController, ClockDriftConfig, ClockDriftError};
+use crate::decimator::ChannelDecimatorPool;
 use crate::late::{LateCounterSource, LateCounters, LateTileMonitor};
 use crate::lifecycle::{BlockAction, IdleCarrierFormat, LifecycleController, LifecycleState};
 use crate::processor::TileProcessor;
@@ -786,6 +787,17 @@ impl LivePipeline {
             .map(|c| c.mode == audigma_settings::ClockMode::AdaptiveInput)
             .unwrap_or(false);
 
+        let mut decimator = if self.topology.decimation_stages > 0 {
+            Some(ChannelDecimatorPool::new(
+                preset,
+                self.topology.decimation_stages,
+                num_channels,
+                TILE_BASEBAND_FRAMES * self.topology.decimation_divider() * 4,
+            ))
+        } else {
+            None
+        };
+
         let mut asrc_resamplers: Vec<PolyphaseResampler> = Vec::new();
         let mut asrc_drift_ctrl: Option<AdaptiveClockDriftController> = None;
 
@@ -797,9 +809,14 @@ impl LivePipeline {
                 .and_then(|c| c.max_correction_ppm)
                 .map(|p| p as f64)
                 .unwrap_or(500.0);
+            let asrc_in_rate = if self.topology.decimation_stages > 0 {
+                self.topology.intermediate_rate
+            } else {
+                self.topology.input_rate
+            };
             for _ in 0..num_channels {
                 asrc_resamplers.push(PolyphaseResampler::new_asrc(
-                    self.topology.input_rate,
+                    asrc_in_rate,
                     self.topology.intermediate_rate,
                 ));
             }
@@ -825,8 +842,14 @@ impl LivePipeline {
         let _ = lifecycle.start();
 
         let cascade_tile_len = TILE_BASEBAND_FRAMES * mult;
+        let dec_divider = self.topology.decimation_divider();
+        let input_tile_frames = TILE_BASEBAND_FRAMES * dec_divider;
+
         let mut in_channels: Vec<Vec<f64>> = (0..num_channels)
-            .map(|_| vec![0.0; TILE_BASEBAND_FRAMES])
+            .map(|_| vec![0.0; input_tile_frames])
+            .collect();
+        let mut baseband_channels: Vec<Vec<f64>> = (0..num_channels)
+            .map(|_| vec![0.0; TILE_BASEBAND_FRAMES * 2])
             .collect();
         let mut src_out_channels: Vec<Vec<f64>> = (0..num_channels)
             .map(|_| vec![0.0; TILE_BASEBAND_FRAMES * 2])
@@ -1062,10 +1085,9 @@ impl LivePipeline {
             if frames_read == 0 && pending_rate_switch.is_none() {
                 consecutive_empty_polls = consecutive_empty_polls.saturating_add(1);
                 empty_polls_total = empty_polls_total.saturating_add(1);
-                // During active streaming, allow a brief grace window (~15 ms, well within the
-                // ALSA hardware buffer cushion) for the next PipeWire quantum to arrive before
-                // synthesizing and writing idle silence tiles into the middle of the stream.
-                if total_input_frames > 0 && !is_idle && consecutive_empty_polls <= 30 {
+                // During active streaming, allow a generous grace window (~100 ms) for the next
+                // PipeWire quantum to arrive before synthesizing and writing idle silence tiles.
+                if total_input_frames > 0 && !is_idle && consecutive_empty_polls <= 200 {
                     sync_telemetry!(false);
                     std::thread::sleep(Duration::from_micros(500));
                     continue;
@@ -1118,15 +1140,34 @@ impl LivePipeline {
             consecutive_empty_tiles = 0;
             total_input_frames += frames_read as u64;
 
+            let (baseband_frames, use_baseband_direct) = if let Some(ref mut dec) = decimator {
+                let dec_in: Vec<&[f64]> = in_channels.iter().map(|ch| &ch[..frames_read]).collect();
+                let mut dec_out: Vec<&mut [f64]> =
+                    baseband_channels.iter_mut().map(|ch| &mut ch[..]).collect();
+                let produced = dec.process(&dec_in, &mut dec_out)?;
+                if produced == 0 {
+                    continue;
+                }
+                (produced, true)
+            } else {
+                (frames_read, false)
+            };
+
             // Apply pre-SRC gain and lifecycle cosine ramping
-            let mut active_slices: ChannelMutSlices<'_> = in_channels
+            let active_buf = if use_baseband_direct {
+                &mut baseband_channels
+            } else {
+                &mut in_channels
+            };
+
+            let mut active_slices: ChannelMutSlices<'_> = active_buf
                 .iter_mut()
-                .map(|v| &mut v[..frames_read])
+                .map(|v| &mut v[..baseband_frames])
                 .collect();
             let action = lifecycle.process_input_channels(&mut active_slices);
             drop(active_slices);
-            for ch in in_channels.iter_mut() {
-                for sample in ch.iter_mut().take(frames_read) {
+            for ch in active_buf.iter_mut() {
+                for sample in ch.iter_mut().take(baseband_frames) {
                     *sample *= linear_gain;
                 }
             }
@@ -1147,7 +1188,7 @@ impl LivePipeline {
             // Polyphase SRC / ASRC
             let proc_len = if !asrc_resamplers.is_empty() {
                 // Update drift controller BEFORE running resamplers
-                let dt = frames_read as f64 / self.topology.input_rate.get() as f64;
+                let dt = baseband_frames as f64 / self.topology.intermediate_rate.get() as f64;
                 if let Some(ref mut drift_ctrl) = asrc_drift_ctrl {
                     // Only control the ASRC when the input can report a real
                     // buffered duration. A slot-count fallback would assume a
@@ -1184,16 +1225,21 @@ impl LivePipeline {
                     }
                 }
 
+                let in_source = if use_baseband_direct {
+                    &baseband_channels
+                } else {
+                    &in_channels
+                };
                 let mut min_prod = usize::MAX;
                 for c in 0..num_channels {
-                    let in_slice = &in_channels[c][..frames_read];
+                    let in_slice = &in_source[c][..baseband_frames];
                     let (_, prod) = asrc_resamplers[c].process(in_slice, &mut src_out_channels[c]);
                     min_prod = min_prod.min(prod);
                 }
 
                 min_prod
             } else {
-                frames_read
+                baseband_frames
             };
 
             // Update the buffer-fill context used by late-tile capture. This is a
@@ -1208,6 +1254,11 @@ impl LivePipeline {
 
                 let tile_slices: ChannelSlices<'_> = if !asrc_resamplers.is_empty() {
                     src_out_channels
+                        .iter()
+                        .map(|ch| &ch[offset..offset + tile])
+                        .collect()
+                } else if use_baseband_direct {
+                    baseband_channels
                         .iter()
                         .map(|ch| &ch[offset..offset + tile])
                         .collect()

@@ -224,12 +224,16 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
                         });
                     }
                 };
+                // Calculate queue depth based on output.buffer_ms and sample rate (assuming ~64 frames/tile).
+                // Clamp between 64 and 256 tiles (~20ms to 85ms at 192kHz) to keep latency tight.
+                let tiles_per_sec = (pw_rate as f64 / 64.0).ceil() as usize;
+                let queue_depth = ((tiles_per_sec * out_buf_ms as usize) / 1000).clamp(64, 256);
                 let pw_out = PipeWirePcmOutput::new(
                     "audigma_pcm_out",
                     target_node,
                     pw_rate,
                     channels as u32,
-                    32,
+                    queue_depth,
                 )
                 .map_err(|e| EngineError::AudioBackend {
                     backend: "pipewire",
@@ -649,13 +653,13 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
                 );
                 current_input_rate = new_rate;
 
-                if need_reopen_output && out_cfg.backend == OutputBackend::Alsa {
+                if need_reopen_output {
                     tracing::info!(
-                        target: "audigma::alsa",
+                        target: "audigma::output",
                         event = audigma_log::OUTPUT_REOPENED,
                         device = %target_device,
                         reason = "rate_switch",
-                        "re-locking ALSA device for new target rate"
+                        "re-opening output stream for new target rate"
                     );
                     current_output = None;
                 }

@@ -7,6 +7,7 @@
 //! Pass 1 evaluates only the LTI interpolation cascade to measure the true inter-sample peak
 //! `P` in dBFS, solving `gain_db = min(configured_gain_db, L - M - P)` per Design.md §4.4.
 
+use crate::decimator::ChannelDecimatorPool;
 use crate::traits::{AudioInput, EngineError};
 use crate::worker::ChannelWorkerPool;
 use audigma_dsp::config::DspConfiguration;
@@ -31,6 +32,7 @@ pub struct Pass1PeakResult {
 pub fn measure_true_peak_pass1(
     input: &mut dyn AudioInput,
     mut rational_src: Option<(PolyphaseResampler, PolyphaseResampler)>,
+    mut decimator: Option<ChannelDecimatorPool>,
     worker_pool: &mut ChannelWorkerPool,
     dsp_config: &DspConfiguration,
     tile_size: usize,
@@ -40,9 +42,14 @@ pub fn measure_true_peak_pass1(
     }
 
     let mult = worker_pool.rate_multiplier();
+    let dec_divider = decimator.as_ref().map(|d| d.divider()).unwrap_or(1);
+    let in_tile_size = tile_size * dec_divider;
 
-    let mut in_left = vec![0.0; tile_size];
-    let mut in_right = vec![0.0; tile_size];
+    let mut in_left = vec![0.0; in_tile_size];
+    let mut in_right = vec![0.0; in_tile_size];
+
+    let mut dec_left = vec![0.0; tile_size * 2];
+    let mut dec_right = vec![0.0; tile_size * 2];
 
     let mut src_out_left = vec![0.0; tile_size * 2];
     let mut src_out_right = vec![0.0; tile_size * 2];
@@ -57,8 +64,18 @@ pub fn measure_true_peak_pass1(
         }
         total_frames += frames_read as u64;
 
-        let left_slice = &in_left[..frames_read];
-        let right_slice = &in_right[..frames_read];
+        let (left_slice, right_slice) = if let Some(ref mut dec) = decimator {
+            let produced = dec.process(
+                &[&in_left[..frames_read], &in_right[..frames_read]],
+                &mut [&mut dec_left, &mut dec_right],
+            )?;
+            if produced == 0 {
+                continue;
+            }
+            (&dec_left[..produced], &dec_right[..produced])
+        } else {
+            (&in_left[..frames_read], &in_right[..frames_read])
+        };
 
         match rational_src {
             Some((ref mut src_l, ref mut src_r)) => {

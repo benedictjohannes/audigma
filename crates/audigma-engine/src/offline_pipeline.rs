@@ -9,6 +9,7 @@
 //! - Tail management (`trim-to-duration` vs `preserve-tail`)
 //! - Container and transport packing (DSF, WAV, FLAC, Native DSD, DoP, Raw)
 
+use crate::decimator::ChannelDecimatorPool;
 use crate::peak::measure_true_peak_pass1;
 use crate::processor::TileProcessor;
 use crate::tail::TailManager;
@@ -470,6 +471,7 @@ pub struct OfflinePipeline {
     settings: Settings,
     topology: PipelineTopology,
     rational_src: Option<(PolyphaseResampler, PolyphaseResampler)>,
+    decimator: Option<ChannelDecimatorPool>,
     processor: TileProcessor,
     tile_size: usize,
     mult: usize,
@@ -484,6 +486,19 @@ impl OfflinePipeline {
         let topology = PipelineTopology::resolve(input_rate, plan.stream_spec.target)?;
         let intermediate_rate = topology.intermediate_rate;
 
+        // Determine if same-family FIR decimation is required
+        const TILE_BASEBAND_FRAMES: usize = 512;
+        let decimator = if topology.decimation_stages > 0 {
+            Some(ChannelDecimatorPool::new(
+                preset,
+                topology.decimation_stages,
+                2,
+                TILE_BASEBAND_FRAMES * topology.decimation_divider() * 4,
+            ))
+        } else {
+            None
+        };
+
         // Determine if cross-family rational SRC is required
         let rational_src = if topology.requires_rational_src {
             let src_l = PolyphaseResampler::new_rational(input_rate, intermediate_rate)?;
@@ -493,7 +508,6 @@ impl OfflinePipeline {
             None
         };
 
-        const TILE_BASEBAND_FRAMES: usize = 512;
         let seed = settings
             .offline
             .as_ref()
@@ -519,6 +533,7 @@ impl OfflinePipeline {
             settings,
             topology,
             rational_src,
+            decimator,
             processor,
             tile_size: TILE_BASEBAND_FRAMES,
             mult,
@@ -600,6 +615,7 @@ impl OfflinePipeline {
                 let peak_result = measure_true_peak_pass1(
                     input,
                     self.rational_src.clone(),
+                    self.decimator.clone(),
                     &mut self.processor,
                     &self.plan.dsp_config,
                     self.tile_size,
@@ -643,8 +659,14 @@ impl OfflinePipeline {
 
         // Pre-allocate bounded buffers
         let tile_size = self.tile_size;
-        let mut in_left = vec![0.0; tile_size];
-        let mut in_right = vec![0.0; tile_size];
+        let dec_divider = self.topology.decimation_divider();
+        let in_tile_size = tile_size * dec_divider;
+
+        let mut in_left = vec![0.0; in_tile_size];
+        let mut in_right = vec![0.0; in_tile_size];
+
+        let mut dec_left = vec![0.0; tile_size * 2];
+        let mut dec_right = vec![0.0; tile_size * 2];
 
         let mut src_out_left = vec![0.0; tile_size * 2];
         let mut src_out_right = vec![0.0; tile_size * 2];
@@ -655,18 +677,62 @@ impl OfflinePipeline {
         loop {
             let frames_read = input.read_stereo(&mut in_left, &mut in_right)?;
             if frames_read == 0 {
+                if let Some(ref mut dec) = self.decimator {
+                    let flushed = dec.flush(&mut [&mut dec_left, &mut dec_right])?;
+                    if flushed > 0 {
+                        for i in 0..flushed {
+                            dec_left[i] *= linear_gain;
+                            dec_right[i] *= linear_gain;
+                        }
+                        if is_dsd {
+                            self.processor
+                                .process_tile_dsd(&[&dec_left[..flushed], &dec_right[..flushed]])?;
+                        } else {
+                            self.processor
+                                .process_tile_pcm(&[&dec_left[..flushed], &dec_right[..flushed]])?;
+                        }
+                        self.process_interpolated_block(
+                            flushed,
+                            &mut tail_manager,
+                            &mut container_writer,
+                            &target_spec,
+                        )?;
+                    }
+                }
                 break;
             }
             total_input_frames += frames_read as u64;
 
+            let (baseband_left, baseband_right, baseband_frames) =
+                if let Some(ref mut dec) = self.decimator {
+                    let produced = dec.process(
+                        &[&in_left[..frames_read], &in_right[..frames_read]],
+                        &mut [&mut dec_left, &mut dec_right],
+                    )?;
+                    if produced == 0 {
+                        continue;
+                    }
+                    (
+                        &mut dec_left[..produced],
+                        &mut dec_right[..produced],
+                        produced,
+                    )
+                } else {
+                    (
+                        &mut in_left[..frames_read],
+                        &mut in_right[..frames_read],
+                        frames_read,
+                    )
+                };
+
             // Apply pre-modulator gain
-            for i in 0..frames_read {
-                in_left[i] *= linear_gain;
-                in_right[i] *= linear_gain;
+            for i in 0..baseband_frames {
+                baseband_left[i] *= linear_gain;
+                baseband_right[i] *= linear_gain;
             }
 
-            let left_slice = &in_left[..frames_read];
-            let right_slice = &in_right[..frames_read];
+            let left_slice = &*baseband_left;
+            let right_slice = &*baseband_right;
 
             match self.rational_src {
                 Some((ref mut src_l, ref mut src_r)) => {
@@ -706,7 +772,7 @@ impl OfflinePipeline {
                     }
 
                     self.process_interpolated_block(
-                        frames_read,
+                        baseband_frames,
                         &mut tail_manager,
                         &mut container_writer,
                         &target_spec,
