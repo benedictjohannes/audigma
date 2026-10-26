@@ -1,5 +1,5 @@
 //! Parity test suite ensuring `OfflinePipeline` and `LivePipeline` share identical rate planning,
-//! stage resolution, gain staging, carrier format derivation, and passthrough eligibility (`Immediate.md §3`).
+//! stage resolution, gain staging, carrier format derivation, and passthrough eligibility.
 
 use audigma_dsp::config::{Apodization, FilterPhase, OverloadPolicy, TargetRateSpec};
 use audigma_dsp::rates::{DsdBitRateHz, PcmRateHz};

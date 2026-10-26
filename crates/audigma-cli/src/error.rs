@@ -1,4 +1,4 @@
-//! CLI error domain types and conversions (`Design.md §7`, `UseTypedErrors.md §Phase A`).
+//! CLI error domain types and conversions (`Design.md §7`).
 
 use std::path::PathBuf;
 use thiserror::Error;
