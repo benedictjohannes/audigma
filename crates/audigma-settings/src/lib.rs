@@ -1300,12 +1300,58 @@ max_correction_ppm = 500
             .unwrap();
         assert_eq!(plan.preset_def, &presets::PRESET_BALANCED);
         assert_eq!(plan.dsp_config.phase, FilterPhase::Minimum);
+        assert_eq!(plan.dsp_config.modulator_order, 5);
         assert_eq!(
             plan.stream_spec.target,
             TargetRateSpec::Dsd {
                 bit_rate: DsdBitRateHz::DSD256,
             }
         );
+    }
+
+    #[test]
+    fn test_modulator_order_7_toml_propagation() {
+        let toml = r#"
+schema_version = 1
+
+[input]
+backend = "pipewire"
+
+[output]
+backend = "alsa"
+device = "hw:0,0"
+
+[target]
+format = "dsd"
+dsd_rate = "dsd256"
+
+[resampler]
+preset = "reference"
+modulator_order = 7
+"#;
+        let settings = Settings::from_toml_str(toml).unwrap();
+        assert_eq!(settings.resampler.as_ref().unwrap().modulator_order, 7);
+        let plan = settings
+            .explain_for_input_rate(PcmRateHz::PCM_44100)
+            .unwrap();
+        assert_eq!(plan.dsp_config.modulator_order, 7);
+    }
+
+    #[test]
+    fn test_modulator_order_invalid_rejection() {
+        let toml = r#"
+schema_version = 1
+
+[target]
+format = "dsd"
+dsd_rate = "dsd256"
+
+[resampler]
+preset = "balanced"
+modulator_order = 6
+"#;
+        let err = Settings::from_toml_str(toml).unwrap_err();
+        assert!(err.to_string().contains("modulator_order must be 5 or 7"));
     }
 
     #[test]

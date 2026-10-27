@@ -3,8 +3,9 @@
 use std::f64::consts::PI;
 
 use audigma_dsp::{
-    Apodization, CrfbModulator, DitherType, DsdBitRateHz, FilterPhase, FilterPreset,
-    HalfBandCascade, OverloadPolicy, ScopedFtzDaz, get_crfb_coefficients,
+    Apodization, CrfbModulator, CrfbModulator7, DitherType, DsdBitRateHz, FilterPhase,
+    FilterPreset, HalfBandCascade, Modulator, OverloadPolicy, ScopedFtzDaz, get_crfb_coefficients,
+    get_crfb7_coefficients,
 };
 
 #[test]
@@ -176,6 +177,108 @@ fn test_cascade_and_modulator_end_to_end_presets() {
             for &s in &modulator.state() {
                 assert!(s.abs() < CrfbModulator::STABILITY_THRESHOLD);
             }
+        }
+    }
+}
+
+#[test]
+fn test_all_rates_silence_stability_order7() {
+    let _ftz = ScopedFtzDaz::new();
+    let rates = [
+        DsdBitRateHz::DSD64,
+        DsdBitRateHz::DSD128,
+        DsdBitRateHz::DSD256,
+        DsdBitRateHz::DSD64_48,
+        DsdBitRateHz::DSD128_48,
+        DsdBitRateHz::DSD256_48,
+    ];
+
+    for rate in rates {
+        let coeffs = *get_crfb7_coefficients(rate)
+            .unwrap_or_else(|| panic!("Missing 7th-order coefficients for rate {:?}", rate));
+        let mut modulator =
+            CrfbModulator7::new(coeffs, DitherType::Tpdf, OverloadPolicy::MuteRecover);
+
+        const SAMPLES: usize = 65_536;
+        let silence = [0.0f64; 4096];
+        let mut bytes = [0u8; 512];
+        let mut total_ones = 0;
+
+        for _ in 0..(SAMPLES / 4096) {
+            modulator.process_tile_bytes(&silence, &mut bytes).unwrap();
+            total_ones += bytes.iter().map(|b| b.count_ones() as usize).sum::<usize>();
+        }
+
+        assert_eq!(
+            modulator.overload_count(),
+            0,
+            "Rate {:?} overloaded on silence (order 7)",
+            rate
+        );
+        for &s in &modulator.state() {
+            assert!(
+                s.abs() < CrfbModulator7::STABILITY_THRESHOLD,
+                "Rate {:?} state exploded: {:?}",
+                rate,
+                modulator.state()
+            );
+        }
+
+        let ratio = total_ones as f64 / SAMPLES as f64;
+        assert!(
+            (ratio - 0.5).abs() < 0.05,
+            "Rate {:?} ones ratio {} deviated from 0.5 on silence (order 7)",
+            rate,
+            ratio
+        );
+    }
+}
+
+#[test]
+fn test_cascade_and_modulator7_end_to_end_presets() {
+    let _ftz = ScopedFtzDaz::new();
+    let presets = [
+        FilterPreset::Balanced,
+        FilterPreset::Reference,
+        FilterPreset::LowLatency,
+    ];
+
+    for preset in presets {
+        // Test 128x to DSD128 with 7th-order modulator
+        let mut cascade =
+            HalfBandCascade::new(preset, FilterPhase::Linear, Apodization::Off, 7, 64);
+        let mut modulator = Modulator::new(
+            7,
+            DsdBitRateHz::DSD128,
+            DitherType::Tpdf,
+            OverloadPolicy::MuteRecover,
+        )
+        .unwrap();
+
+        let mut bb_input = [0.0f64; 64];
+        let amp = 10.0_f64.powf(-6.0 / 20.0);
+        for (i, s) in bb_input.iter_mut().enumerate() {
+            let t = i as f64 / 44_100.0;
+            *s = amp * (2.0 * PI * 1000.0 * t).sin();
+        }
+
+        let mut exp_scratch = vec![0.0f64; 64 * 128];
+        let mut tile_bytes = vec![0u8; (64 * 128) / 8];
+
+        for _ in 0..20 {
+            cascade.process_tile(&bb_input, &mut exp_scratch).unwrap();
+            modulator
+                .process_tile_bytes(&exp_scratch, &mut tile_bytes)
+                .unwrap();
+        }
+
+        assert_eq!(
+            modulator.overload_count(),
+            0,
+            "7th-order preset {preset:?} overloaded"
+        );
+        for &s in modulator.state_slice() {
+            assert!(s.abs() < CrfbModulator7::STABILITY_THRESHOLD);
         }
     }
 }

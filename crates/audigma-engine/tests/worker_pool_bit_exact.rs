@@ -3,26 +3,35 @@
 
 use audigma_dsp::config::{Apodization, DitherType, FilterPhase, FilterPreset, OverloadPolicy};
 use audigma_dsp::fir::HalfBandCascade;
-use audigma_dsp::modulator::CrfbModulator;
+use audigma_dsp::modulator::Modulator;
 use audigma_dsp::presets::{PRESET_BALANCED, PRESET_REFERENCE};
 use audigma_dsp::rates::DsdBitRateHz;
-use audigma_dsp::tables;
 use audigma_engine::worker::{ChannelWorkerPool, TargetDsdConfig};
 use std::f64::consts::PI;
 
 #[test]
 fn test_worker_pool_stereo_dsd64_bit_exact() {
-    verify_stereo_dsd_bit_exact(DsdBitRateHz::DSD64, 6, PRESET_BALANCED.preset, 100);
+    verify_stereo_dsd_bit_exact(DsdBitRateHz::DSD64, 6, PRESET_BALANCED.preset, 100, 5);
 }
 
 #[test]
 fn test_worker_pool_stereo_dsd128_bit_exact() {
-    verify_stereo_dsd_bit_exact(DsdBitRateHz::DSD128, 7, PRESET_BALANCED.preset, 50);
+    verify_stereo_dsd_bit_exact(DsdBitRateHz::DSD128, 7, PRESET_BALANCED.preset, 50, 5);
 }
 
 #[test]
 fn test_worker_pool_stereo_dsd256_reference_bit_exact() {
-    verify_stereo_dsd_bit_exact(DsdBitRateHz::DSD256, 8, PRESET_REFERENCE.preset, 20);
+    verify_stereo_dsd_bit_exact(DsdBitRateHz::DSD256, 8, PRESET_REFERENCE.preset, 20, 5);
+}
+
+#[test]
+fn test_worker_pool_stereo_dsd128_order7_bit_exact() {
+    verify_stereo_dsd_bit_exact(DsdBitRateHz::DSD128, 7, PRESET_BALANCED.preset, 50, 7);
+}
+
+#[test]
+fn test_worker_pool_stereo_dsd256_order7_bit_exact() {
+    verify_stereo_dsd_bit_exact(DsdBitRateHz::DSD256, 8, PRESET_REFERENCE.preset, 20, 7);
 }
 
 #[test]
@@ -133,6 +142,7 @@ fn verify_stereo_dsd_bit_exact(
     stages: usize,
     preset: FilterPreset,
     num_blocks: usize,
+    order: u8,
 ) {
     const CHANNELS: usize = 2;
     const FRAMES: usize = 256;
@@ -140,6 +150,7 @@ fn verify_stereo_dsd_bit_exact(
 
     let dsd_cfg = TargetDsdConfig {
         bit_rate,
+        modulator_order: order,
         dither: DitherType::Tpdf,
         overload_policy: OverloadPolicy::MuteRecover,
         seed_base: SEED_BASE,
@@ -171,10 +182,11 @@ fn verify_stereo_dsd_bit_exact(
         stages,
         FRAMES,
     );
-    let coeffs = tables::get_crfb_coefficients(bit_rate).unwrap();
-    let mut seq_mod_l = CrfbModulator::new(*coeffs, dsd_cfg.dither, dsd_cfg.overload_policy);
+    let mut seq_mod_l =
+        Modulator::new(order, bit_rate, dsd_cfg.dither, dsd_cfg.overload_policy).unwrap();
     seq_mod_l.set_dither_seed(SEED_BASE);
-    let mut seq_mod_r = CrfbModulator::new(*coeffs, dsd_cfg.dither, dsd_cfg.overload_policy);
+    let mut seq_mod_r =
+        Modulator::new(order, bit_rate, dsd_cfg.dither, dsd_cfg.overload_policy).unwrap();
     seq_mod_r.set_dither_seed(SEED_BASE.wrapping_add(1));
 
     let mult = pool.rate_multiplier();

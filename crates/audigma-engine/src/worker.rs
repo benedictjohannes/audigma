@@ -12,9 +12,8 @@ use crate::traits::EngineError;
 use audigma_dsp::config::{Apodization, DitherType, FilterPhase, FilterPreset, OverloadPolicy};
 use audigma_dsp::fir::HalfBandCascade;
 use audigma_dsp::ftz::ScopedFtzDaz;
-use audigma_dsp::modulator::CrfbModulator;
+use audigma_dsp::modulator::Modulator;
 use audigma_dsp::rates::DsdBitRateHz;
-use audigma_dsp::tables;
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -30,6 +29,7 @@ const CMD_STOP: u32 = 4;
 #[derive(Debug, Clone)]
 pub struct TargetDsdConfig {
     pub bit_rate: DsdBitRateHz,
+    pub modulator_order: u8,
     pub dither: DitherType,
     pub overload_policy: OverloadPolicy,
     pub seed_base: u64,
@@ -177,13 +177,12 @@ impl ChannelWorkerPool {
             let mut cascade =
                 HalfBandCascade::new(preset, phase, apodization, stages, tile_baseband_frames);
             let mut modulator = if let Some(ref dsd_cfg) = target_dsd {
-                let coeffs = tables::get_crfb_coefficients(dsd_cfg.bit_rate).ok_or_else(|| {
-                    EngineError::Pipeline(format!(
-                        "no verified CRFB coefficients found for DSD bit rate {}",
-                        dsd_cfg.bit_rate
-                    ))
-                })?;
-                let mut m = CrfbModulator::new(*coeffs, dsd_cfg.dither, dsd_cfg.overload_policy);
+                let mut m = Modulator::new(
+                    dsd_cfg.modulator_order,
+                    dsd_cfg.bit_rate,
+                    dsd_cfg.dither,
+                    dsd_cfg.overload_policy,
+                )?;
                 m.set_dither_seed(dsd_cfg.seed_base.wrapping_add(ch as u64));
                 Some(m)
             } else {
@@ -501,6 +500,7 @@ mod tests {
 
         let dsd_cfg = TargetDsdConfig {
             bit_rate: BIT_RATE,
+            modulator_order: 5,
             dither: DitherType::Tpdf,
             overload_policy: OverloadPolicy::MuteRecover,
             seed_base: 12345,
@@ -533,10 +533,21 @@ mod tests {
             STAGES,
             FRAMES,
         );
-        let coeffs = tables::get_crfb_coefficients(BIT_RATE).unwrap();
-        let mut seq_mod_l = CrfbModulator::new(*coeffs, dsd_cfg.dither, dsd_cfg.overload_policy);
+        let mut seq_mod_l = Modulator::new(
+            dsd_cfg.modulator_order,
+            BIT_RATE,
+            dsd_cfg.dither,
+            dsd_cfg.overload_policy,
+        )
+        .unwrap();
         seq_mod_l.set_dither_seed(12345);
-        let mut seq_mod_r = CrfbModulator::new(*coeffs, dsd_cfg.dither, dsd_cfg.overload_policy);
+        let mut seq_mod_r = Modulator::new(
+            dsd_cfg.modulator_order,
+            BIT_RATE,
+            dsd_cfg.dither,
+            dsd_cfg.overload_policy,
+        )
+        .unwrap();
         seq_mod_r.set_dither_seed(12346);
 
         // Generate synthetic stereo signal
@@ -577,6 +588,98 @@ mod tests {
             assert_eq!(seq_pcm_r.as_slice(), pool_pcm_r);
 
             // Verify DSD bit-exact equivalence
+            assert_eq!(seq_dsd_l.as_slice(), pool_dsd_l);
+            assert_eq!(seq_dsd_r.as_slice(), pool_dsd_r);
+        }
+    }
+
+    #[test]
+    fn test_worker_pool_dsd7_bit_exact() {
+        const CHANNELS: usize = 2;
+        const STAGES: usize = 7; // 128x upsampling -> DSD128
+        const FRAMES: usize = 256;
+        const BIT_RATE: DsdBitRateHz = DsdBitRateHz::DSD128;
+
+        let dsd_cfg = TargetDsdConfig {
+            bit_rate: BIT_RATE,
+            modulator_order: 7,
+            dither: DitherType::Tpdf,
+            overload_policy: OverloadPolicy::MuteRecover,
+            seed_base: 98765,
+        };
+
+        let mut pool = ChannelWorkerPool::new(
+            CHANNELS,
+            PRESET_BALANCED.preset,
+            FilterPhase::Linear,
+            Apodization::Off,
+            STAGES,
+            FRAMES,
+            Some(dsd_cfg.clone()),
+            None,
+        )
+        .expect("worker pool creation failed");
+
+        let mut seq_cascade_l = HalfBandCascade::new(
+            PRESET_BALANCED.preset,
+            FilterPhase::Linear,
+            Apodization::Off,
+            STAGES,
+            FRAMES,
+        );
+        let mut seq_cascade_r = HalfBandCascade::new(
+            PRESET_BALANCED.preset,
+            FilterPhase::Linear,
+            Apodization::Off,
+            STAGES,
+            FRAMES,
+        );
+        let mut seq_mod_l = Modulator::new(
+            dsd_cfg.modulator_order,
+            BIT_RATE,
+            dsd_cfg.dither,
+            dsd_cfg.overload_policy,
+        )
+        .unwrap();
+        seq_mod_l.set_dither_seed(98765);
+        let mut seq_mod_r = Modulator::new(
+            dsd_cfg.modulator_order,
+            BIT_RATE,
+            dsd_cfg.dither,
+            dsd_cfg.overload_policy,
+        )
+        .unwrap();
+        seq_mod_r.set_dither_seed(98766);
+
+        let mut left = vec![0.0f64; FRAMES];
+        let mut right = vec![0.0f64; FRAMES];
+        for i in 0..FRAMES {
+            left[i] = 0.5 * (2.0 * PI * 1000.0 * (i as f64 / 44100.0)).sin();
+            right[i] = 0.4 * (2.0 * PI * 2000.0 * (i as f64 / 44100.0)).sin();
+        }
+
+        let mult = pool.rate_multiplier();
+        let req_out = FRAMES * mult;
+        let mut seq_pcm_l = vec![0.0f64; req_out];
+        let mut seq_pcm_r = vec![0.0f64; req_out];
+        let mut seq_dsd_l = vec![0u8; req_out / 8];
+        let mut seq_dsd_r = vec![0u8; req_out / 8];
+
+        for _ in 0..10 {
+            seq_cascade_l.process_tile(&left, &mut seq_pcm_l).unwrap();
+            seq_cascade_r.process_tile(&right, &mut seq_pcm_r).unwrap();
+            seq_mod_l
+                .process_tile_bytes(&seq_pcm_l, &mut seq_dsd_l)
+                .unwrap();
+            seq_mod_r
+                .process_tile_bytes(&seq_pcm_r, &mut seq_dsd_r)
+                .unwrap();
+
+            pool.process_tile_dsd(&[&left, &right]).unwrap();
+
+            let pool_dsd_l = pool.channel_dsd(0);
+            let pool_dsd_r = pool.channel_dsd(1);
+
             assert_eq!(seq_dsd_l.as_slice(), pool_dsd_l);
             assert_eq!(seq_dsd_r.as_slice(), pool_dsd_r);
         }

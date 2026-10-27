@@ -9,14 +9,15 @@ use std::io::Write;
 use std::time::Instant;
 
 use audigma_dsp::{
-    Apodization, CrfbModulator, DitherType, DsdBitRateHz, FilterPhase, FilterPreset,
-    HalfBandCascade, OverloadPolicy, ScopedFtzDaz, get_crfb_coefficients,
+    Apodization, DitherType, DsdBitRateHz, FilterPhase, FilterPreset, HalfBandCascade, Modulator,
+    OverloadPolicy, STABILITY_THRESHOLD, ScopedFtzDaz,
 };
 
 #[derive(Debug, Clone)]
 struct HarnessConfig {
     mode: String,
     rate: String,
+    order: u8,
     preset: FilterPreset,
     samples: usize,
     amp_db: f64,
@@ -31,6 +32,7 @@ fn parse_args() -> HarnessConfig {
     let mut config = HarnessConfig {
         mode: "direct-sine".to_string(),
         rate: "dsd64".to_string(),
+        order: 5,
         preset: FilterPreset::Balanced,
         samples: 1_048_576,
         amp_db: -6.0,
@@ -50,6 +52,10 @@ fn parse_args() -> HarnessConfig {
             "--rate" => {
                 i += 1;
                 config.rate = args[i].clone();
+            }
+            "--order" => {
+                i += 1;
+                config.order = args[i].parse().expect("Invalid order");
             }
             "--preset" => {
                 i += 1;
@@ -112,14 +118,35 @@ fn parse_rate(rate_str: &str) -> (DsdBitRateHz, u32, usize, u32) {
     }
 }
 
+fn format_state_json(state: &[f64]) -> String {
+    let elems: Vec<String> = state.iter().map(|s| format!("{s:.6}")).collect();
+    format!("[{}]", elems.join(", "))
+}
+
 fn main() {
     let _ftz = ScopedFtzDaz::new();
+
+    let raw_args: Vec<String> = std::env::args().collect();
+    if raw_args.iter().any(|a| a == "--probe-env") {
+        println!(
+            r#"{{"ftz_daz_active": {}, "target_arch": "{}", "target_os": "{}"}}"#,
+            ScopedFtzDaz::is_active(),
+            std::env::consts::ARCH,
+            std::env::consts::OS
+        );
+        return;
+    }
+
     let config = parse_args();
     let (bit_rate, f_bit_hz, cascade_stages, baseband_fs) = parse_rate(&config.rate);
-    let coeffs = *get_crfb_coefficients(bit_rate)
-        .unwrap_or_else(|| panic!("Coefficients not found for {}", config.rate));
 
-    let mut modulator = CrfbModulator::new(coeffs, config.dither, config.overload_policy);
+    let mut modulator = Modulator::new(
+        config.order,
+        bit_rate,
+        config.dither,
+        config.overload_policy,
+    )
+    .unwrap_or_else(|e| panic!("Failed to initialize modulator: {e}"));
     modulator.set_dither_seed(12345);
 
     match config.mode.as_str() {
@@ -160,7 +187,7 @@ fn main() {
     }
 }
 
-fn run_direct_sine(config: &HarnessConfig, modulator: &mut CrfbModulator, f_bit_hz: u32) {
+fn run_direct_sine(config: &HarnessConfig, modulator: &mut Modulator, f_bit_hz: u32) {
     let n = config.samples;
     let k_bin = ((1000.0 * n as f64) / (f_bit_hz as f64)).round() as u64;
     let f_tone_hz = (k_bin as f64) * (f_bit_hz as f64) / (n as f64);
@@ -181,7 +208,7 @@ fn run_direct_sine(config: &HarnessConfig, modulator: &mut CrfbModulator, f_bit_
 
     let start = Instant::now();
     let num_tiles = n / TILE_BITS;
-    let mut max_state = [0.0f64; 5];
+    let mut max_state = vec![0.0f64; modulator.state_slice().len()];
 
     for t_idx in 0..num_tiles {
         let bit_offset = t_idx * TILE_BITS;
@@ -197,10 +224,8 @@ fn run_direct_sine(config: &HarnessConfig, modulator: &mut CrfbModulator, f_bit_
         raw_bytes[t_idx * (TILE_BITS / 8)..(t_idx + 1) * (TILE_BITS / 8)]
             .copy_from_slice(&tile_bytes);
 
-        for (cur_max, &s) in max_state.iter_mut().zip(&modulator.state()) {
-            if s.abs() > *cur_max {
-                *cur_max = s.abs();
-            }
+        for (cur_max, &s) in max_state.iter_mut().zip(modulator.state_slice()) {
+            *cur_max = cur_max.max(s.abs());
         }
     }
     let elapsed = start.elapsed();
@@ -215,29 +240,25 @@ fn run_direct_sine(config: &HarnessConfig, modulator: &mut CrfbModulator, f_bit_
             r#"{{
   "mode": "{}",
   "rate": "{}",
-  "f_bit_hz": {},
-  "f_tone_hz": {:.6},
-  "k_bin": {},
+  "order": {},
   "samples": {},
+  "k_bin": {},
+  "f_tone_hz": {:.6},
   "amp_db": {:.2},
-  "max_state": [{:.6}, {:.6}, {:.6}, {:.6}, {:.6}],
+  "elapsed_seconds": {:.6},
   "overload_count": {},
-  "elapsed_micros": {}
+  "max_state": {}
 }}"#,
             config.mode,
             config.rate,
-            f_bit_hz,
-            f_tone_hz,
-            k_bin,
+            config.order,
             n,
+            k_bin,
+            f_tone_hz,
             config.amp_db,
-            max_state[0],
-            max_state[1],
-            max_state[2],
-            max_state[3],
-            max_state[4],
+            elapsed.as_secs_f64(),
             modulator.overload_count(),
-            elapsed.as_micros()
+            format_state_json(&max_state)
         );
         let mut f = File::create(path).unwrap();
         f.write_all(json.as_bytes()).unwrap();
@@ -246,20 +267,20 @@ fn run_direct_sine(config: &HarnessConfig, modulator: &mut CrfbModulator, f_bit_
 
 fn run_cascade_sine(
     config: &HarnessConfig,
-    modulator: &mut CrfbModulator,
+    modulator: &mut Modulator,
     f_bit_hz: u32,
     cascade_stages: usize,
     baseband_fs: u32,
 ) {
-    let n = config.samples;
     let multiplier = 1usize << cascade_stages;
-    let n_baseband = n / multiplier;
+    let n = config.samples;
     let k_bin = ((1000.0 * n as f64) / (f_bit_hz as f64)).round() as u64;
     let f_tone_hz = (k_bin as f64) * (f_bit_hz as f64) / (n as f64);
     let amp = 10.0_f64.powf(config.amp_db / 20.0);
 
     const TILE_BASEBAND: usize = 64;
     let tile_expanded = TILE_BASEBAND * multiplier;
+
     let mut cascade = HalfBandCascade::new(
         config.preset,
         FilterPhase::Linear,
@@ -268,51 +289,52 @@ fn run_cascade_sine(
         TILE_BASEBAND,
     );
 
-    // Warm-up cascade and modulator so delay lines are completely full
-    let group_delay_baseband = cascade.total_group_delay_output_samples() / multiplier + 128;
-    let warmup_tiles = (group_delay_baseband / TILE_BASEBAND) + 4;
-    let mut bb_scratch = [0.0f64; TILE_BASEBAND];
-    let mut exp_scratch = vec![0.0f64; tile_expanded];
-    let mut out_tile_bytes = vec![0u8; tile_expanded / 8];
+    // Warm-up cascade & modulator
+    let n_warmup_tiles = 256;
+    let mut bb_warmup = [0.0f64; TILE_BASEBAND];
+    let mut exp_warmup = vec![0.0f64; tile_expanded];
+    let mut dummy_bytes = vec![0u8; tile_expanded / 8];
 
-    for w_idx in (0..warmup_tiles).rev() {
-        let neg_offset = -((w_idx as i64 + 1) * TILE_BASEBAND as i64);
-        for (i, bb) in bb_scratch.iter_mut().enumerate() {
-            let sample_idx = neg_offset + i as i64;
-            let phase = 2.0 * PI * (k_bin as f64) * (sample_idx as f64) / (n_baseband as f64);
-            *bb = amp * phase.sin();
+    for t in 0..n_warmup_tiles {
+        let start_sample = (t as i64 - n_warmup_tiles as i64) * (TILE_BASEBAND as i64);
+        for (i, s) in bb_warmup.iter_mut().enumerate() {
+            let sample_idx = start_sample + (i as i64);
+            let t_sec = (sample_idx as f64) / (baseband_fs as f64);
+            *s = amp * (2.0 * PI * f_tone_hz * t_sec).sin();
         }
-        cascade.process_tile(&bb_scratch, &mut exp_scratch).unwrap();
+        cascade.process_tile(&bb_warmup, &mut exp_warmup).unwrap();
         modulator
-            .process_tile_bytes(&exp_scratch, &mut out_tile_bytes)
+            .process_tile_bytes(&exp_warmup, &mut dummy_bytes)
             .unwrap();
     }
 
     let mut raw_bytes = vec![0u8; n / 8];
-    let num_tiles = n_baseband / TILE_BASEBAND;
-    let mut max_state = [0.0f64; 5];
-    let start = Instant::now();
+    let total_tiles = n / tile_expanded;
+    let mut bb_tile = [0.0f64; TILE_BASEBAND];
+    let mut exp_tile = vec![0.0f64; tile_expanded];
+    let mut tile_bytes = vec![0u8; tile_expanded / 8];
 
-    for t_idx in 0..num_tiles {
-        let base_idx = t_idx * TILE_BASEBAND;
-        for (i, bb) in bb_scratch.iter_mut().enumerate() {
-            let sample_idx = base_idx + i;
-            let phase = 2.0 * PI * (k_bin as f64) * (sample_idx as f64) / (n_baseband as f64);
-            *bb = amp * phase.sin();
+    let start = Instant::now();
+    let mut max_state = vec![0.0f64; modulator.state_slice().len()];
+
+    for t_idx in 0..total_tiles {
+        let sample_offset = t_idx * TILE_BASEBAND;
+        for (i, s) in bb_tile.iter_mut().enumerate() {
+            let sample_idx = sample_offset + i;
+            let t_sec = (sample_idx as f64) / (baseband_fs as f64);
+            *s = amp * (2.0 * PI * f_tone_hz * t_sec).sin();
         }
 
-        cascade.process_tile(&bb_scratch, &mut exp_scratch).unwrap();
+        cascade.process_tile(&bb_tile, &mut exp_tile).unwrap();
         modulator
-            .process_tile_bytes(&exp_scratch, &mut out_tile_bytes)
+            .process_tile_bytes(&exp_tile, &mut tile_bytes)
             .unwrap();
 
         let byte_offset = t_idx * (tile_expanded / 8);
-        raw_bytes[byte_offset..byte_offset + (tile_expanded / 8)].copy_from_slice(&out_tile_bytes);
+        raw_bytes[byte_offset..byte_offset + (tile_expanded / 8)].copy_from_slice(&tile_bytes);
 
-        for (cur_max, &s) in max_state.iter_mut().zip(&modulator.state()) {
-            if s.abs() > *cur_max {
-                *cur_max = s.abs();
-            }
+        for (cur_max, &s) in max_state.iter_mut().zip(modulator.state_slice()) {
+            *cur_max = cur_max.max(s.abs());
         }
     }
     let elapsed = start.elapsed();
@@ -327,71 +349,83 @@ fn run_cascade_sine(
             r#"{{
   "mode": "{}",
   "rate": "{}",
+  "order": {},
   "preset": "{:?}",
-  "f_bit_hz": {},
-  "baseband_fs": {},
   "cascade_stages": {},
-  "f_tone_hz": {:.6},
+  "f_bit_hz": {},
   "k_bin": {},
-  "samples": {},
+  "f_tone_hz": {:.6},
   "amp_db": {:.2},
-  "max_state": [{:.6}, {:.6}, {:.6}, {:.6}, {:.6}],
+  "elapsed_seconds": {:.6},
   "overload_count": {},
-  "elapsed_micros": {}
+  "max_state": {}
 }}"#,
             config.mode,
             config.rate,
+            config.order,
             config.preset,
-            f_bit_hz,
-            baseband_fs,
             cascade_stages,
-            f_tone_hz,
+            f_bit_hz,
             k_bin,
-            n,
+            f_tone_hz,
             config.amp_db,
-            max_state[0],
-            max_state[1],
-            max_state[2],
-            max_state[3],
-            max_state[4],
+            elapsed.as_secs_f64(),
             modulator.overload_count(),
-            elapsed.as_micros()
+            format_state_json(&max_state)
         );
         let mut f = File::create(path).unwrap();
         f.write_all(json.as_bytes()).unwrap();
     }
 }
 
-fn run_silence(config: &HarnessConfig, modulator: &mut CrfbModulator, f_bit_hz: u32) {
+fn run_silence(config: &HarnessConfig, modulator: &mut Modulator, _f_bit_hz: u32) {
     let n = config.samples;
-    let mut raw_bytes = vec![0u8; n / 8];
     const TILE_BITS: usize = 4096;
     let silence_tile = [0.0f64; TILE_BITS];
     let mut tile_bytes = [0u8; TILE_BITS / 8];
-    let mut max_state = [0.0f64; 5];
+    let mut total_ones: u64 = 0;
+    let mut zero_byte_count: u64 = 0;
+    let mut full_byte_count: u64 = 0;
+    let mut raw_bytes = if config.out_bin.is_some() {
+        Some(vec![0u8; n / 8])
+    } else {
+        None
+    };
 
     let start = Instant::now();
-    for t_idx in 0..(n / TILE_BITS) {
+    let num_tiles = n / TILE_BITS;
+    let mut max_state = vec![0.0f64; modulator.state_slice().len()];
+
+    for t_idx in 0..num_tiles {
         modulator
             .process_tile_bytes(&silence_tile, &mut tile_bytes)
             .unwrap();
-        raw_bytes[t_idx * (TILE_BITS / 8)..(t_idx + 1) * (TILE_BITS / 8)]
-            .copy_from_slice(&tile_bytes);
-
-        for (cur_max, &s) in max_state.iter_mut().zip(&modulator.state()) {
-            if s.abs() > *cur_max {
-                *cur_max = s.abs();
+        for &b in &tile_bytes {
+            total_ones += b.count_ones() as u64;
+            if b == 0x00 {
+                zero_byte_count += 1;
+            } else if b == 0xFF {
+                full_byte_count += 1;
             }
+        }
+
+        if let Some(ref mut raw) = raw_bytes {
+            let offset = t_idx * (TILE_BITS / 8);
+            raw[offset..offset + (TILE_BITS / 8)].copy_from_slice(&tile_bytes);
+        }
+
+        for (cur_max, &s) in max_state.iter_mut().zip(modulator.state_slice()) {
+            *cur_max = cur_max.max(s.abs());
         }
     }
     let elapsed = start.elapsed();
-
-    let total_ones: usize = raw_bytes.iter().map(|b| b.count_ones() as usize).sum();
     let ones_ratio = total_ones as f64 / n as f64;
 
     if let Some(ref path) = config.out_bin {
-        let mut f = File::create(path).unwrap();
-        f.write_all(&raw_bytes).unwrap();
+        if let Some(ref raw) = raw_bytes {
+            let mut f = File::create(path).unwrap();
+            f.write_all(raw).unwrap();
+        }
     }
 
     if let Some(ref path) = config.out_json {
@@ -399,57 +433,55 @@ fn run_silence(config: &HarnessConfig, modulator: &mut CrfbModulator, f_bit_hz: 
             r#"{{
   "mode": "{}",
   "rate": "{}",
-  "f_bit_hz": {},
+  "order": {},
   "samples": {},
   "ones_ratio": {:.6},
-  "max_state": [{:.6}, {:.6}, {:.6}, {:.6}, {:.6}],
+  "zero_bytes_count": {},
+  "full_bytes_count": {},
+  "elapsed_seconds": {:.6},
   "overload_count": {},
-  "elapsed_micros": {}
+  "max_state": {}
 }}"#,
             config.mode,
             config.rate,
-            f_bit_hz,
+            config.order,
             n,
             ones_ratio,
-            max_state[0],
-            max_state[1],
-            max_state[2],
-            max_state[3],
-            max_state[4],
+            zero_byte_count,
+            full_byte_count,
+            elapsed.as_secs_f64(),
             modulator.overload_count(),
-            elapsed.as_micros()
+            format_state_json(&max_state)
         );
         let mut f = File::create(path).unwrap();
         f.write_all(json.as_bytes()).unwrap();
     }
 }
 
-fn run_dc(config: &HarnessConfig, modulator: &mut CrfbModulator, f_bit_hz: u32) {
+fn run_dc(config: &HarnessConfig, modulator: &mut Modulator, _f_bit_hz: u32) {
     let n = config.samples;
-    let mut raw_bytes = vec![0u8; n / 8];
     const TILE_BITS: usize = 4096;
-    let dc_val = 0.5f64; // +0.5 normalized DC within envelope
-    let dc_tile = [dc_val; TILE_BITS];
+    let dc_tile = [0.5f64; TILE_BITS];
     let mut tile_bytes = [0u8; TILE_BITS / 8];
-    let mut max_state = [0.0f64; 5];
+    let mut total_ones: u64 = 0;
 
     let start = Instant::now();
-    for t_idx in 0..(n / TILE_BITS) {
+    let num_tiles = n / TILE_BITS;
+    let mut max_state = vec![0.0f64; modulator.state_slice().len()];
+
+    for _ in 0..num_tiles {
         modulator
             .process_tile_bytes(&dc_tile, &mut tile_bytes)
             .unwrap();
-        raw_bytes[t_idx * (TILE_BITS / 8)..(t_idx + 1) * (TILE_BITS / 8)]
-            .copy_from_slice(&tile_bytes);
+        for &b in &tile_bytes {
+            total_ones += b.count_ones() as u64;
+        }
 
-        for (cur_max, &s) in max_state.iter_mut().zip(&modulator.state()) {
-            if s.abs() > *cur_max {
-                *cur_max = s.abs();
-            }
+        for (cur_max, &s) in max_state.iter_mut().zip(modulator.state_slice()) {
+            *cur_max = cur_max.max(s.abs());
         }
     }
     let elapsed = start.elapsed();
-
-    let total_ones: usize = raw_bytes.iter().map(|b| b.count_ones() as usize).sum();
     let ones_ratio = total_ones as f64 / n as f64;
 
     if let Some(ref path) = config.out_json {
@@ -457,27 +489,22 @@ fn run_dc(config: &HarnessConfig, modulator: &mut CrfbModulator, f_bit_hz: u32) 
             r#"{{
   "mode": "{}",
   "rate": "{}",
-  "f_bit_hz": {},
-  "dc_val": {:.4},
+  "order": {},
+  "dc_val": 0.5,
   "samples": {},
   "ones_ratio": {:.6},
-  "max_state": [{:.6}, {:.6}, {:.6}, {:.6}, {:.6}],
+  "elapsed_seconds": {:.6},
   "overload_count": {},
-  "elapsed_micros": {}
+  "max_state": {}
 }}"#,
             config.mode,
             config.rate,
-            f_bit_hz,
-            dc_val,
+            config.order,
             n,
             ones_ratio,
-            max_state[0],
-            max_state[1],
-            max_state[2],
-            max_state[3],
-            max_state[4],
+            elapsed.as_secs_f64(),
             modulator.overload_count(),
-            elapsed.as_micros()
+            format_state_json(&max_state)
         );
         let mut f = File::create(path).unwrap();
         f.write_all(json.as_bytes()).unwrap();
@@ -486,21 +513,17 @@ fn run_dc(config: &HarnessConfig, modulator: &mut CrfbModulator, f_bit_hz: u32) 
 
 fn run_multitone(
     config: &HarnessConfig,
-    modulator: &mut CrfbModulator,
-    f_bit_hz: u32,
+    modulator: &mut Modulator,
+    _f_bit_hz: u32,
     cascade_stages: usize,
     baseband_fs: u32,
 ) {
-    let n = config.samples;
     let multiplier = 1usize << cascade_stages;
-    let n_baseband = n / multiplier;
-
-    // 5 tones: 50, 500, 1000, 5000, 15000 Hz, scaled to sum <= -6 dBFS peak
-    let freqs = [50.0, 500.0, 1000.0, 5000.0, 15000.0];
-    let tone_amp = (10.0_f64.powf(-6.0 / 20.0)) / (freqs.len() as f64);
+    let n = config.samples;
 
     const TILE_BASEBAND: usize = 64;
     let tile_expanded = TILE_BASEBAND * multiplier;
+
     let mut cascade = HalfBandCascade::new(
         config.preset,
         FilterPhase::Linear,
@@ -509,32 +532,40 @@ fn run_multitone(
         TILE_BASEBAND,
     );
 
-    let mut bb_scratch = [0.0f64; TILE_BASEBAND];
-    let mut exp_scratch = vec![0.0f64; tile_expanded];
-    let mut out_tile_bytes = vec![0u8; tile_expanded / 8];
-    let mut max_state = [0.0f64; 5];
+    // Multitone: 31 tones from 50 Hz to 18 kHz with random-crest phase
+    let freqs: [f64; 10] = [
+        100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 7500.0, 10000.0, 14000.0, 18000.0,
+    ];
+    // Peak composite multitone amplitude bounded within config.amp_db (-6.0 dBFS)
+    let amp_per_tone = 10.0_f64.powf(config.amp_db / 20.0) / (freqs.len() as f64);
+
+    let total_tiles = n / tile_expanded;
+    let mut bb_tile = [0.0f64; TILE_BASEBAND];
+    let mut exp_tile = vec![0.0f64; tile_expanded];
+    let mut tile_bytes = vec![0u8; tile_expanded / 8];
 
     let start = Instant::now();
-    for t_idx in 0..(n_baseband / TILE_BASEBAND) {
-        let base_idx = t_idx * TILE_BASEBAND;
-        for (i, bb) in bb_scratch.iter_mut().enumerate() {
-            let t = (base_idx + i) as f64 / baseband_fs as f64;
-            let mut sum = 0.0;
-            for &f in &freqs {
-                sum += tone_amp * (2.0 * PI * f * t).sin();
+    let mut max_state = vec![0.0f64; modulator.state_slice().len()];
+
+    for t_idx in 0..total_tiles {
+        let sample_offset = t_idx * TILE_BASEBAND;
+        for (i, s) in bb_tile.iter_mut().enumerate() {
+            let sample_idx = sample_offset + i;
+            let t_sec = (sample_idx as f64) / (baseband_fs as f64);
+            let mut val = 0.0;
+            for (f_idx, &f) in freqs.iter().enumerate() {
+                val += amp_per_tone * (2.0 * PI * f * t_sec + (f_idx as f64 * 0.785)).sin();
             }
-            *bb = sum;
+            *s = val;
         }
 
-        cascade.process_tile(&bb_scratch, &mut exp_scratch).unwrap();
+        cascade.process_tile(&bb_tile, &mut exp_tile).unwrap();
         modulator
-            .process_tile_bytes(&exp_scratch, &mut out_tile_bytes)
+            .process_tile_bytes(&exp_tile, &mut tile_bytes)
             .unwrap();
 
-        for (cur_max, &s) in max_state.iter_mut().zip(&modulator.state()) {
-            if s.abs() > *cur_max {
-                *cur_max = s.abs();
-            }
+        for (cur_max, &s) in max_state.iter_mut().zip(modulator.state_slice()) {
+            *cur_max = cur_max.max(s.abs());
         }
     }
     let elapsed = start.elapsed();
@@ -544,52 +575,45 @@ fn run_multitone(
             r#"{{
   "mode": "{}",
   "rate": "{}",
-  "f_bit_hz": {},
+  "order": {},
   "samples": {},
-  "max_state": [{:.6}, {:.6}, {:.6}, {:.6}, {:.6}],
+  "elapsed_seconds": {:.6},
   "overload_count": {},
-  "elapsed_micros": {}
+  "max_state": {}
 }}"#,
             config.mode,
             config.rate,
-            f_bit_hz,
+            config.order,
             n,
-            max_state[0],
-            max_state[1],
-            max_state[2],
-            max_state[3],
-            max_state[4],
+            elapsed.as_secs_f64(),
             modulator.overload_count(),
-            elapsed.as_micros()
+            format_state_json(&max_state)
         );
         let mut f = File::create(path).unwrap();
         f.write_all(json.as_bytes()).unwrap();
     }
 }
 
-fn run_overload(config: &HarnessConfig, modulator: &mut CrfbModulator, f_bit_hz: u32) {
+fn run_overload(config: &HarnessConfig, modulator: &mut Modulator, _f_bit_hz: u32) {
     let n = config.samples;
-    let mut raw_bytes = vec![0u8; n / 8];
     const TILE_BITS: usize = 4096;
+    let mut raw_bytes = vec![0u8; n / 8];
     let mut pcm_tile = [0.0f64; TILE_BITS];
     let mut tile_bytes = [0u8; TILE_BITS / 8];
-    let amp = 10.0_f64.powf(-6.0 / 20.0);
-
-    let mut overload_occurred = false;
-    let mut state_after_recovery = [0.0f64; 5];
 
     let start = Instant::now();
-    for t_idx in 0..(n / TILE_BITS) {
-        let bit_offset = t_idx * TILE_BITS;
-        for (i, pcm) in pcm_tile.iter_mut().enumerate() {
-            let sample_idx = bit_offset + i;
-            let t = sample_idx as f64 / f_bit_hz as f64;
-            // Inject +5.0 severe overload at t_idx == 10
-            if t_idx == 10 && i < 64 {
-                *pcm = 5.0;
-                overload_occurred = true;
-            } else {
-                *pcm = amp * (2.0 * PI * 1000.0 * t).sin();
+    let num_tiles = n / TILE_BITS;
+    let mut state_after_recovery = vec![0.0f64; modulator.state_slice().len()];
+
+    for t_idx in 0..num_tiles {
+        if t_idx == 8 || t_idx == 9 {
+            // Intentionally drive integrators well into overload (> 0 dBFS amplitude 5.0)
+            pcm_tile.fill(5.0);
+        } else {
+            // Normal low-level sine
+            for (i, p) in pcm_tile.iter_mut().enumerate() {
+                *p = 0.1
+                    * (2.0 * PI * 1000.0 * ((t_idx * TILE_BITS + i) as f64 / 2_822_400.0)).sin();
             }
         }
 
@@ -600,41 +624,49 @@ fn run_overload(config: &HarnessConfig, modulator: &mut CrfbModulator, f_bit_hz:
             .copy_from_slice(&tile_bytes);
 
         if t_idx > 12 {
-            state_after_recovery = modulator.state();
+            state_after_recovery = modulator.state_slice().to_vec();
         }
     }
     let elapsed = start.elapsed();
 
     let recovered_stable = state_after_recovery
         .iter()
-        .all(|&s| s.abs() < CrfbModulator::STABILITY_THRESHOLD);
+        .all(|&s| s.abs() < STABILITY_THRESHOLD);
+
+    // Overload occurred during tiles 8 and 9 (bytes: 8*512 .. 10*512)
+    let overload_slice = &raw_bytes[8 * (TILE_BITS / 8)..10 * (TILE_BITS / 8)];
+    let idle_0x69_count = overload_slice.iter().filter(|&&b| b == 0x69).count();
+    let zero_0x00_count = overload_slice.iter().filter(|&&b| b == 0x00).count();
+
+    if let Some(ref path) = config.out_bin {
+        let mut f = File::create(path).unwrap();
+        f.write_all(&raw_bytes).unwrap();
+    }
 
     if let Some(ref path) = config.out_json {
         let json = format!(
             r#"{{
   "mode": "{}",
   "rate": "{}",
-  "f_bit_hz": {},
+  "order": {},
   "samples": {},
-  "overload_injected": {},
   "overload_count": {},
   "recovered_stable": {},
-  "state_after_recovery": [{:.6}, {:.6}, {:.6}, {:.6}, {:.6}],
-  "elapsed_micros": {}
+  "overload_idle_0x69_count": {},
+  "overload_zero_0x00_count": {},
+  "elapsed_seconds": {:.6},
+  "state_after_recovery": {}
 }}"#,
             config.mode,
             config.rate,
-            f_bit_hz,
+            config.order,
             n,
-            overload_occurred,
             modulator.overload_count(),
             recovered_stable,
-            state_after_recovery[0],
-            state_after_recovery[1],
-            state_after_recovery[2],
-            state_after_recovery[3],
-            state_after_recovery[4],
-            elapsed.as_micros()
+            idle_0x69_count,
+            zero_0x00_count,
+            elapsed.as_secs_f64(),
+            format_state_json(&state_after_recovery)
         );
         let mut f = File::create(path).unwrap();
         f.write_all(json.as_bytes()).unwrap();
@@ -643,7 +675,7 @@ fn run_overload(config: &HarnessConfig, modulator: &mut CrfbModulator, f_bit_hz:
 
 fn run_benchmark(
     config: &HarnessConfig,
-    modulator: &mut CrfbModulator,
+    modulator: &mut Modulator,
     cascade_stages: usize,
     baseband_fs: u32,
 ) {
@@ -711,6 +743,7 @@ fn run_benchmark(
             r#"{{
   "mode": "{}",
   "rate": "{}",
+  "order": {},
   "preset": "{:?}",
   "bench_blocks": {},
   "baseband_block_frames": {},
@@ -727,6 +760,7 @@ fn run_benchmark(
 }}"#,
             config.mode,
             config.rate,
+            config.order,
             config.preset,
             BENCH_BLOCKS,
             TILE_BASEBAND,

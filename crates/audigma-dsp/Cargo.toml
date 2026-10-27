@@ -9,4 +9,5 @@ description = "Core DSP types, rate domains, filter/modulator presets, and PCM/D
 
 [dependencies]
 serde = { workspace = true }
+smallvec = { workspace = true }
 thiserror = { workspace = true }

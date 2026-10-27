@@ -162,12 +162,13 @@ pub fn run_benchmark(args: BenchmarkArgs) -> Result<(), CliError> {
 
     let mut seq_mod_l = if is_dsd {
         if let audigma_dsp::config::TargetRateSpec::Dsd { bit_rate } = target_spec {
-            let coeffs = audigma_dsp::tables::get_crfb_coefficients(bit_rate).unwrap();
-            let mut m = audigma_dsp::modulator::CrfbModulator::new(
-                *coeffs,
+            let mut m = audigma_dsp::modulator::Modulator::new(
+                plan.dsp_config.modulator_order,
+                bit_rate,
                 audigma_dsp::config::DitherType::Tpdf,
                 audigma_dsp::config::OverloadPolicy::MuteRecover,
-            );
+            )
+            .unwrap();
             m.set_dither_seed(12345);
             Some(m)
         } else {
@@ -179,12 +180,13 @@ pub fn run_benchmark(args: BenchmarkArgs) -> Result<(), CliError> {
 
     let mut seq_mod_r = if is_dsd {
         if let audigma_dsp::config::TargetRateSpec::Dsd { bit_rate } = target_spec {
-            let coeffs = audigma_dsp::tables::get_crfb_coefficients(bit_rate).unwrap();
-            let mut m = audigma_dsp::modulator::CrfbModulator::new(
-                *coeffs,
+            let mut m = audigma_dsp::modulator::Modulator::new(
+                plan.dsp_config.modulator_order,
+                bit_rate,
                 audigma_dsp::config::DitherType::Tpdf,
                 audigma_dsp::config::OverloadPolicy::MuteRecover,
-            );
+            )
+            .unwrap();
             m.set_dither_seed(12346);
             Some(m)
         } else {
@@ -221,6 +223,7 @@ pub fn run_benchmark(args: BenchmarkArgs) -> Result<(), CliError> {
         if let audigma_dsp::config::TargetRateSpec::Dsd { bit_rate } = target_spec {
             Some(TargetDsdConfig {
                 bit_rate,
+                modulator_order: plan.dsp_config.modulator_order,
                 dither: audigma_dsp::config::DitherType::Tpdf,
                 overload_policy: audigma_dsp::config::OverloadPolicy::MuteRecover,
                 seed_base: 12345,

@@ -140,6 +140,7 @@ impl PipelineTopology {
         match self.target_spec {
             TargetRateSpec::Dsd { bit_rate } => Some(TargetDsdConfig {
                 bit_rate,
+                modulator_order: dsp_config.modulator_order,
                 dither: dsp_config.dither,
                 overload_policy: dsp_config.overload_policy,
                 seed_base: dsp_config.dither_tpdf_seed.unwrap_or(12345),
