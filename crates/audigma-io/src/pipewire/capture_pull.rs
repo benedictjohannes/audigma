@@ -267,6 +267,8 @@ mod tests {
             vec![44_100, 192_000],
             true,
             0.0,
+            audigma_dsp::FilterPreset::Balanced,
+            None,
             128,
         )
         .unwrap();

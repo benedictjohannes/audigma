@@ -597,6 +597,8 @@ pub struct PipeWireVirtualSink {
     /// Producer adds on push; consumer subtracts as native units are consumed.
     buffered_units: Arc<AtomicU64>,
     dsd_gain_db: f64,
+    dsd_preset: audigma_dsp::FilterPreset,
+    dsd_max_intermediate_rate: Option<PcmRateHz>,
     decimators: Vec<audigma_dsp::fir::HalfBandDecimationCascade>,
     dsd_scratch: Vec<Vec<u8>>,
     dsd_residue: Vec<Vec<u8>>,
@@ -615,6 +617,22 @@ impl PipeWireVirtualSink {
         default_rate_hz: u32,
         queue_chunks: usize,
     ) -> Result<Self, PipeWireError> {
+        Self::from_input_config_with_preset(
+            in_cfg,
+            default_rate_hz,
+            audigma_dsp::FilterPreset::Balanced,
+            queue_chunks,
+        )
+    }
+
+    /// Creates and binds a new virtual sink node in the PipeWire graph using an `InputConfig`
+    /// and a fallback filter preset for DSD decimation (from `[resampler].preset`).
+    pub fn from_input_config_with_preset(
+        in_cfg: &InputConfig,
+        default_rate_hz: u32,
+        fallback_preset: audigma_dsp::FilterPreset,
+        queue_chunks: usize,
+    ) -> Result<Self, PipeWireError> {
         let node_name = in_cfg.node_name.as_deref().unwrap_or("audigma_sink");
         let channels = in_cfg.channels.unwrap_or(2) as u32;
         let positions = in_cfg.resolved_channel_positions();
@@ -623,6 +641,8 @@ impl PipeWireVirtualSink {
         let rate_hz = in_cfg.rate_hz.map(|r| r.get()).unwrap_or(default_rate_hz);
         let allow_dsd = in_cfg.allow_dsd();
         let dsd_gain_db = in_cfg.dsd_gain_db();
+        let dsd_preset = in_cfg.dsd_decimation_preset(fallback_preset);
+        let dsd_max_intermediate = in_cfg.dsd_max_intermediate_rate_hz();
 
         Self::new_internal(
             node_name,
@@ -633,6 +653,8 @@ impl PipeWireVirtualSink {
             allowed_rates,
             allow_dsd,
             dsd_gain_db,
+            dsd_preset,
+            dsd_max_intermediate,
             queue_chunks,
         )
     }
@@ -670,6 +692,8 @@ impl PipeWireVirtualSink {
         allowed_rates: Vec<u32>,
         allow_dsd: bool,
         dsd_gain_db: f64,
+        dsd_preset: audigma_dsp::FilterPreset,
+        dsd_max_intermediate: Option<PcmRateHz>,
         queue_chunks: usize,
     ) -> Result<Self, PipeWireError> {
         let desc = format!("Audigma Virtual Sink ({node_name})");
@@ -830,7 +854,9 @@ impl PipeWireVirtualSink {
                                     let intermediate_rate = dsd_rate_opt
                                         .map(|r| {
                                             audigma_dsp::rates::select_dsd_intermediate_rate(
-                                                r, None, None,
+                                                r,
+                                                None,
+                                                dsd_max_intermediate,
                                             )
                                             .get()
                                         })
@@ -1357,6 +1383,8 @@ impl PipeWireVirtualSink {
             processed_chunks,
             buffered_units,
             dsd_gain_db,
+            dsd_preset,
+            dsd_max_intermediate_rate: dsd_max_intermediate,
             decimators: Vec::new(),
             dsd_scratch: Vec::new(),
             dsd_residue: Vec::new(),
@@ -1784,9 +1812,17 @@ impl AudioInput for PipeWireVirtualSink {
         if self.is_dsd.load(Ordering::SeqCst) {
             let dsd_rate_raw = self.active_dsd_bit_rate.load(Ordering::SeqCst);
             if let Some(dsd_rate) = DsdBitRateHz::new(dsd_rate_raw) {
-                self.info = AudioStreamInfo::new_dsd(dsd_rate, self.info.original_channels, None);
-                let intermediate_rate =
-                    audigma_dsp::rates::select_dsd_intermediate_rate(dsd_rate, None, None);
+                let intermediate_rate = audigma_dsp::rates::select_dsd_intermediate_rate(
+                    dsd_rate,
+                    None,
+                    self.dsd_max_intermediate_rate,
+                );
+                self.info = AudioStreamInfo::new_dsd_with_intermediate(
+                    dsd_rate,
+                    self.info.original_channels,
+                    None,
+                    intermediate_rate,
+                );
                 let stages = dsd_rate
                     .power_of_two_decimation_stages_to(intermediate_rate)
                     .unwrap_or(4) as usize;
@@ -1794,7 +1830,7 @@ impl AudioInput for PipeWireVirtualSink {
                 self.decimators = (0..ch_count)
                     .map(|_| {
                         audigma_dsp::fir::HalfBandDecimationCascade::new(
-                            audigma_dsp::FilterPreset::Balanced,
+                            self.dsd_preset,
                             stages,
                             65536,
                         )

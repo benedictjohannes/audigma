@@ -149,17 +149,23 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
     let out_buf_ms = out_cfg.buffer_ms.unwrap_or(40);
     let target_preroll_secs = (out_buf_ms as f64 / 1000.0 + 0.050).clamp(0.060, 0.500);
 
+    let fallback_preset = plan.dsp_config.preset;
+
     let create_input_driver =
         |in_cfg: &audigma_settings::InputConfig| -> Result<Box<dyn AudioInput>, EngineError> {
             match in_cfg.backend {
                 #[cfg(feature = "pipewire")]
                 InputBackend::Pipewire => {
-                    let mut sink =
-                        PipeWireVirtualSink::from_input_config(in_cfg, input_rate.get(), 128)
-                            .map_err(|e| EngineError::AudioBackend {
-                                backend: "pipewire",
-                                message: format!("failed to bind PipeWire virtual sink: {e}"),
-                            })?;
+                    let mut sink = PipeWireVirtualSink::from_input_config_with_preset(
+                        in_cfg,
+                        input_rate.get(),
+                        fallback_preset,
+                        128,
+                    )
+                    .map_err(|e| EngineError::AudioBackend {
+                        backend: "pipewire",
+                        message: format!("failed to bind PipeWire virtual sink: {e}"),
+                    })?;
                     sink.set_preroll_secs(target_preroll_secs);
                     Ok(Box::new(sink))
                 }

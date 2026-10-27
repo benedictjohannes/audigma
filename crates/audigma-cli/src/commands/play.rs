@@ -179,7 +179,14 @@ pub fn run_play(args: PlayArgs) -> Result<(), CliError> {
             .as_ref()
             .map(|i| i.dsd_gain_db())
             .unwrap_or(6.0);
-        let file_input = FileAudioInput::open_with_dsd_gain(&args.input, dsd_gain_db)?;
+        let dsd_preset = settings.resolved_dsd_decimation_preset();
+        let max_intermediate = settings.resolved_dsd_max_intermediate_rate_hz();
+        let file_input = FileAudioInput::open_with_dsd_full_config(
+            &args.input,
+            dsd_gain_db,
+            dsd_preset,
+            max_intermediate,
+        )?;
         let rate = file_input.info().sample_rate;
         (Box::new(file_input), rate)
     };

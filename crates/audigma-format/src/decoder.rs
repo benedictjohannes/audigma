@@ -78,6 +78,27 @@ impl AudioStreamInfo {
         }
     }
 
+    /// Constructs native DSD audio stream info with a custom intermediate PCM rate.
+    pub fn new_dsd_with_intermediate(
+        dsd_bit_rate: DsdBitRateHz,
+        channels: u8,
+        total_samples: Option<u64>,
+        intermediate_pcm: PcmRateHz,
+    ) -> Self {
+        let stages = dsd_bit_rate
+            .power_of_two_decimation_stages_to(intermediate_pcm)
+            .unwrap_or(4);
+        let divider = 1u64 << stages;
+        let total_frames = total_samples.map(|s| s / divider);
+        Self {
+            sample_rate: intermediate_pcm,
+            original_channels: channels,
+            total_frames,
+            bits_per_sample: Some(1),
+            dsd_bit_rate: Some(dsd_bit_rate),
+        }
+    }
+
     /// Returns `true` if this audio stream carries 1-bit DSD audio.
     #[inline]
     pub const fn is_dsd(&self) -> bool {

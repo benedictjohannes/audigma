@@ -320,6 +320,22 @@ impl InputConfig {
         self.allow_dsd.unwrap_or(false)
     }
 
+    /// Returns the resolved DSD decimation filter preset.
+    ///
+    /// If `[input.dsd].decimation_preset` is set, it takes precedence.
+    /// Otherwise, falls back to `fallback_preset` (typically from `[resampler].preset`).
+    pub fn dsd_decimation_preset(&self, fallback_preset: FilterPreset) -> FilterPreset {
+        self.dsd
+            .as_ref()
+            .and_then(|d| d.decimation_preset)
+            .unwrap_or(fallback_preset)
+    }
+
+    /// Returns the configured maximum intermediate PCM rate for DSD decimation, if set.
+    pub fn dsd_max_intermediate_rate_hz(&self) -> Option<PcmRateHz> {
+        self.dsd.as_ref().and_then(|d| d.max_intermediate_rate_hz)
+    }
+
     /// Returns the resolved DSD decimation gain in dB (defaults to +6.0 dB).
     pub fn dsd_gain_db(&self) -> f64 {
         self.dsd
@@ -980,6 +996,31 @@ impl Settings {
             }
         }
         warnings
+    }
+
+    /// Returns the resolved DSD decimation filter preset across this configuration.
+    ///
+    /// Resolution order:
+    /// 1. `[input.dsd].decimation_preset` if configured.
+    /// 2. `[resampler].preset` if configured.
+    /// 3. `FilterPreset::Balanced` (default).
+    pub fn resolved_dsd_decimation_preset(&self) -> FilterPreset {
+        let fallback = self
+            .resampler
+            .as_ref()
+            .map(|r| r.preset)
+            .unwrap_or_default();
+        self.input
+            .as_ref()
+            .map(|i| i.dsd_decimation_preset(fallback))
+            .unwrap_or(fallback)
+    }
+
+    /// Returns the configured maximum intermediate PCM rate for DSD decimation, if set.
+    pub fn resolved_dsd_max_intermediate_rate_hz(&self) -> Option<PcmRateHz> {
+        self.input
+            .as_ref()
+            .and_then(|i| i.dsd_max_intermediate_rate_hz())
     }
 
     /// Resolves the concrete `PresetDefinition`, `StreamSpec`, and `DspConfiguration`
@@ -2149,9 +2190,48 @@ pcm_rate_hz = 96000
         let dsd = input.dsd.as_ref().unwrap();
         assert_eq!(dsd.max_intermediate_rate_hz, Some(PcmRateHz::PCM_352800));
         assert_eq!(dsd.decimation_preset, Some(FilterPreset::Reference));
+        assert_eq!(
+            settings.resolved_dsd_decimation_preset(),
+            FilterPreset::Reference
+        );
         assert_eq!(dsd.gain_db, Some(6.0));
         assert_eq!(input.dsd_gain_db(), 6.0);
         assert!((input.dsd_linear_gain() - 10.0_f64.powf(6.0 / 20.0)).abs() < 1e-6);
+
+        // Fallback to [resampler].preset when [input.dsd].decimation_preset is omitted
+        let fallback_toml = r#"
+schema_version = 1
+[input]
+backend = "pipewire"
+allow_dsd = true
+[input.dsd]
+gain_db = 6.0
+[resampler]
+preset = "reference"
+[target]
+format = "pcm"
+pcm_rate_hz = 96000
+"#;
+        let s_fallback = Settings::from_toml_str(fallback_toml).unwrap();
+        assert_eq!(
+            s_fallback.resolved_dsd_decimation_preset(),
+            FilterPreset::Reference
+        );
+
+        // Default to FilterPreset::Balanced when neither is set
+        let default_toml = r#"
+schema_version = 1
+[input]
+backend = "pipewire"
+[target]
+format = "pcm"
+pcm_rate_hz = 96000
+"#;
+        let s_default = Settings::from_toml_str(default_toml).unwrap();
+        assert_eq!(
+            s_default.resolved_dsd_decimation_preset(),
+            FilterPreset::Balanced
+        );
 
         // Invalid gain_db rejection
         let invalid_toml = r#"

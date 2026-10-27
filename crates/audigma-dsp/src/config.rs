@@ -33,8 +33,9 @@ pub enum TargetFormat {
 }
 
 /// Canonical filter & modulator quality preset (`Design.md §4.2`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum FilterPreset {
+    #[default]
     #[serde(rename = "balanced")]
     Balanced,
     #[serde(rename = "reference")]

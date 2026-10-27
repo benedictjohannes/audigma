@@ -2,8 +2,8 @@
 //!
 //! Provides seekable file-backed implementations of `AudioInput` and `AudioOutput`.
 
+use audigma_dsp::PcmRateHz;
 use audigma_dsp::fir::HalfBandDecimationCascade;
-use audigma_dsp::rates::DsdMultiplier;
 use audigma_engine::traits::{AudioInput, AudioOutput, DecoderInput, EngineError};
 use audigma_format::AudioStreamInfo;
 use audigma_format::decoder::AudioDecoder;
@@ -37,10 +37,29 @@ impl FileAudioInput {
         Self::open_with_dsd_gain(path, 6.0)
     }
 
-    /// Opens an audio file for decoding with specified DSD decimation gain in dB.
+    /// Opens an audio file for decoding with specified DSD decimation gain in dB and default balanced preset.
     pub fn open_with_dsd_gain<P: AsRef<Path>>(
         path: P,
         dsd_gain_db: f64,
+    ) -> Result<Self, EngineError> {
+        Self::open_with_dsd_config(path, dsd_gain_db, audigma_dsp::FilterPreset::Balanced)
+    }
+
+    /// Opens an audio file for decoding with specified DSD decimation gain and filter preset.
+    pub fn open_with_dsd_config<P: AsRef<Path>>(
+        path: P,
+        dsd_gain_db: f64,
+        preset: audigma_dsp::FilterPreset,
+    ) -> Result<Self, EngineError> {
+        Self::open_with_dsd_full_config(path, dsd_gain_db, preset, None)
+    }
+
+    /// Opens an audio file for decoding with specified DSD decimation gain, filter preset, and max intermediate rate limit.
+    pub fn open_with_dsd_full_config<P: AsRef<Path>>(
+        path: P,
+        dsd_gain_db: f64,
+        preset: audigma_dsp::FilterPreset,
+        max_intermediate_rate_hz: Option<PcmRateHz>,
     ) -> Result<Self, EngineError> {
         let path_ref = path.as_ref();
         let file = File::open(path_ref).map_err(|e| {
@@ -60,17 +79,22 @@ impl FileAudioInput {
             let bit_rate = reader.header().bit_rate;
             let channels = reader.header().channels as u8;
             let sample_count = reader.total_samples_per_channel();
-            let info = AudioStreamInfo::new_dsd(bit_rate, channels, Some(sample_count));
 
-            let stages = match bit_rate.dsd_multiplier() {
-                Some(DsdMultiplier::Dsd64) => 4,  // 16x decimation -> 176.4k
-                Some(DsdMultiplier::Dsd128) => 4, // 16x decimation -> 352.8k
-                Some(DsdMultiplier::Dsd256) => 5, // 32x decimation -> 352.8k
-                Some(DsdMultiplier::Dsd512) => 6, // 64x decimation -> 352.8k
-                None => 5,
-            };
+            let intermediate_rate = audigma_dsp::rates::select_dsd_intermediate_rate(
+                bit_rate,
+                None,
+                max_intermediate_rate_hz,
+            );
+            let stages = bit_rate
+                .power_of_two_decimation_stages_to(intermediate_rate)
+                .unwrap_or(4) as usize;
+            let info = AudioStreamInfo::new_dsd_with_intermediate(
+                bit_rate,
+                channels,
+                Some(sample_count),
+                intermediate_rate,
+            );
             let divider = 1 << stages;
-            let preset = audigma_dsp::FilterPreset::Balanced;
             let max_frames = 65536;
 
             Ok(Self {
