@@ -132,6 +132,7 @@ pub struct DspConfiguration {
     pub max_stable_input_dbfs: f64,
     pub safety_margin_db: f64,
     pub dither: DitherType,
+    pub dither_tpdf_seed: Option<u64>,
     pub overload_policy: OverloadPolicy,
 }
 

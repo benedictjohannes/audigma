@@ -400,6 +400,7 @@ pub struct TargetConfig {
     pub sample_format: Option<SampleFormat>,
     pub valid_bits: Option<u8>,
     pub dither: Option<DitherType>,
+    pub dither_tpdf_seed: Option<u64>,
 }
 
 /// `[gain]` section (`Design.md §6.2`).
@@ -435,6 +436,8 @@ pub struct ResamplerConfig {
     pub phase: FilterPhase,
     #[serde(default = "default_apodization")]
     pub apodization: Apodization,
+    #[serde(default = "default_modulator_order")]
+    pub modulator_order: u8,
 }
 
 const fn default_filter_phase() -> FilterPhase {
@@ -445,26 +448,18 @@ const fn default_apodization() -> Apodization {
     Apodization::Off
 }
 
+const fn default_modulator_order() -> u8 {
+    5
+}
+
 impl Default for ResamplerConfig {
     fn default() -> Self {
         Self {
             preset: FilterPreset::Balanced,
             phase: FilterPhase::Linear,
             apodization: Apodization::Off,
+            modulator_order: 5,
         }
-    }
-}
-
-/// `[modulator]` section (`Design.md §4.3`, `§6.2`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ModulatorConfig {
-    pub order: u8,
-}
-
-impl Default for ModulatorConfig {
-    fn default() -> Self {
-        Self { order: 5 }
     }
 }
 
@@ -480,7 +475,6 @@ pub struct ClockConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OfflineConfig {
-    pub seed: Option<u64>,
     pub tail_policy: Option<TailPolicy>,
     pub write_report: Option<bool>,
     #[serde(default)]
@@ -525,7 +519,6 @@ pub struct Settings {
     pub target: Option<TargetConfig>,
     pub gain: Option<GainConfig>,
     pub resampler: Option<ResamplerConfig>,
-    pub modulator: Option<ModulatorConfig>,
     pub clock: Option<ClockConfig>,
     pub offline: Option<OfflineConfig>,
     pub logging: Option<LoggingConfig>,
@@ -588,6 +581,7 @@ impl Settings {
                     sample_format: None,
                     valid_bits: None,
                     dither: None,
+                    dither_tpdf_seed: Some(12345),
                 }),
                 gain: Some(GainConfig {
                     preamp_db: 0.0,
@@ -599,11 +593,10 @@ impl Settings {
                     preset: FilterPreset::Reference,
                     phase: FilterPhase::Linear,
                     apodization: Apodization::Off,
+                    modulator_order: 5,
                 }),
-                modulator: Some(ModulatorConfig { order: 5 }),
                 clock: None,
                 offline: Some(OfflineConfig {
-                    seed: Some(12345),
                     tail_policy: Some(TailPolicy::TrimToDuration),
                     write_report: Some(false),
                     dsf_pad_mode: DsfPadMode::SpecZero,
@@ -648,6 +641,7 @@ impl Settings {
                     sample_format: Some(SampleFormat::S32Le),
                     valid_bits: Some(24),
                     dither: Some(DitherType::Tpdf),
+                    dither_tpdf_seed: None,
                 }),
                 gain: Some(GainConfig {
                     preamp_db: -3.0,
@@ -659,11 +653,10 @@ impl Settings {
                     preset: FilterPreset::Reference,
                     phase: FilterPhase::Linear,
                     apodization: Apodization::Off,
+                    modulator_order: 5,
                 }),
-                modulator: None,
                 clock: None,
                 offline: Some(OfflineConfig {
-                    seed: None,
                     tail_policy: Some(TailPolicy::TrimToDuration),
                     write_report: Some(false),
                     dsf_pad_mode: DsfPadMode::SpecZero,
@@ -708,6 +701,7 @@ impl Settings {
                     sample_format: Some(SampleFormat::S24Le),
                     valid_bits: Some(24),
                     dither: Some(DitherType::Tpdf),
+                    dither_tpdf_seed: None,
                 }),
                 gain: Some(GainConfig {
                     preamp_db: -3.0,
@@ -719,11 +713,10 @@ impl Settings {
                     preset: FilterPreset::Reference,
                     phase: FilterPhase::Linear,
                     apodization: Apodization::Off,
+                    modulator_order: 5,
                 }),
-                modulator: None,
                 clock: None,
                 offline: Some(OfflineConfig {
-                    seed: None,
                     tail_policy: Some(TailPolicy::TrimToDuration),
                     write_report: Some(false),
                     dsf_pad_mode: DsfPadMode::SpecZero,
@@ -768,6 +761,7 @@ impl Settings {
                     sample_format: None,
                     valid_bits: None,
                     dither: None,
+                    dither_tpdf_seed: None,
                 }),
                 gain: Some(GainConfig {
                     preamp_db: 0.0,
@@ -779,8 +773,8 @@ impl Settings {
                     preset: FilterPreset::Balanced,
                     phase: FilterPhase::Linear,
                     apodization: Apodization::Off,
+                    modulator_order: 5,
                 }),
-                modulator: Some(ModulatorConfig { order: 5 }),
                 clock: None,
                 offline: None,
                 logging: None,
@@ -802,10 +796,10 @@ impl Settings {
             ));
         }
 
-        if let Some(modulator) = &self.modulator {
-            if modulator.order != 5 && modulator.order != 7 {
+        if let Some(resampler) = &self.resampler {
+            if resampler.modulator_order != 5 && resampler.modulator_order != 7 {
                 return Err(SettingsError::Validation(
-                    "[modulator] order must be 5 or 7",
+                    "[resampler] modulator_order must be 5 or 7",
                 ));
             }
         }
@@ -1057,9 +1051,8 @@ impl Settings {
         if let Some(dither) = target.dither {
             dsp_config.dither = dither;
         }
-        if let Some(modulator) = &self.modulator {
-            dsp_config.modulator_order = modulator.order;
-        }
+        dsp_config.dither_tpdf_seed = target.dither_tpdf_seed;
+        dsp_config.modulator_order = resampler.modulator_order;
         if gain.headroom == HeadroomMode::Manual && target.format == TargetFormat::Pcm {
             dsp_config.profile_headroom_db = 0.0;
         }
@@ -1293,9 +1286,7 @@ overload_policy = "mute-recover"
 preset = "balanced"
 phase = "minimum"
 apodization = "off"
-
-[modulator]
-order = 5
+modulator_order = 5
 
 [clock]
 mode = "adaptive-input"
@@ -1402,6 +1393,7 @@ container = "dsf"
 format = "dsd"
 rate_family = "44100"
 dsd_rate = "dsd256"
+dither_tpdf_seed = 12345
 
 [gain]
 preamp_db = 0.0
@@ -1413,12 +1405,9 @@ overload_policy = "error"
 preset = "reference"
 phase = "linear"
 apodization = "off"
-
-[modulator]
-order = 5
+modulator_order = 5
 
 [offline]
-seed = 12345
 tail_policy = "trim-to-duration"
 write_report = true
 dsf_pad_mode = "spec-zero"
@@ -1464,9 +1453,7 @@ overload_policy = "error"
 preset = "balanced"
 phase = "linear"
 apodization = "off"
-
-[modulator]
-order = 5
+modulator_order = 5
 "#;
         let settings = Settings::from_toml_str(toml).unwrap();
         let plan = settings

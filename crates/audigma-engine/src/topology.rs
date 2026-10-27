@@ -136,17 +136,13 @@ impl PipelineTopology {
     }
 
     /// Resolves optional modulator target configuration for `ChannelWorkerPool`.
-    pub fn target_dsd_config(
-        &self,
-        dsp_config: &DspConfiguration,
-        seed_base: u64,
-    ) -> Option<TargetDsdConfig> {
+    pub fn target_dsd_config(&self, dsp_config: &DspConfiguration) -> Option<TargetDsdConfig> {
         match self.target_spec {
             TargetRateSpec::Dsd { bit_rate } => Some(TargetDsdConfig {
                 bit_rate,
                 dither: dsp_config.dither,
                 overload_policy: dsp_config.overload_policy,
-                seed_base,
+                seed_base: dsp_config.dither_tpdf_seed.unwrap_or(12345),
             }),
             TargetRateSpec::Pcm { .. } => None,
         }

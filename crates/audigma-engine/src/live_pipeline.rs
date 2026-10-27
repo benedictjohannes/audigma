@@ -733,9 +733,7 @@ impl LivePipeline {
 
         const TILE_BASEBAND_FRAMES: usize = 256;
         let is_dsd = self.topology.is_dsd();
-        let target_dsd = self
-            .topology
-            .target_dsd_config(&self.plan.dsp_config, 12345);
+        let target_dsd = self.topology.target_dsd_config(&self.plan.dsp_config);
 
         let mut processor = TileProcessor::new(
             num_channels,

@@ -362,9 +362,7 @@ overload_policy = "mute-recover"
 preset = "balanced"
 phase = "minimum"
 apodization = "off"
-
-[modulator]
-order = 5
+modulator_order = 5
 
 [clock]
 mode = "adaptive-input"
@@ -429,6 +427,7 @@ container = "dsf"
 format = "dsd"
 rate_family = "44100"
 dsd_rate = "dsd256"
+dither_tpdf_seed = 12345
 
 [gain]
 preamp_db = 0.0
@@ -440,12 +439,9 @@ overload_policy = "error"
 preset = "reference"
 phase = "linear"
 apodization = "off"
-
-[modulator]
-order = 5
+modulator_order = 5
 
 [offline]
-seed = 12345
 tail_policy = "trim-to-duration"
 write_report = true
 dsf_pad_mode = "spec-zero"
@@ -480,9 +476,7 @@ overload_policy = "error"
 preset = "balanced"
 phase = "linear"
 apodization = "off"
-
-[modulator]
-order = 5
+modulator_order = 5
 ```
 
 ---

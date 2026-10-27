@@ -66,6 +66,7 @@ impl PresetDefinition {
             max_stable_input_dbfs: self.modulator.max_stable_input_dbfs,
             safety_margin_db: self.modulator.default_safety_margin_db,
             dither: DitherType::Tpdf,
+            dither_tpdf_seed: None,
             overload_policy,
         }
     }

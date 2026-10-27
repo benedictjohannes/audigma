@@ -508,12 +508,7 @@ impl OfflinePipeline {
             None
         };
 
-        let seed = settings
-            .offline
-            .as_ref()
-            .and_then(|o| o.seed)
-            .unwrap_or(12345);
-        let target_dsd = topology.target_dsd_config(&plan.dsp_config, seed);
+        let target_dsd = topology.target_dsd_config(&plan.dsp_config);
 
         let processor = TileProcessor::new(
             2,
