@@ -163,15 +163,6 @@ pub enum ClockMode {
     AdaptiveInput,
 }
 
-/// `[runtime] on_device_loss` options (`Design.md §6.2`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum DeviceLossPolicy {
-    #[default]
-    Wait,
-    Exit,
-}
-
 /// `[offline] tail_policy` options (`Design.md §6.2`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum TailPolicy {
@@ -485,16 +476,6 @@ pub struct ClockConfig {
     pub max_correction_ppm: Option<u32>,
 }
 
-/// `[runtime]` section (`Design.md §6.2`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RuntimeConfig {
-    pub latency_target_ms: Option<u32>,
-    pub settle_ms: Option<u32>,
-    pub on_device_loss: Option<DeviceLossPolicy>,
-    pub fallback: Option<String>,
-}
-
 /// `[offline]` section (`Design.md §6.2`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -546,7 +527,6 @@ pub struct Settings {
     pub resampler: Option<ResamplerConfig>,
     pub modulator: Option<ModulatorConfig>,
     pub clock: Option<ClockConfig>,
-    pub runtime: Option<RuntimeConfig>,
     pub offline: Option<OfflineConfig>,
     pub logging: Option<LoggingConfig>,
 }
@@ -622,7 +602,6 @@ impl Settings {
                 }),
                 modulator: Some(ModulatorConfig { order: 5 }),
                 clock: None,
-                runtime: None,
                 offline: Some(OfflineConfig {
                     seed: Some(12345),
                     tail_policy: Some(TailPolicy::TrimToDuration),
@@ -683,7 +662,6 @@ impl Settings {
                 }),
                 modulator: None,
                 clock: None,
-                runtime: None,
                 offline: Some(OfflineConfig {
                     seed: None,
                     tail_policy: Some(TailPolicy::TrimToDuration),
@@ -744,7 +722,6 @@ impl Settings {
                 }),
                 modulator: None,
                 clock: None,
-                runtime: None,
                 offline: Some(OfflineConfig {
                     seed: None,
                     tail_policy: Some(TailPolicy::TrimToDuration),
@@ -805,7 +782,6 @@ impl Settings {
                 }),
                 modulator: Some(ModulatorConfig { order: 5 }),
                 clock: None,
-                runtime: None,
                 offline: None,
                 logging: None,
             },
@@ -1251,10 +1227,6 @@ apodization = "off"
 
 [clock]
 mode = "shared-graph"
-
-[runtime]
-latency_target_ms = 40
-on_device_loss = "wait"
 "#;
         let settings = Settings::from_toml_str(toml).unwrap();
         let input = settings.input.as_ref().unwrap();
@@ -1328,11 +1300,6 @@ order = 5
 [clock]
 mode = "adaptive-input"
 max_correction_ppm = 500
-
-[runtime]
-settle_ms = 50
-on_device_loss = "wait"
-fallback = "none"
 "#;
         let settings = Settings::from_toml_str(toml).unwrap();
         assert!(settings.output.as_ref().unwrap().reserve_device_enabled());

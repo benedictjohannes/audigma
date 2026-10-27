@@ -114,11 +114,18 @@ pub fn run_convert(args: ConvertArgs) -> Result<(), CliError> {
     };
 
     // 4. Prepare and Run Pipeline
+    let write_report = settings
+        .offline
+        .as_ref()
+        .and_then(|o| o.write_report)
+        .unwrap_or(false);
     let pipeline = OfflinePipeline::prepare(settings, input_rate)?;
     let report = pipeline.run(&mut *input, output)?;
 
     // 5. Output Report
-    if args.json {
+    let emit_json = args.json || write_report;
+
+    if emit_json {
         let json_val = json!({
             "input_rate_hz": report.input_rate.get(),
             "target_format": format!("{:?}", report.target_format),

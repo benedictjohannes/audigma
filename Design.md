@@ -322,10 +322,6 @@ apodization = "off"
 
 [clock]
 mode = "shared-graph"
-
-[runtime]
-latency_target_ms = 40
-on_device_loss = "wait"
 ```
 
 #### B. PipeWire Virtual Sink $\to$ Direct Exclusive ALSA Native DSD (`pipewire-alsa-dsd.toml`)
@@ -373,11 +369,6 @@ order = 5
 [clock]
 mode = "adaptive-input"
 max_correction_ppm = 500
-
-[runtime]
-settle_ms = 50
-on_device_loss = "wait"
-fallback = "none"
 ```
 
 #### C. ALSA Loopback (MPD) $\to$ Direct Exclusive ALSA High-Rate PCM (`loopback-alsa-pcm.toml`)

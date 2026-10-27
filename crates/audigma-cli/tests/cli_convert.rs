@@ -209,3 +209,69 @@ fn test_cli_convert_synthetic_wav_to_dsf_and_ffprobe_verify() {
     let _ = std::fs::remove_file(out_dsf_path);
     let _ = std::fs::remove_file(out_flac_path);
 }
+
+#[test]
+fn test_cli_convert_respects_config_write_report() {
+    let bin = env!("CARGO_BIN_EXE_audigma");
+    let temp_dir = std::env::temp_dir();
+    let in_wav_path = temp_dir.join("audigma_test_in_report.wav");
+    let out_wav_path = temp_dir.join("audigma_test_out_report.wav");
+    let cfg_path = temp_dir.join("audigma_test_report.toml");
+
+    let spec = hound::WavSpec {
+        channels: 2,
+        sample_rate: 44100,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut writer = hound::WavWriter::create(&in_wav_path, spec).unwrap();
+    for i in 0..4410 {
+        let t = i as f64 / 44100.0;
+        let s = (0.2 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin() * 32767.0) as i16;
+        writer.write_sample(s).unwrap();
+        writer.write_sample(s).unwrap();
+    }
+    writer.finalize().unwrap();
+
+    let toml = r#"
+schema_version = 1
+
+[target]
+format = "pcm"
+pcm_rate_hz = 44100
+sample_format = "s16le"
+
+[output]
+backend = "file"
+container = "wav"
+
+[offline]
+write_report = true
+"#;
+    std::fs::write(&cfg_path, toml).unwrap();
+
+    let output = Command::new(bin)
+        .arg("convert")
+        .arg("-i")
+        .arg(&in_wav_path)
+        .arg("-o")
+        .arg(&out_wav_path)
+        .arg("-c")
+        .arg(&cfg_path)
+        .output()
+        .expect("failed to run audigma convert");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Should be valid JSON with total_input_frames
+    assert!(stderr.contains("\"total_input_frames\": 4410"));
+    assert!(stderr.contains("\"applied_gain_db\":"));
+
+    let _ = std::fs::remove_file(in_wav_path);
+    let _ = std::fs::remove_file(out_wav_path);
+    let _ = std::fs::remove_file(cfg_path);
+}
