@@ -170,16 +170,16 @@ impl ChannelDecimatorPool {
         let divider = self.divider;
         let mut min_produced = usize::MAX;
 
-        for c in 0..num_channels {
+        for (c, output) in outputs.iter_mut().enumerate().take(num_channels) {
             let res_len = self.residue[c].len();
             if res_len == 0 {
-                min_produced = min_produced.min(0);
+                min_produced = 0;
                 continue;
             }
 
             let pad = divider - res_len;
             let total_len = divider; // 1 baseband frame
-            if outputs[c].is_empty() {
+            if output.is_empty() {
                 return Err(EngineError::Fir(
                     audigma_dsp::fir::FirError::OutputBufferTooSmall {
                         required: 1,
@@ -192,8 +192,8 @@ impl ChannelDecimatorPool {
             self.scratch[c][res_len..total_len].fill(0.0);
             self.residue[c].clear();
 
-            let produced = self.decimators[c]
-                .process_tile(&self.scratch[c][..total_len], &mut outputs[c][..1])?;
+            let produced =
+                self.decimators[c].process_tile(&self.scratch[c][..total_len], &mut output[..1])?;
             min_produced = min_produced.min(produced);
             let _ = pad;
         }

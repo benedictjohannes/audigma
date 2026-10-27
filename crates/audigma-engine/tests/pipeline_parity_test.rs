@@ -177,10 +177,9 @@ fn test_parity_carrier_format_derivation() {
 
     // Native DSD transport
     let s_native = make_test_settings(dsd_target, Some("native"));
-    let topo_dsd = LivePipeline::prepare(s_native.clone(), PcmRateHz::PCM_44100)
+    let topo_dsd = *LivePipeline::prepare(s_native.clone(), PcmRateHz::PCM_44100)
         .unwrap()
-        .topology()
-        .clone();
+        .topology();
     assert_eq!(
         IdleCarrierFormat::from_settings(&s_native, &topo_dsd.target_spec),
         IdleCarrierFormat::NativeDsd
@@ -196,10 +195,9 @@ fn test_parity_carrier_format_derivation() {
     // PCM transport
     let pcm_target = "format = \"pcm\"\npcm_rate_hz = 192000";
     let s_pcm = make_test_settings(pcm_target, None);
-    let topo_pcm = LivePipeline::prepare(s_pcm.clone(), PcmRateHz::PCM_48000)
+    let topo_pcm = *LivePipeline::prepare(s_pcm.clone(), PcmRateHz::PCM_48000)
         .unwrap()
-        .topology()
-        .clone();
+        .topology();
     assert_eq!(
         IdleCarrierFormat::from_settings(&s_pcm, &topo_pcm.target_spec),
         IdleCarrierFormat::Pcm

@@ -23,10 +23,12 @@ impl PullClock {
     }
 
     pub fn pulled(&mut self, now: Instant, units: u64, units_per_sec: u32) {
+        if units_per_sec == 0 {
+            return;
+        }
         // Small refill headroom lets the demand gate follow hardware-clock drift
         // and recover scheduling delays without issuing back-to-back pulls.
-        let period =
-            Duration::from_secs_f64(0.95 * units.max(1) as f64 / units_per_sec.max(1) as f64);
+        let period = Duration::from_secs_f64(0.95 * units.max(1) as f64 / units_per_sec as f64);
         let next = self.next.unwrap_or(now);
         // Preserve fractional timing without collecting burst credit during a
         // downstream stall. Async sources need time to prepare the next buffer.
@@ -129,6 +131,7 @@ mod tests {
         assert!(PullDemand::needs_buffer(31_751, 352_800, 90_000_000));
         assert!(!PullDemand::needs_buffer(31_752, 352_800, 90_000_000));
         assert!(!PullDemand::needs_buffer(40_960, 352_800, 90_000_000));
+        assert!(!PullDemand::needs_buffer(0, 352_800, 0));
     }
 
     #[test]
@@ -172,6 +175,20 @@ mod tests {
     }
 
     #[test]
+    fn pull_clock_reset_and_zero_inputs() {
+        let start = Instant::now();
+        let mut clock = PullClock::default();
+        clock.pulled(start, 1024, 352_800);
+        assert!(!clock.ready(start + Duration::from_millis(1)));
+        clock.reset();
+        assert!(clock.ready(start + Duration::from_millis(1)));
+
+        // Zero units or rate should not panic or divide by zero.
+        clock.pulled(start, 0, 0);
+        assert!(clock.ready(start + Duration::from_millis(1)));
+    }
+
+    #[test]
     fn driver_clock_advances_by_published_cycles() {
         let mut clock: libspa::sys::spa_io_clock = unsafe { std::mem::zeroed() };
         advance_driver_clock(&mut clock, 1_000);
@@ -195,6 +212,25 @@ mod tests {
             (clock.position, clock.duration, clock.nsec),
             (1024, 512, 2_000)
         );
+
+        // Zero target duration should be ignored
+        clock.target_duration = 0;
+        advance_driver_clock(&mut clock, 3_000);
+        assert_eq!(
+            clock.nsec, 2_000,
+            "zero target duration left clock untouched"
+        );
+
+        // Position wrapping around u64::MAX
+        clock.position = u64::MAX - 100;
+        clock.duration = 200;
+        clock.target_rate = libspa::sys::spa_fraction {
+            num: 1,
+            denom: 48_000,
+        };
+        clock.target_duration = 512;
+        advance_driver_clock(&mut clock, 4_000);
+        assert_eq!(clock.position, 99);
     }
 
     #[test]
