@@ -6,7 +6,8 @@
 //! - POSIX real-time scheduling priority (`SCHED_FIFO` via `pthread_setschedparam` / `RLIMIT_RTPRIO`)
 //!   and thread-local hardware FTZ/DAZ denormal guards.
 //! - Zero heap allocation and zero lock contention during steady-state processing.
-//! - Isolated per-channel FIR cascade and 5th-order CRFB modulator states.
+//! - Isolated per-channel FIR cascade and CRFB modulator states.
+//! - Bounded internal DSD subtiles without additional worker synchronization.
 
 use crate::traits::EngineError;
 use audigma_dsp::config::{Apodization, DitherType, FilterPhase, FilterPreset, OverloadPolicy};
@@ -24,6 +25,62 @@ const CMD_PCM: u32 = 1;
 const CMD_DSD: u32 = 2;
 const CMD_RESET: u32 = 3;
 const CMD_STOP: u32 = 4;
+
+// At DSD512 this is 32 baseband frames; at DSD256 it is 64. Keep the
+// externally scheduled tile intact and interpolate/modulate each slice while
+// it is still hot, rather than rereading the whole high-rate PCM tile later.
+const DSD_SUBTILE_SAMPLES: usize = 16_384;
+
+fn process_pcm_tile(
+    cascade: &mut HalfBandCascade,
+    input: &[f64],
+    output: &mut [f64],
+    subtile_frames: usize,
+) -> Result<(), EngineError> {
+    let subtile_samples = subtile_frames * cascade.rate_multiplier();
+    for (tile, out) in input
+        .chunks(subtile_frames)
+        .zip(output.chunks_mut(subtile_samples))
+    {
+        cascade.process_tile(tile, out)?;
+    }
+    Ok(())
+}
+
+fn process_dsd_tile(
+    cascade: &mut HalfBandCascade,
+    modulator: &mut Modulator,
+    input: &[f64],
+    pcm: &mut [f64],
+    dsd: &mut [u8],
+    subtile_frames: usize,
+) -> Result<(), EngineError> {
+    // Preserve the original validation/error ordering: the FIR advances through
+    // the entire tile even if the modulator rejects an unaligned input length.
+    if pcm.len() % 8 != 0 {
+        process_pcm_tile(cascade, input, pcm, subtile_frames)?;
+        return Ok(modulator.process_tile_bytes(pcm, dsd)?);
+    }
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let subtile_samples = subtile_frames * cascade.rate_multiplier();
+    let mut result = Ok(());
+    for ((tile, out_pcm), out_dsd) in input
+        .chunks(subtile_frames)
+        .zip(pcm.chunks_mut(subtile_samples))
+        .zip(dsd.chunks_mut(subtile_samples / 8))
+    {
+        cascade.process_tile(tile, out_pcm)?;
+        // On OverloadPolicy::Error, finish the FIR but stop advancing the
+        // modulator. Both states and the PCM view then match whole-tile execution.
+        if result.is_ok() {
+            result = modulator.process_tile_bytes(out_pcm, out_dsd);
+        }
+    }
+    Ok(result?)
+}
 
 /// Target DSD configuration for channel workers.
 #[derive(Debug, Clone)]
@@ -147,8 +204,20 @@ impl ChannelWorkerPool {
             });
         }
 
+        if tile_baseband_frames == 0 {
+            return Err(EngineError::InvalidTopology {
+                message: "ChannelWorkerPool requires a nonzero tile capacity".into(),
+            });
+        }
+
+        let mult = 1usize << stages;
+        let subtile_frames = if target_dsd.is_some() {
+            tile_baseband_frames.min((DSD_SUBTILE_SAMPLES / mult).max(1))
+        } else {
+            tile_baseband_frames
+        };
         let cascade_probe =
-            HalfBandCascade::new(preset, phase, apodization, stages, tile_baseband_frames);
+            HalfBandCascade::new(preset, phase, apodization, stages, subtile_frames);
         let mult = cascade_probe.rate_multiplier();
         let group_delay_output_samples = cascade_probe.total_group_delay_output_samples();
         let cascade_tile_len = tile_baseband_frames * mult;
@@ -175,7 +244,7 @@ impl ChannelWorkerPool {
 
             // Construct isolated cascade and modulator for this worker
             let mut cascade =
-                HalfBandCascade::new(preset, phase, apodization, stages, tile_baseband_frames);
+                HalfBandCascade::new(preset, phase, apodization, stages, subtile_frames);
             let mut modulator = if let Some(ref dsd_cfg) = target_dsd {
                 let mut m = Modulator::new(
                     dsd_cfg.modulator_order,
@@ -233,10 +302,15 @@ impl ChannelWorkerPool {
                                 let in_slice = &in_buf[..in_len];
                                 let pcm_buf = unsafe { &mut *thread_buffers.pcm_out_buf.get() };
                                 let pcm_out = &mut pcm_buf[..in_len * mult];
-                                if let Err(e) = cascade.process_tile(in_slice, pcm_out) {
+                                if let Err(e) = process_pcm_tile(
+                                    &mut cascade,
+                                    in_slice,
+                                    pcm_out,
+                                    subtile_frames,
+                                ) {
                                     thread_sync.has_error.store(true, Ordering::Release);
                                     let mut err = thread_error.lock().unwrap();
-                                    *err = Some(EngineError::Fir(e));
+                                    *err = Some(e);
                                 }
                             }
                             CMD_DSD => {
@@ -246,22 +320,34 @@ impl ChannelWorkerPool {
                                 let req_pcm = in_len * mult;
                                 let pcm_buf = unsafe { &mut *thread_buffers.pcm_out_buf.get() };
                                 let pcm_out = &mut pcm_buf[..req_pcm];
-                                if let Err(e) = cascade.process_tile(in_slice, pcm_out) {
-                                    thread_sync.has_error.store(true, Ordering::Release);
-                                    let mut err = thread_error.lock().unwrap();
-                                    *err = Some(EngineError::Fir(e));
-                                } else if let Some(ref mut m) = modulator {
+                                let result = if let Some(ref mut m) = modulator {
                                     let req_bytes = req_pcm / 8;
                                     let dsd_buf = unsafe { &mut *thread_buffers.dsd_out_buf.get() };
                                     let dsd_out = &mut dsd_buf[..req_bytes];
-                                    if let Err(e) = m.process_tile_bytes(pcm_out, dsd_out) {
-                                        thread_sync.has_error.store(true, Ordering::Release);
-                                        let mut err = thread_error.lock().unwrap();
-                                        *err = Some(EngineError::Modulator(e));
-                                    }
+                                    let result = process_dsd_tile(
+                                        &mut cascade,
+                                        m,
+                                        in_slice,
+                                        pcm_out,
+                                        dsd_out,
+                                        subtile_frames,
+                                    );
                                     thread_sync
                                         .overload_count
                                         .store(m.overload_count(), Ordering::Relaxed);
+                                    result
+                                } else {
+                                    process_pcm_tile(
+                                        &mut cascade,
+                                        in_slice,
+                                        pcm_out,
+                                        subtile_frames,
+                                    )
+                                };
+                                if let Err(e) = result {
+                                    thread_sync.has_error.store(true, Ordering::Release);
+                                    let mut err = thread_error.lock().unwrap();
+                                    *err = Some(e);
                                 }
                             }
                             _ => {}
@@ -408,7 +494,7 @@ impl ChannelWorkerPool {
         self.dispatch_command(CMD_PCM, frames)
     }
 
-    /// Processes one multi-channel tile through the half-band cascade and 5th-order CRFB modulator (DSD output).
+    /// Processes one multi-channel tile through the half-band cascade and CRFB modulator (DSD output).
     pub fn process_tile_dsd(&mut self, inputs: &[&[f64]]) -> Result<(), EngineError> {
         if inputs.len() != self.slots.len() {
             return Err(EngineError::Pipeline(format!(
@@ -490,6 +576,123 @@ mod tests {
     use super::*;
     use audigma_dsp::presets::PRESET_BALANCED;
     use std::f64::consts::PI;
+
+    #[test]
+    fn test_dsd_subtile_errors_preserve_whole_tile_state() {
+        for stages in [0, 1, 2, 3, 9] {
+            let mult = 1 << stages;
+            let subtile_frames = 32;
+            for order in [5, 7] {
+                for policy in [OverloadPolicy::Error, OverloadPolicy::MuteRecover] {
+                    let mut whole = HalfBandCascade::new(
+                        FilterPreset::Balanced,
+                        FilterPhase::Linear,
+                        Apodization::Off,
+                        stages,
+                        97,
+                    );
+                    let mut tiled = HalfBandCascade::new(
+                        FilterPreset::Balanced,
+                        FilterPhase::Linear,
+                        Apodization::Off,
+                        stages,
+                        subtile_frames,
+                    );
+                    let mut expected_mod =
+                        Modulator::new(order, DsdBitRateHz::DSD512, DitherType::Tpdf, policy)
+                            .unwrap();
+                    let mut actual_mod = expected_mod.clone();
+                    let mut expected_pcm = vec![0.0; 97 * mult];
+                    let mut actual_pcm = expected_pcm.clone();
+                    let mut expected_dsd = vec![0xa5; 97 * mult / 8];
+                    let mut actual_dsd = expected_dsd.clone();
+                    for (frames, amplitude) in
+                        [(96, 0.0), (96, 5.0), (97, 0.0), (96, f64::NAN), (96, 0.0)]
+                    {
+                        let input = vec![amplitude; frames];
+                        let expected_pcm = &mut expected_pcm[..frames * mult];
+                        let actual_pcm = &mut actual_pcm[..frames * mult];
+                        let expected_dsd = &mut expected_dsd[..frames * mult / 8];
+                        let actual_dsd = &mut actual_dsd[..frames * mult / 8];
+                        whole.process_tile(&input, expected_pcm).unwrap();
+                        let expected = expected_mod.process_tile_bytes(expected_pcm, expected_dsd);
+                        let actual = process_dsd_tile(
+                            &mut tiled,
+                            &mut actual_mod,
+                            &input,
+                            actual_pcm,
+                            actual_dsd,
+                            subtile_frames,
+                        );
+                        match (expected, actual) {
+                            (Ok(()), Ok(())) => {}
+                            (Err(e), Err(EngineError::Modulator(a))) => {
+                                // NaNs are not PartialEq, so compare diagnostic text and
+                                // the exact persisted state/dither progression separately.
+                                assert_eq!(format!("{a:?}"), format!("{e:?}"));
+                            }
+                            (e, a) => panic!("error mismatch: {e:?} vs {a:?}"),
+                        }
+                        for (a, e) in actual_pcm.iter().zip(expected_pcm) {
+                            assert_eq!(a.to_bits(), e.to_bits());
+                        }
+                        assert_eq!(actual_dsd, expected_dsd);
+                        assert_eq!(actual_mod.overload_count(), expected_mod.overload_count());
+                        for (a, e) in actual_mod
+                            .state_slice()
+                            .iter()
+                            .zip(expected_mod.state_slice())
+                        {
+                            assert_eq!(a.to_bits(), e.to_bits());
+                        }
+                    }
+                    // Remove the NaN-contaminated FIR history without reseeding
+                    // dither, and verify the PRNG continuation after error paths.
+                    whole.reset();
+                    tiled.reset();
+                    expected_mod.reset();
+                    actual_mod.reset();
+                    let input = [0.0; 96];
+                    whole
+                        .process_tile(&input, &mut expected_pcm[..96 * mult])
+                        .unwrap();
+                    expected_mod
+                        .process_tile_bytes(
+                            &expected_pcm[..96 * mult],
+                            &mut expected_dsd[..96 * mult / 8],
+                        )
+                        .unwrap();
+                    process_dsd_tile(
+                        &mut tiled,
+                        &mut actual_mod,
+                        &input,
+                        &mut actual_pcm[..96 * mult],
+                        &mut actual_dsd[..96 * mult / 8],
+                        subtile_frames,
+                    )
+                    .unwrap();
+                    assert_eq!(&actual_dsd[..96 * mult / 8], &expected_dsd[..96 * mult / 8]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_zero_tile_capacity_is_rejected() {
+        assert!(matches!(
+            ChannelWorkerPool::new(
+                1,
+                FilterPreset::Balanced,
+                FilterPhase::Linear,
+                Apodization::Off,
+                9,
+                0,
+                None,
+                None
+            ),
+            Err(EngineError::InvalidTopology { .. })
+        ));
+    }
 
     #[test]
     fn test_worker_pool_bit_exact_with_sequential() {

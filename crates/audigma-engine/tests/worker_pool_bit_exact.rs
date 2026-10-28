@@ -50,6 +50,89 @@ fn test_worker_pool_stereo_dsd512_48_bit_exact() {
 }
 
 #[test]
+fn test_dsd_subtiles_partial_tiles_modes_and_reset() {
+    for preset in [
+        FilterPreset::Balanced,
+        FilterPreset::Reference,
+        FilterPreset::LowLatency,
+    ] {
+        for order in [5, 7] {
+            for (phase, apodization) in [
+                (FilterPhase::Linear, Apodization::Off),
+                (FilterPhase::Linear, Apodization::Gentle),
+                (FilterPhase::Minimum, Apodization::Off),
+                (FilterPhase::Minimum, Apodization::Gentle),
+            ] {
+                let rate = if phase == FilterPhase::Linear {
+                    DsdBitRateHz::DSD512
+                } else {
+                    DsdBitRateHz::DSD512_48
+                };
+                let dither = if apodization == Apodization::Off {
+                    DitherType::Tpdf
+                } else {
+                    DitherType::None
+                };
+                let config = TargetDsdConfig {
+                    bit_rate: rate,
+                    modulator_order: order,
+                    dither,
+                    overload_policy: OverloadPolicy::MuteRecover,
+                    seed_base: 424242,
+                };
+                let mut pool = ChannelWorkerPool::new(
+                    1,
+                    preset,
+                    phase,
+                    apodization,
+                    9,
+                    512,
+                    Some(config),
+                    None,
+                )
+                .unwrap();
+                let mut cascade = HalfBandCascade::new(preset, phase, apodization, 9, 512);
+                let mut modulator =
+                    Modulator::new(order, rate, dither, OverloadPolicy::MuteRecover).unwrap();
+                modulator.set_dither_seed(424242);
+                let input: Vec<f64> = (0..512).map(|i| 0.3 * (i as f64 * 0.17).sin()).collect();
+                let mut pcm = vec![0.0; 512 * 512];
+                let mut dsd = vec![0; 512 * 512 / 8];
+                assert_eq!(
+                    pool.total_group_delay_output_samples(),
+                    cascade.total_group_delay_output_samples()
+                );
+                for _ in 0..2 {
+                    for (block, frames) in [0, 1, 31, 32, 33, 255, 256, 511, 512]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        let pcm = &mut pcm[..frames * 512];
+                        let dsd = &mut dsd[..frames * 512 / 8];
+                        cascade.process_tile(&input[..frames], pcm).unwrap();
+                        // DSD-configured workers also serve PCM peak analysis.
+                        if block % 3 == 0 {
+                            pool.process_tile_pcm(&[&input[..frames]]).unwrap();
+                        } else {
+                            modulator.process_tile_bytes(pcm, dsd).unwrap();
+                            pool.process_tile_dsd(&[&input[..frames]]).unwrap();
+                            assert_eq!(pool.channel_dsd(0), dsd);
+                        }
+                        for (actual, expected) in pool.channel_pcm(0).iter().zip(pcm) {
+                            assert_eq!(actual.to_bits(), expected.to_bits());
+                        }
+                        assert_eq!(pool.channel_overload_count(0), modulator.overload_count());
+                    }
+                    pool.reset().unwrap();
+                    cascade.reset();
+                    modulator.reset();
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn test_worker_pool_stereo_pcm_bit_exact() {
     const CHANNELS: usize = 2;
     const STAGES: usize = 4; // 16x
