@@ -35,6 +35,21 @@ fn test_worker_pool_stereo_dsd256_order7_bit_exact() {
 }
 
 #[test]
+fn test_worker_pool_stereo_dsd512_bit_exact() {
+    verify_stereo_dsd_bit_exact(DsdBitRateHz::DSD512, 9, PRESET_BALANCED.preset, 10, 5);
+}
+
+#[test]
+fn test_worker_pool_stereo_dsd512_order7_bit_exact() {
+    verify_stereo_dsd_bit_exact(DsdBitRateHz::DSD512, 9, PRESET_REFERENCE.preset, 10, 7);
+}
+
+#[test]
+fn test_worker_pool_stereo_dsd512_48_bit_exact() {
+    verify_stereo_dsd_bit_exact(DsdBitRateHz::DSD512_48, 9, PRESET_BALANCED.preset, 10, 5);
+}
+
+#[test]
 fn test_worker_pool_stereo_pcm_bit_exact() {
     const CHANNELS: usize = 2;
     const STAGES: usize = 4; // 16x

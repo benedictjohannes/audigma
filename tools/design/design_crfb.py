@@ -1,4 +1,11 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "numpy",
+#     "scipy",
+# ]
+# ///
 """5th-Order and 7th-Order CRFB Delta-Sigma Modulator NTF synthesis & coefficient generator for audigma-dsp (Design.md §4.3).
 
 Uses exact baseband Over-Sampling Ratio:
@@ -219,9 +226,11 @@ def main():
         ("DSD64", 2822400, 1.40),
         ("DSD128", 5644800, 1.40),
         ("DSD256", 11289600, 1.40),
+        ("DSD512", 22579200, 1.40),
         ("DSD64_48", 3072000, 1.40),
         ("DSD128_48", 6144000, 1.40),
         ("DSD256_48", 12288000, 1.40),
+        ("DSD512_48", 24576000, 1.40),
     ]
 
     print("=== 5th-Order CRFB Synthesis Results ===")

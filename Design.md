@@ -170,7 +170,7 @@ decode / unpack / DSD decimation
   - **Unified Offline & Live Acceleration:** The same worker pool architecture powers both live playback and offline conversion (`audigma convert` & `benchmark`), delivering $\sim 1.8\times$ throughput speedup on stereo and scaling linearly across multi-channel audio.
 
 - **Zero Allocation & Generation Tags in Real-Time:** `prepare(spec, config)` resolves all filter stages, coefficients, channel worker threads, and preallocated `rtrb` SPSC ring buffers off the audio thread. `process(input, output)` never allocates on the heap, locks mutexes, or performs I/O. SPSC queue chunks carry a monotonic **generation tag** (`u64`) incremented on every pipeline/format reconfiguration so stale-format blocks in flight are immediately discarded and can never reach a newly configured audio endpoint.
-- **Bounded Tile Streaming:** Upsampling to `DSD256` ($256\times$) expands 1024 input frames into 262,144 samples per channel. To preserve L1/L2 cache locality and small memory footprints, the final $2\times$ interpolation stages stream in small bounded tiles directly into the modulator rather than materializing huge MHz-rate float buffers.
+- **Bounded Tile Streaming:** Upsampling to `DSD256` ($256\times$) and `DSD512` ($512\times$) expands baseband frames into large intermediate buffers (e.g., 262,144 samples per channel at $256\times$). To preserve L1/L2 cache locality and small memory footprints, the final $2\times$ interpolation stages stream in small bounded tiles directly into the modulator rather than materializing huge MHz-rate float buffers.
 
 ---
 
@@ -181,7 +181,7 @@ decode / unpack / DSD decimation
 - The 1-bit quantizer emits `-1.0` or `+1.0`, mapped to `0` and `1` bits during packing.
 - **Baseband Over-Sampling Ratio ($\text{OSR}$):**
   $$\text{OSR} = \frac{f_{\text{bit}}}{2 \cdot B}$$
-  where $B$ is the design audio baseband ($20\text{ kHz}$). Note that DSD's rate multiplier ($64, 128, 256$) is relative to $44.1\text{ kHz}$, **not** $2 \cdot B = 40\text{ kHz}$. Thus, conventional `DSD256` at $11.2896\text{ MHz}$ with $B = 20\text{ kHz}$ has $\text{OSR} = 282.24$ (and `DSD64` has $\text{OSR} = 70.56$). NTF synthesis scripts in `tools/design/` must always pass the exact $\text{OSR} = f_{\text{bit}} / (2 \cdot B)$ to Schreier synthesis routines.
+  where $B$ is the design audio baseband ($20\text{ kHz}$). Note that DSD's rate multiplier ($64, 128, 256, 512$) is relative to $44.1\text{ kHz}$, **not** $2 \cdot B = 40\text{ kHz}$. Thus, conventional `DSD256` at $11.2896\text{ MHz}$ with $B = 20\text{ kHz}$ has $\text{OSR} = 282.24$, `DSD512` at $22.5792\text{ MHz}$ has $\text{OSR} = 564.48$ (and `DSD64` has $\text{OSR} = 70.56$). NTF synthesis scripts in `tools/design/` must always pass the exact $\text{OSR} = f_{\text{bit}} / (2 \cdot B)$ to Schreier synthesis routines.
 - **Hardware FTZ/DAZ:** Inside the 1-bit DSM loop, feedback is strictly `{-1.0, +1.0}`, keeping integrators excited. However, upstream PCM FIR/IIR stages fed digital silence can decay into subnormal floats and cause severe CPU tail-latency spikes. Every DSP worker thread sets hardware **Flush-To-Zero (FTZ)** and **Denormals-Are-Zero (DAZ)** (`MXCSR` on `x86_64`, `FPCR` on `aarch64`) on thread entry.
 
 ### 4.2 Multistage Resampling & Filter Presets
@@ -199,7 +199,7 @@ decode / unpack / DSD decimation
 | `low-latency` | Declared per rate | $\ge 100\text{ dB}$ | Low group-delay interactive desktop audio |
 
 ### 4.3 1-Bit Delta-Sigma Modulator (CRFB)
-- **Topology:** `f64` 5th-order Cascade of Resonators with Feedback (**CRFB**) as the baseline modulator for `DSD64`, `DSD128`, and `DSD256` (with 7th-order CRFB optional for higher OSRs).
+- **Topology:** `f64` 5th-order Cascade of Resonators with Feedback (**CRFB**) as the baseline modulator for `DSD64`, `DSD128`, `DSD256`, and `DSD512` (with 7th-order CRFB optional for higher OSRs).
 - **NTF Synthesis:** Offline Schreier-style NTF synthesis (`tools/design/`) using $\text{OSR} = f_{\text{bit}} / (2 \cdot B)$ with optimized resonator zeros in the 0–20 kHz audio band and initial out-of-band gain search around $H_\infty \approx 1.5$, scaled for dynamic range and verified against maximum stable input amplitude ($L\text{ dBFS}$) across DC, coherent tones, multitone bursts, and silence.
 - **Dither:** Optional TPDF dither injected prior to the 1-bit quantizer to suppress idle tones during low-level signals or silence.
 - **Baseline Headroom:** Every modulator table specifies its verified input limit $L\text{ dBFS}$ and required baseline headroom in dB (e.g., `-6.0 dB` to `-3.5 dB`) so `config explain` reports the exact total attenuation (`preamp_db + volume_db + profile_headroom_db`).
@@ -237,7 +237,7 @@ The engine state machine runs through:
 | `DSD256` | `11,289,600` | `705,600` | `352,800` | `1,411,200` |
 | `DSD512` | `22,579,200` | `1,411,200` | `705,600` | `2,822,400` |
 
-*(For 48 kHz-family DSD, multiply `48,000` by `64/128/256/512`; e.g., `DSD256/48 = 12,288,000 Hz`).*
+*(For 48 kHz-family DSD, multiply `48,000` by `64/128/256/512`; e.g., `DSD256/48 = 12,288,000 Hz`, `DSD512/48 = 24,576,000 Hz`).*
 
 ### 5.2 Exact Bit-Packing Formats (`audigma-format`)
 

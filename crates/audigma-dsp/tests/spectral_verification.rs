@@ -15,9 +15,11 @@ fn test_all_rates_silence_stability() {
         DsdBitRateHz::DSD64,
         DsdBitRateHz::DSD128,
         DsdBitRateHz::DSD256,
+        DsdBitRateHz::DSD512,
         DsdBitRateHz::DSD64_48,
         DsdBitRateHz::DSD128_48,
         DsdBitRateHz::DSD256_48,
+        DsdBitRateHz::DSD512_48,
     ];
 
     for rate in rates {
@@ -68,9 +70,11 @@ fn test_all_rates_dc_bias_stability() {
         DsdBitRateHz::DSD64,
         DsdBitRateHz::DSD128,
         DsdBitRateHz::DSD256,
+        DsdBitRateHz::DSD512,
         DsdBitRateHz::DSD64_48,
         DsdBitRateHz::DSD128_48,
         DsdBitRateHz::DSD256_48,
+        DsdBitRateHz::DSD512_48,
     ];
 
     for rate in rates {
@@ -188,9 +192,11 @@ fn test_all_rates_silence_stability_order7() {
         DsdBitRateHz::DSD64,
         DsdBitRateHz::DSD128,
         DsdBitRateHz::DSD256,
+        DsdBitRateHz::DSD512,
         DsdBitRateHz::DSD64_48,
         DsdBitRateHz::DSD128_48,
         DsdBitRateHz::DSD256_48,
+        DsdBitRateHz::DSD512_48,
     ];
 
     for rate in rates {
@@ -279,6 +285,55 @@ fn test_cascade_and_modulator7_end_to_end_presets() {
         );
         for &s in modulator.state_slice() {
             assert!(s.abs() < CrfbModulator7::STABILITY_THRESHOLD);
+        }
+    }
+}
+
+#[test]
+fn test_cascade_and_modulator_dsd512_end_to_end() {
+    let _ftz = ScopedFtzDaz::new();
+
+    for order in [5, 7] {
+        // Test 512x upsampling (9 stages) from 44.1 kHz baseband to DSD512 (22.5792 MHz)
+        let mut cascade = HalfBandCascade::new(
+            FilterPreset::Balanced,
+            FilterPhase::Linear,
+            Apodization::Off,
+            9,
+            64,
+        );
+        let mut modulator = Modulator::new(
+            order,
+            DsdBitRateHz::DSD512,
+            DitherType::Tpdf,
+            OverloadPolicy::MuteRecover,
+        )
+        .unwrap();
+
+        let mut bb_input = [0.0f64; 64];
+        let amp = 10.0_f64.powf(-6.0 / 20.0);
+        for (i, s) in bb_input.iter_mut().enumerate() {
+            let t = i as f64 / 44_100.0;
+            *s = amp * (2.0 * PI * 1000.0 * t).sin();
+        }
+
+        let mut exp_scratch = vec![0.0f64; 64 * 512];
+        let mut tile_bytes = vec![0u8; (64 * 512) / 8];
+
+        for _ in 0..20 {
+            cascade.process_tile(&bb_input, &mut exp_scratch).unwrap();
+            modulator
+                .process_tile_bytes(&exp_scratch, &mut tile_bytes)
+                .unwrap();
+        }
+
+        assert_eq!(
+            modulator.overload_count(),
+            0,
+            "DSD512 order {order} overloaded"
+        );
+        for &s in modulator.state_slice() {
+            assert!(s.abs() < CrfbModulator::STABILITY_THRESHOLD);
         }
     }
 }

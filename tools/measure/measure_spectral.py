@@ -263,9 +263,11 @@ def main():
         ("dsd64", 2822400, "44.1k"),
         ("dsd128", 5644800, "44.1k"),
         ("dsd256", 11289600, "44.1k"),
+        ("dsd512", 22579200, "44.1k"),
         ("dsd64_48", 3072000, "48k"),
         ("dsd128_48", 6144000, "48k"),
         ("dsd256_48", 12288000, "48k"),
+        ("dsd512_48", 24576000, "48k"),
     ]
 
     # -------------------------------------------------------------
@@ -337,13 +339,14 @@ def main():
             print(
                 f"  [Order {order}] {res['rate']:10s} ({family}): Measured SNR = {res['snr_db']:6.2f} dB{theo_str}, "
                 f"SINAD = {res['sinad_db']:6.2f} dB, THD = {res['thd_db']:6.2f} dB, "
+                f"Ultra1 = {res['ultra1_db']:6.2f} dB, Ultra2 = {res['ultra2_db']:6.2f} dB, "
                 f"Max |x_{order}| = {res['last_state']:.4f}"
             )
 
     # -------------------------------------------------------------
     # 2. End-to-End Cascade Suite (across presets and orders)
     # -------------------------------------------------------------
-    cascade_rates = ["dsd64", "dsd128", "dsd256"]
+    cascade_rates = ["dsd64", "dsd128", "dsd256", "dsd512"]
     presets = ["balanced", "reference", "low-latency"]
     cascade_results = {5: [], 7: []}
     print("\n=== 2. End-to-End Cascade + Modulator (-6 dBFS 1 kHz sine) ===")
@@ -386,6 +389,7 @@ def main():
                 print(
                     f"  [Order {order}] {res['rate']:7s} [{preset:11s}]: SNR = {res['snr_db']:6.2f} dB, "
                     f"SINAD = {res['sinad_db']:6.2f} dB, THD = {res['thd_db']:6.2f} dB, "
+                    f"Ultra1 = {res['ultra1_db']:6.2f} dB, Ultra2 = {res['ultra2_db']:6.2f} dB, "
                     f"Stages = {res['stages']}"
                 )
 
@@ -452,7 +456,7 @@ def main():
             })
 
         # Multitone burst
-        for rate_str in ["dsd64", "dsd128", "dsd256"]:
+        for rate_str in ["dsd64", "dsd128", "dsd256", "dsd512"]:
             json_out = TMP_DIR / f"multitone_{rate_str}_ord{order}.json"
             cmd = [
                 str(harness_bin),
@@ -475,7 +479,7 @@ def main():
             })
 
         # Overload recovery
-        for rate_str in ["dsd64", "dsd128", "dsd256"]:
+        for rate_str in ["dsd64", "dsd128", "dsd256", "dsd512"]:
             bin_out = TMP_DIR / f"overload_{rate_str}_ord{order}.bin"
             json_out = TMP_DIR / f"overload_{rate_str}_ord{order}.json"
             cmd = [
@@ -507,7 +511,7 @@ def main():
     print("\n=== 4. Real-Time CPU Throughput & Deadline Budget ===")
     for order in [5, 7]:
         print(f"\n>> Benchmark Order {order}:")
-        for rate_str in ["dsd64", "dsd128", "dsd256"]:
+        for rate_str in ["dsd64", "dsd128", "dsd256", "dsd512"]:
             for preset in ["balanced", "reference"]:
                 json_out = TMP_DIR / f"bench_{rate_str}_{preset}_ord{order}.json"
                 cmd = [
@@ -571,7 +575,7 @@ def generate_markdown_report(
 ## 1. Executive Summary
 
 This report delivers mathematical and empirical proof verifying the pure-Rust DSP implementation in `crates/audigma-dsp` and `crates/audigma-engine`:
-- **5th-Order & 7th-Order CRFB Modulators:** Verified across all 6 production rate configurations (DSD64, DSD128, DSD256 across both 44.1 kHz and 48 kHz rate families).
+- **5th-Order & 7th-Order CRFB Modulators:** Verified across all 8 production rate configurations (DSD64, DSD128, DSD256, DSD512 across both 44.1 kHz and 48 kHz rate families).
 - **Staged 2x Half-Band FIR Cascade:** Verified across all three filter presets (`balanced`, `reference`, `low-latency`) feeding both 5th-order and 7th-order modulators.
 - **Stability Envelope:** Integrators remain strictly bounded across digital silence, DC offsets (+0.5), high-crest multitone bursts, and intentional overload spikes with zero runaway under both modulator architectures.
 - **CPU Throughput:** Sustained execution exceeds the >= 2x real-time specification for both 5th and 7th order (achieving **{min_tp:.1f}x to {max_tp:.1f}x real-time**), and **p99.9 block latency stays under {max_p999_budget:.1f}% of the real-time budget** (goal: <= 70%).
@@ -589,9 +593,11 @@ This report delivers mathematical and empirical proof verifying the pure-Rust DS
     d64_5 = get_direct(5, "dsd64")
     d128_5 = get_direct(5, "dsd128")
     d256_5 = get_direct(5, "dsd256")
+    d512_5 = get_direct(5, "dsd512")
     d64_7 = get_direct(7, "dsd64")
     d128_7 = get_direct(7, "dsd128")
     d256_7 = get_direct(7, "dsd256")
+    d512_7 = get_direct(7, "dsd512")
 
     def format_matrix_cell(direct_res):
         if not direct_res:
@@ -618,6 +624,7 @@ This report delivers mathematical and empirical proof verifying the pure-Rust DS
 | **DSD64 (OSR ~70.6)** | {format_matrix_cell(d64_5)} | {format_matrix_cell(d64_7)} (dither-limited) | **5th-order** (optimal for low OSR) |
 | **DSD128 (OSR ~141.1)** | {format_matrix_cell(d128_5)} | {format_matrix_cell(d128_7)} | Either (7th offers steeper transition) |
 | **DSD256 (OSR ~282.2)** | {format_matrix_cell(d256_5)} | {format_matrix_cell(d256_7)} | **7th-order** (state-of-the-art dynamic range) |
+| **DSD512 (OSR ~564.5)** | {format_matrix_cell(d512_5)} | {format_matrix_cell(d512_7)} | **7th-order** (maximum in-band dynamic range) |
 
 > [!NOTE]
 > All measurements in this report evaluate the **compiled Rust DSP code** against live theoretical oracle synthesis from `tools/design/design_crfb.py`.
@@ -635,8 +642,8 @@ Test conditions: Direct coherent 1 kHz sine at -6.0 dBFS (f_tone = k * f_bit / N
         report += f"""
 ### 2.{order // 3} {order}th-Order CRFB Modulator
 
-| Target Rate | Family | f_bit (Hz) | OSR | Tone (dBFS) | Theoretical Oracle SNR | Measured In-Band SNR | Delta | SINAD (dB) | THD (dB) | Ultrasonic Band 1 (20–100 kHz) | Peak State (x{order}) | Verdict |
-|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|:---:|
+| Target Rate | Family | f_bit (Hz) | OSR | Tone (dBFS) | Theoretical Oracle SNR | Measured In-Band SNR | Delta | SINAD (dB) | THD (dB) | Ultrasonic Band 1 (20–100 kHz) | Ultrasonic Band 2 (>100 kHz) | Peak State (x{order}) | Verdict |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|:---:|
 """
         for r in direct_results[order]:
             is_stable = r["overload_count"] == 0 and r["last_state"] < 50.0
@@ -658,14 +665,14 @@ Test conditions: Direct coherent 1 kHz sine at -6.0 dBFS (f_tone = k * f_bit / N
             report += (
                 f"| `{r['rate']}` | {r['family']} | {r['f_bit_hz']:,} | {r['osr']:.1f} | "
                 f"{r['tone_dbfs']:.2f} | {theo_snr_str} | **{r['snr_db']:.2f} dB** | {delta_str} | "
-                f"{r['sinad_db']:.2f} | {r['thd_db']:.2f} | {r['ultra1_db']:.2f} dB | {r['last_state']:.4f} | {verdict} |\n"
+                f"{r['sinad_db']:.2f} | {r['thd_db']:.2f} | {r['ultra1_db']:.2f} dB | {r['ultra2_db']:.2f} dB | {r['last_state']:.4f} | {verdict} |\n"
             )
 
     report += r"""
 > [!TIP]
 > **Order Comparison & Architectural Guidelines:**
 > - At low OSR (~70.6, DSD64), the steep 7th-order out-of-band gain rise causes quantizer dither noise to enter the audio band; **5th-order remains the recommended production configuration for DSD64**.
-> - At higher OSRs (>= 141.1, DSD128 & DSD256), the 7th-order modulator exhibits aggressive steep noise shaping, achieving higher ultrasonic attenuation in Band 1 while remaining strictly stable.
+> - At higher OSRs (>= 141.1, DSD128, DSD256 & DSD512), the 7th-order modulator exhibits aggressive steep noise shaping, achieving higher ultrasonic attenuation in Band 1 while remaining strictly stable.
 
 ---
 
@@ -678,8 +685,8 @@ Test conditions: Baseband PCM 1 kHz coherent tone at -6.0 dBFS upsampled via `Ha
         report += f"""
 ### 3.{order // 3} {order}th-Order Modulator Pipeline
 
-| Target Rate | Preset | Cascade Stages | In-Band SNR (dB) | SINAD (dB) | THD (dB) | Ultrasonic Band 1 | Peak State (x{order}) | Verdict |
-|---|---|:---:|---:|---:|---:|---:|---:|:---:|
+| Target Rate | Preset | Cascade Stages | In-Band SNR (dB) | SINAD (dB) | THD (dB) | Ultrasonic Band 1 | Ultrasonic Band 2 | Peak State (x{order}) | Verdict |
+|---|---|:---:|---:|---:|---:|---:|---:|---:|:---:|
 """
         for r in cascade_results[order]:
             is_pass = r["overload_count"] == 0 and r["last_state"] < 50.0 and r["snr_db"] > 50.0
@@ -690,7 +697,7 @@ Test conditions: Baseband PCM 1 kHz coherent tone at -6.0 dBFS upsampled via `Ha
             report += (
                 f"| `{r['rate']}` | `{r['preset']}` | {r['stages']} | "
                 f"**{r['snr_db']:.2f}** | {r['sinad_db']:.2f} | {r['thd_db']:.2f} | "
-                f"{r['ultra1_db']:.2f} dB | {r['last_state']:.4f} | {verdict} |\n"
+                f"{r['ultra1_db']:.2f} dB | {r['ultra2_db']:.2f} dB | {r['last_state']:.4f} | {verdict} |\n"
             )
 
     report += r"""
@@ -824,8 +831,8 @@ Benchmark parameters: 2,000 blocks of 64 baseband frames (1.451 ms audio duratio
     # Dynamic Invariant 1: OSR calculation verification across all tested direct rates
     all_direct = direct_results[5] + direct_results[7]
     osr_compliant = all(abs(r["osr"] - (r["f_bit_hz"] / 40000.0)) < 1e-4 for r in all_direct)
-    osr_44k_str = ", ".join(f"{r['osr']:.2f}" for r in direct_results[5][:3])
-    osr_48k_str = ", ".join(f"{r['osr']:.2f}" for r in direct_results[5][3:6])
+    osr_44k_str = ", ".join(f"{r['osr']:.2f}" for r in direct_results[5] if r["family"] == "44.1k")
+    osr_48k_str = ", ".join(f"{r['osr']:.2f}" for r in direct_results[5] if r["family"] == "48k")
     osr_val_str = f"44.1k: {osr_44k_str} | 48k: {osr_48k_str} (f_bit / 40 kHz)"
     if not osr_compliant:
         failed_checks.append("Baseband OSR Calculation invariant")

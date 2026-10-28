@@ -1,4 +1,11 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "numpy",
+#     "scipy",
+# ]
+# ///
 """Export verified FIR filter and CRFB modulator coefficient tables to audigma-dsp.
 
 Maps to Design.md §4.2, §4.3, and Plan.md Phase 1.
@@ -309,9 +316,11 @@ mod tests {
         assert!(get_crfb_coefficients(DsdBitRateHz::DSD64).is_some());
         assert!(get_crfb_coefficients(DsdBitRateHz::DSD128).is_some());
         assert!(get_crfb_coefficients(DsdBitRateHz::DSD256).is_some());
+        assert!(get_crfb_coefficients(DsdBitRateHz::DSD512).is_some());
         assert!(get_crfb_coefficients(DsdBitRateHz::DSD64_48).is_some());
         assert!(get_crfb_coefficients(DsdBitRateHz::DSD128_48).is_some());
         assert!(get_crfb_coefficients(DsdBitRateHz::DSD256_48).is_some());
+        assert!(get_crfb_coefficients(DsdBitRateHz::DSD512_48).is_some());
 
         let dsd256 = get_crfb_coefficients(DsdBitRateHz::DSD256).unwrap();
         assert!(dsd256.g1 > 0.0);
@@ -322,12 +331,23 @@ mod tests {
             assert!(a_val > 0.0);
         }
 
+        let dsd512 = get_crfb_coefficients(DsdBitRateHz::DSD512).unwrap();
+        assert!(dsd512.g1 > 0.0);
+        assert!(dsd512.g2 > 0.0);
+        assert!(dsd512.b1 > 0.0);
+        assert_eq!(dsd512.a.len(), 5);
+        for &a_val in &dsd512.a {
+            assert!(a_val > 0.0);
+        }
+
         assert!(get_crfb7_coefficients(DsdBitRateHz::DSD64).is_some());
         assert!(get_crfb7_coefficients(DsdBitRateHz::DSD128).is_some());
         assert!(get_crfb7_coefficients(DsdBitRateHz::DSD256).is_some());
+        assert!(get_crfb7_coefficients(DsdBitRateHz::DSD512).is_some());
         assert!(get_crfb7_coefficients(DsdBitRateHz::DSD64_48).is_some());
         assert!(get_crfb7_coefficients(DsdBitRateHz::DSD128_48).is_some());
         assert!(get_crfb7_coefficients(DsdBitRateHz::DSD256_48).is_some());
+        assert!(get_crfb7_coefficients(DsdBitRateHz::DSD512_48).is_some());
 
         let dsd256_7 = get_crfb7_coefficients(DsdBitRateHz::DSD256).unwrap();
         assert!(dsd256_7.g1 > 0.0);
@@ -336,6 +356,16 @@ mod tests {
         assert!(dsd256_7.b1 > 0.0);
         assert_eq!(dsd256_7.a.len(), 7);
         for &a_val in &dsd256_7.a {
+            assert!(a_val > 0.0);
+        }
+
+        let dsd512_7 = get_crfb7_coefficients(DsdBitRateHz::DSD512).unwrap();
+        assert!(dsd512_7.g1 > 0.0);
+        assert!(dsd512_7.g2 > 0.0);
+        assert!(dsd512_7.g3 > 0.0);
+        assert!(dsd512_7.b1 > 0.0);
+        assert_eq!(dsd512_7.a.len(), 7);
+        for &a_val in &dsd512_7.a {
             assert!(a_val > 0.0);
         }
     }
@@ -468,9 +498,11 @@ def main():
         ("DSD64", 2822400),
         ("DSD128", 5644800),
         ("DSD256", 11289600),
+        ("DSD512", 22579200),
         ("DSD64_48", 3072000),
         ("DSD128_48", 6144000),
         ("DSD256_48", 12288000),
+        ("DSD512_48", 24576000),
     ]
 
     print("Synthesizing 5th-Order CRFB Modulator Coefficients...")

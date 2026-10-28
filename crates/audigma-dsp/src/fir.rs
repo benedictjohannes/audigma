@@ -3,8 +3,8 @@
 //! Provides:
 //! - `HalfBandStage`: Zero-allocation 2x upsampler exploiting center-tap delay identity
 //!   and linear-phase odd-tap symmetry (4x reduction in arithmetic operations).
-//! - `HalfBandCascade`: Staged 2^K power-of-two interpolation chain (up to 256x for DSD256)
-//!   using bounded tile streaming to keep intermediate buffers strictly within CPU L1 cache.
+//! - `HalfBandCascade`: Staged 2^K power-of-two interpolation chain (up to 512x for DSD512)
+//!   using bounded tile streaming to limit intermediate-buffer memory.
 //! - `PolyphaseResampler`: Kaiser-windowed sinc polyphase resampler for cross-family rational
 //!   conversion (44.1k <-> 48k via 160 phases) and sub-sample ASRC drift tracking (256 phases).
 
@@ -83,6 +83,21 @@ impl HalfBandStage {
 
     /// Processes a slice of input samples, writing exactly `2 * input.len()` samples into `output`.
     pub fn process_tile(&mut self, input: &[f64], output: &mut [f64]) -> Result<(), FirError> {
+        // The high-rate stages use these short kernels. Dispatch once per tile so
+        // LLVM can unroll their tap loops without changing accumulation order.
+        match self.num_odd_taps {
+            6 => self.process_tile_kernel::<6>(input, output),
+            7 => self.process_tile_kernel::<7>(input, output),
+            8 => self.process_tile_kernel::<8>(input, output),
+            _ => self.process_tile_kernel::<0>(input, output),
+        }
+    }
+
+    fn process_tile_kernel<const K: usize>(
+        &mut self,
+        input: &[f64],
+        output: &mut [f64],
+    ) -> Result<(), FirError> {
         let required_out = input.len() * 2;
         if output.len() < required_out {
             return Err(FirError::OutputBufferTooSmall {
@@ -91,7 +106,7 @@ impl HalfBandStage {
             });
         }
 
-        let k = self.num_odd_taps;
+        let k = if K == 0 { self.num_odd_taps } else { K };
         let window_len = 2 * k;
 
         for (in_idx, &sample) in input.iter().enumerate() {
@@ -108,7 +123,8 @@ impl HalfBandStage {
             let pre_ptr = &window[k - 1] as *const f64;
             let post_ptr = &window[k] as *const f64;
             let mut odd_acc = 0.0;
-            for (i, &tap) in self.taps.iter().enumerate() {
+            for i in 0..k {
+                let tap = self.taps[i];
                 // Safety: i < k, so pre_ptr.sub(i) >= window[0] and post_ptr.add(i) <= window[2k - 1]
                 let s_pre = unsafe { *pre_ptr.sub(i) };
                 let s_post = unsafe { *post_ptr.add(i) };
@@ -289,7 +305,8 @@ impl CascadeStage {
 
 /// Multistage power-of-two ($2^K$) interpolation cascade using bounded tile streaming.
 ///
-/// Designed to keep all intermediate upsampled buffers within the CPU L1 data cache.
+/// Intermediate buffer sizes are bounded by the configured input tile size and
+/// rate multiplier; cache residency depends on those sizes and the host CPU.
 /// Stage 0 uses steep transition taps, while Stage 1+ use relaxed transition taps (`Design.md §4.2`).
 #[derive(Debug, Clone)]
 pub struct HalfBandCascade {
@@ -306,7 +323,7 @@ impl HalfBandCascade {
     /// - `preset`: Filter preset determining Stage 0 and Stage 1+ coefficients.
     /// - `phase`: Linear- or minimum-phase coefficient family.
     /// - `apodization`: Off (brick-wall) or gentle Stage 0 roll-off.
-    /// - `stages`: Number of 2x stages (e.g. 8 stages for 256x upsampling to DSD256).
+    /// - `stages`: Number of 2x stages (e.g. 8 stages for 256x upsampling to DSD256, 9 stages for 512x to DSD512).
     /// - `max_input_frames`: Maximum baseband frames processed in a single tile (e.g. 32 to 1024).
     pub fn new(
         preset: FilterPreset,
@@ -330,13 +347,24 @@ impl HalfBandCascade {
             }
         }
 
-        let max_expanded_len = max_input_frames * (1 << stages);
+        // The final stage writes directly to the caller's output. Size each
+        // ping-pong buffer only for the largest intermediate it actually holds.
+        let mut scratch_a_len = 0;
+        let mut scratch_b_len = 0;
+        for stage_idx in 0..stages.saturating_sub(1) {
+            let len = max_input_frames * (1 << (stage_idx + 1));
+            if stage_idx % 2 == 0 {
+                scratch_a_len = len;
+            } else {
+                scratch_b_len = len;
+            }
+        }
         Self {
             stages: stage_vec,
             num_stages: stages,
             max_input_frames,
-            scratch_a: vec![0.0; max_expanded_len],
-            scratch_b: vec![0.0; max_expanded_len],
+            scratch_a: vec![0.0; scratch_a_len],
+            scratch_b: vec![0.0; scratch_b_len],
         }
     }
 
@@ -1043,6 +1071,89 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_short_halfband_kernels_bit_exact() {
+        for preset in [
+            FilterPreset::LowLatency,
+            FilterPreset::Balanced,
+            FilterPreset::Reference,
+        ] {
+            let taps = get_halfband_stage1_taps(preset);
+            let mut specialized = HalfBandStage::new(taps);
+            let mut generic = specialized.clone();
+            let input: Vec<f64> = (0..257)
+                .map(|i| ((i * 7919 % 65521) as f64 / 65521.0 - 0.5) * 0.9)
+                .collect();
+            // Irregular tile boundaries exercise history wraparound as well as
+            // all three fixed tap counts, including empty and oversized output.
+            for tile in std::iter::once(&input[..0]).chain(input.chunks(13)) {
+                let mut actual = vec![-1.0; tile.len() * 2 + 3];
+                let mut expected = actual.clone();
+                specialized.process_tile(tile, &mut actual).unwrap();
+                generic
+                    .process_tile_kernel::<0>(tile, &mut expected)
+                    .unwrap();
+                for (a, b) in actual.iter().zip(&expected) {
+                    assert_eq!(a.to_bits(), b.to_bits(), "preset {preset:?}");
+                }
+            }
+            assert_eq!(specialized.head, generic.head);
+            assert_eq!(specialized.history, generic.history);
+            assert!(matches!(
+                specialized.process_tile(&[1.0], &mut [0.0]),
+                Err(FirError::OutputBufferTooSmall { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn test_cascade_scratch_sizes_and_tile_boundaries() {
+        let input: Vec<f64> = (0..37).map(|i| (i as f64 * 0.17).sin() * 0.4).collect();
+        for stages in 0..=9 {
+            let mut tiled = HalfBandCascade::new(
+                FilterPreset::Balanced,
+                FilterPhase::Linear,
+                Apodization::Off,
+                stages,
+                13,
+            );
+            let expected_a = (0..stages.saturating_sub(1))
+                .filter(|i| i % 2 == 0)
+                .map(|i| 13 * (1 << (i + 1)))
+                .max()
+                .unwrap_or(0);
+            let expected_b = (0..stages.saturating_sub(1))
+                .filter(|i| i % 2 == 1)
+                .map(|i| 13 * (1 << (i + 1)))
+                .max()
+                .unwrap_or(0);
+            assert_eq!(tiled.scratch_a.len(), expected_a);
+            assert_eq!(tiled.scratch_b.len(), expected_b);
+
+            let mut whole = HalfBandCascade::new(
+                FilterPreset::Balanced,
+                FilterPhase::Linear,
+                Apodization::Off,
+                stages,
+                input.len(),
+            );
+            let multiplier = tiled.rate_multiplier();
+            let mut actual = vec![0.0; input.len() * multiplier];
+            let mut expected = actual.clone();
+            whole.process_tile(&input, &mut expected).unwrap();
+            assert_eq!(tiled.process_tile(&[], &mut []).unwrap(), 0);
+            for (tile, out) in input.chunks(13).zip(actual.chunks_mut(13 * multiplier)) {
+                assert_eq!(tiled.process_tile(tile, out).unwrap(), out.len());
+            }
+            for (a, b) in actual.iter().zip(&expected) {
+                assert_eq!(a.to_bits(), b.to_bits(), "stages {stages}");
+            }
+            tiled.reset();
+            assert!(tiled.scratch_a.iter().all(|&s| s == 0.0));
+            assert!(tiled.scratch_b.iter().all(|&s| s == 0.0));
+        }
+    }
+
+    #[test]
     fn test_halfband_stage_dc_gain_and_ramp() {
         let taps = get_halfband_stage0_taps(FilterPreset::Balanced);
         let mut stage = HalfBandStage::new(taps);
@@ -1080,6 +1191,25 @@ mod tests {
         let mut output = [0.0; 4096];
         let written = cascade.process_tile(&input, &mut output).unwrap();
         assert_eq!(written, 4096);
+    }
+
+    #[test]
+    fn test_halfband_cascade_512x_dsd512() {
+        let mut cascade = HalfBandCascade::new(
+            FilterPreset::Balanced,
+            FilterPhase::Linear,
+            Apodization::Off,
+            9,
+            32,
+        );
+        assert_eq!(cascade.rate_multiplier(), 512);
+        assert_eq!(cascade.num_stages(), 9);
+
+        // 16 input frames -> 16 * 512 = 8192 samples
+        let input = [0.5; 16];
+        let mut output = [0.0; 8192];
+        let written = cascade.process_tile(&input, &mut output).unwrap();
+        assert_eq!(written, 8192);
     }
 
     #[test]

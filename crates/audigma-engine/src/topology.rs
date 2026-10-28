@@ -175,6 +175,49 @@ mod tests {
     }
 
     #[test]
+    fn test_topology_same_family_dsd512() {
+        let in_rate = PcmRateHz::PCM_44100;
+        let target = TargetRateSpec::Dsd {
+            bit_rate: DsdBitRateHz::DSD512, // 22.5792 MHz = 512x 44.1k
+        };
+        let topo = PipelineTopology::resolve(in_rate, target).unwrap();
+        assert_eq!(topo.intermediate_rate, in_rate);
+        assert_eq!(topo.cascade_stages, 9); // 2^9 = 512
+        assert_eq!(topo.rate_multiplier, 512);
+        assert!(!topo.requires_rational_src);
+        assert!(topo.is_dsd());
+    }
+
+    #[test]
+    fn test_topology_same_family_dsd512_48() {
+        let in_rate = PcmRateHz::PCM_48000;
+        let target = TargetRateSpec::Dsd {
+            bit_rate: DsdBitRateHz::DSD512_48, // 24.576 MHz = 512x 48k
+        };
+        let topo = PipelineTopology::resolve(in_rate, target).unwrap();
+        assert_eq!(topo.intermediate_rate, in_rate);
+        assert_eq!(topo.cascade_stages, 9); // 2^9 = 512
+        assert_eq!(topo.rate_multiplier, 512);
+        assert!(!topo.requires_rational_src);
+        assert!(topo.is_dsd());
+    }
+
+    #[test]
+    fn test_topology_cross_family_dsd512_matched_tier() {
+        // 192k (48-family) -> DSD512 (44.1-family, 22.5792 MHz)
+        let in_rate = PcmRateHz::PCM_192000;
+        let target = TargetRateSpec::Dsd {
+            bit_rate: DsdBitRateHz::DSD512,
+        };
+        let topo = PipelineTopology::resolve(in_rate, target).unwrap();
+        assert_eq!(topo.intermediate_rate, PcmRateHz::PCM_176400); // matched tier
+        assert_eq!(topo.cascade_stages, 7); // 22.5792M / 176.4k = 128 = 2^7
+        assert_eq!(topo.rate_multiplier, 128);
+        assert!(topo.requires_rational_src);
+        assert!(topo.is_dsd());
+    }
+
+    #[test]
     fn test_topology_cross_family_dsd_matched_tier() {
         // 192k (48-family) -> DSD256 (44.1-family)
         let in_rate = PcmRateHz::PCM_192000;

@@ -1,4 +1,5 @@
 use audigma_dsp::config::TargetFormat;
+use audigma_dsp::rates::DsdMultiplier;
 use audigma_dsp::{DsdBitRateHz, PcmRateHz};
 use audigma_engine::traits::{AudioInput, MockAudioInput, SeekableSink, StreamSink};
 use audigma_engine::{EngineError, OfflinePipeline};
@@ -65,6 +66,46 @@ fn test_offline_pipeline_dsf_conversion_trim_to_duration() {
 
     // In TrimToDuration, exact sample count matches input duration (total_frames * 256)
     let expected_dsd_samples = total_frames * 256;
+    assert_eq!(header.sample_count_per_channel, expected_dsd_samples);
+}
+
+#[test]
+fn test_offline_pipeline_dsf_conversion_dsd512() {
+    let in_rate = PcmRateHz::PCM_44100;
+    let (left, right) = generate_synthetic_stereo_sine(in_rate, 0.05, 1000.0, 0.5);
+    let total_frames = left.len() as u64;
+
+    let info = AudioStreamInfo::new_pcm(in_rate, 2, Some(total_frames), Some(16));
+
+    let mut input = MockAudioInput::new(info, left, right, true);
+    let mut out_buffer = Cursor::new(Vec::new());
+
+    let mut settings = Settings::default_offline(OutputContainer::Dsf);
+    settings.target.as_mut().unwrap().dsd_rate = Some(DsdMultiplier::Dsd512);
+    let pipeline = OfflinePipeline::prepare(settings, in_rate).expect("prepare failed");
+
+    let report = pipeline
+        .run(&mut input, Box::new(SeekableSink(&mut out_buffer)))
+        .expect("conversion run failed");
+
+    assert_eq!(report.input_rate, in_rate);
+    assert_eq!(report.target_format, TargetFormat::Dsd);
+    assert_eq!(report.total_input_frames, total_frames);
+    assert_eq!(report.overload_count, 0);
+
+    // Verify DSF container bytes
+    let dsf_bytes = out_buffer.into_inner();
+    assert!(dsf_bytes.len() > 92);
+    assert_eq!(&dsf_bytes[0..4], b"DSD ");
+
+    // Parse DSF header via audigma_format
+    let (header, _, _) =
+        audigma_format::dsf::parse_stereo_dsf_file(&dsf_bytes).expect("valid DSF file");
+    assert_eq!(header.channels, 2);
+    assert_eq!(header.bit_rate.get(), 22_579_200); // DSD512
+
+    // In TrimToDuration, exact sample count matches input duration (total_frames * 512)
+    let expected_dsd_samples = total_frames * 512;
     assert_eq!(header.sample_count_per_channel, expected_dsd_samples);
 }
 

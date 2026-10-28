@@ -20,6 +20,18 @@ use thiserror::Error;
 /// Maximum integrator state magnitude before triggering overload protection.
 pub const STABILITY_THRESHOLD: f64 = 50.0;
 
+/// Maximum magnitude, preserving a NaN in the right-hand operand.
+///
+/// Unlike `f64::max`, this allows a hardware maximum without the extra
+/// handling needed to discard NaNs. The final reduction operand must
+/// be the last integrator, to which any NaN in the recurrence propagates.
+#[inline(always)]
+fn max_state_magnitude(a: f64, b: f64) -> f64 {
+    let a = a.abs();
+    let b = b.abs();
+    if a > b { a } else { b }
+}
+
 /// Modulator error conditions.
 #[derive(Debug, Error, PartialEq)]
 pub enum ModulatorError {
@@ -81,11 +93,8 @@ impl TpdfDither {
 
         // Two uniform random variables in [-0.5, 0.5]
         const U32_INV: f64 = 1.0 / 4_294_967_296.0;
-        let u1 = (r1 as f64) * U32_INV - 0.5;
-        let u2 = (r2 as f64) * U32_INV - 0.5;
-
-        // Sum of two uniforms gives triangular PDF
-        (u1 + u2) * self.amplitude
+        let sum = (r1 as u64 + r2 as u64) as f64;
+        (sum * U32_INV - 1.0) * self.amplitude
     }
 }
 
@@ -139,18 +148,27 @@ impl CrfbCore for CrfbCore5 {
 
     #[inline(always)]
     fn step(c: &Self::Coeffs, s: &Self::State, u: f64, v: f64) -> (Self::State, bool) {
-        let x1 = s[0] - c.g1 * s[1] + c.b1 * u - c.a[0] * v;
-        let x2 = s[1] + x1 - c.a[1] * v;
-        let x3 = s[2] - c.g2 * s[3] + x2 - c.a[2] * v;
-        let x4 = s[3] + x3 - c.a[3] * v;
-        let x5 = s[4] + x4 - c.a[4] * v;
+        let (x1, x2, x3, x4, x5) = if v >= 0.0 {
+            let x1 = s[0] - c.g1 * s[1] + c.b1 * u - c.a[0];
+            let x2 = s[1] + x1 - c.a[1];
+            let x3 = s[2] - c.g2 * s[3] + x2 - c.a[2];
+            let x4 = s[3] + x3 - c.a[3];
+            let x5 = s[4] + x4 - c.a[4];
+            (x1, x2, x3, x4, x5)
+        } else {
+            let x1 = s[0] - c.g1 * s[1] + c.b1 * u + c.a[0];
+            let x2 = s[1] + x1 + c.a[1];
+            let x3 = s[2] - c.g2 * s[3] + x2 + c.a[2];
+            let x4 = s[3] + x3 + c.a[3];
+            let x5 = s[4] + x4 + c.a[4];
+            (x1, x2, x3, x4, x5)
+        };
 
-        let overloaded = x1.abs() > STABILITY_THRESHOLD
-            || x2.abs() > STABILITY_THRESHOLD
-            || x3.abs() > STABILITY_THRESHOLD
-            || x4.abs() > STABILITY_THRESHOLD
-            || x5.abs() > STABILITY_THRESHOLD
-            || x1.is_nan();
+        let max_state = max_state_magnitude(
+            max_state_magnitude(max_state_magnitude(x1, x2), max_state_magnitude(x3, x4)),
+            x5,
+        );
+        let overloaded = !(max_state <= STABILITY_THRESHOLD);
 
         ([x1, x2, x3, x4, x5], overloaded)
     }
@@ -177,22 +195,31 @@ impl CrfbCore for CrfbCore7 {
 
     #[inline(always)]
     fn step(c: &Self::Coeffs, s: &Self::State, u: f64, v: f64) -> (Self::State, bool) {
-        let x1 = s[0] - c.g1 * s[1] + c.b1 * u - c.a[0] * v;
-        let x2 = s[1] + x1 - c.a[1] * v;
-        let x3 = s[2] - c.g2 * s[3] + x2 - c.a[2] * v;
-        let x4 = s[3] + x3 - c.a[3] * v;
-        let x5 = s[4] - c.g3 * s[5] + x4 - c.a[4] * v;
-        let x6 = s[5] + x5 - c.a[5] * v;
-        let x7 = s[6] + x6 - c.a[6] * v;
+        let (x1, x2, x3, x4, x5, x6, x7) = if v >= 0.0 {
+            let x1 = s[0] - c.g1 * s[1] + c.b1 * u - c.a[0];
+            let x2 = s[1] + x1 - c.a[1];
+            let x3 = s[2] - c.g2 * s[3] + x2 - c.a[2];
+            let x4 = s[3] + x3 - c.a[3];
+            let x5 = s[4] - c.g3 * s[5] + x4 - c.a[4];
+            let x6 = s[5] + x5 - c.a[5];
+            let x7 = s[6] + x6 - c.a[6];
+            (x1, x2, x3, x4, x5, x6, x7)
+        } else {
+            let x1 = s[0] - c.g1 * s[1] + c.b1 * u + c.a[0];
+            let x2 = s[1] + x1 + c.a[1];
+            let x3 = s[2] - c.g2 * s[3] + x2 + c.a[2];
+            let x4 = s[3] + x3 + c.a[3];
+            let x5 = s[4] - c.g3 * s[5] + x4 + c.a[4];
+            let x6 = s[5] + x5 + c.a[5];
+            let x7 = s[6] + x6 + c.a[6];
+            (x1, x2, x3, x4, x5, x6, x7)
+        };
 
-        let overloaded = x1.abs() > STABILITY_THRESHOLD
-            || x2.abs() > STABILITY_THRESHOLD
-            || x3.abs() > STABILITY_THRESHOLD
-            || x4.abs() > STABILITY_THRESHOLD
-            || x5.abs() > STABILITY_THRESHOLD
-            || x6.abs() > STABILITY_THRESHOLD
-            || x7.abs() > STABILITY_THRESHOLD
-            || x1.is_nan();
+        let max_state = max_state_magnitude(
+            max_state_magnitude(max_state_magnitude(x1, x2), max_state_magnitude(x3, x4)),
+            max_state_magnitude(max_state_magnitude(x5, x6), x7),
+        );
+        let overloaded = !(max_state <= STABILITY_THRESHOLD);
 
         ([x1, x2, x3, x4, x5, x6, x7], overloaded)
     }
@@ -352,17 +379,53 @@ impl<C: CrfbCore> GenericCrfbModulator<C> {
             });
         }
 
-        let initial_overloads = self.overload_count;
+        let mut state = self.state;
+        let mut dither = self.dither.clone();
+        let mut overload_count = self.overload_count;
+        let coeffs = self.coeffs.clone();
+
         for (byte_idx, out_byte) in out_bytes[..required_bytes].iter_mut().enumerate() {
             let in_off = byte_idx * 8;
+            let byte_initial_overloads = overload_count;
             let mut byte = 0u8;
-            for bit_pos in (0..8).rev() {
-                let bit = self.step_sample(input[in_off + (7 - bit_pos)])?;
-                byte |= (bit & 1) << bit_pos;
+
+            for bit_idx in 0..8 {
+                let u = input[in_off + bit_idx];
+                let dither_val = match dither {
+                    Some(ref mut d) => d.next_sample(),
+                    None => 0.0,
+                };
+
+                let y = C::quantizer_input(&state) + dither_val;
+                let (v, bit) = if y >= 0.0 { (1.0, 1u8) } else { (-1.0, 0u8) };
+
+                let (new_state, overloaded) = C::step(&coeffs, &state, u, v);
+                if overloaded {
+                    overload_count += 1;
+                    match self.overload_policy {
+                        OverloadPolicy::MuteRecover => {
+                            state = C::zero_state();
+                        }
+                        OverloadPolicy::Error => {
+                            self.state = state;
+                            self.dither = dither;
+                            self.overload_count = overload_count;
+                            let mut state_vec = SmallVec::new();
+                            state_vec.extend_from_slice(new_state.as_ref());
+                            return Err(ModulatorError::Overload {
+                                state: state_vec,
+                                input: u,
+                            });
+                        }
+                    }
+                } else {
+                    state = new_state;
+                }
+
+                byte = (byte << 1) | bit;
             }
 
-            // If an overload occurred during this byte and MuteRecover is active, emit DSD idle byte
-            if self.overload_count > initial_overloads
+            if overload_count > byte_initial_overloads
                 && self.overload_policy == OverloadPolicy::MuteRecover
             {
                 *out_byte = DSD_IDLE_BYTE;
@@ -370,6 +433,10 @@ impl<C: CrfbCore> GenericCrfbModulator<C> {
                 *out_byte = byte;
             }
         }
+
+        self.state = state;
+        self.dither = dither;
+        self.overload_count = overload_count;
 
         Ok(())
     }
@@ -394,28 +461,64 @@ impl<C: CrfbCore> GenericCrfbModulator<C> {
             });
         }
 
-        let initial_overloads = self.overload_count;
+        let mut state = self.state;
+        let mut dither = self.dither.clone();
+        let mut overload_count = self.overload_count;
+        let coeffs = self.coeffs.clone();
+
         for (word_idx, out_word) in out_words[..required_words].iter_mut().enumerate() {
             let in_off = word_idx * 32;
-            let mut bytes = [0u8; 4];
-            for (b, byte_slot) in bytes.iter_mut().enumerate() {
-                let b_off = in_off + b * 8;
-                let mut byte = 0u8;
-                for bit_pos in (0..8).rev() {
-                    let bit = self.step_sample(input[b_off + (7 - bit_pos)])?;
-                    byte |= (bit & 1) << bit_pos;
+            let word_initial_overloads = overload_count;
+            let mut word = 0u32;
+
+            for bit_idx in 0..32 {
+                let u = input[in_off + bit_idx];
+                let dither_val = match dither {
+                    Some(ref mut d) => d.next_sample(),
+                    None => 0.0,
+                };
+
+                let y = C::quantizer_input(&state) + dither_val;
+                let (v, bit) = if y >= 0.0 { (1.0, 1u32) } else { (-1.0, 0u32) };
+
+                let (new_state, overloaded) = C::step(&coeffs, &state, u, v);
+                if overloaded {
+                    overload_count += 1;
+                    match self.overload_policy {
+                        OverloadPolicy::MuteRecover => {
+                            state = C::zero_state();
+                        }
+                        OverloadPolicy::Error => {
+                            self.state = state;
+                            self.dither = dither;
+                            self.overload_count = overload_count;
+                            let mut state_vec = SmallVec::new();
+                            state_vec.extend_from_slice(new_state.as_ref());
+                            return Err(ModulatorError::Overload {
+                                state: state_vec,
+                                input: u,
+                            });
+                        }
+                    }
+                } else {
+                    state = new_state;
                 }
-                *byte_slot = byte;
+
+                word = (word << 1) | bit;
             }
 
-            if self.overload_count > initial_overloads
+            if overload_count > word_initial_overloads
                 && self.overload_policy == OverloadPolicy::MuteRecover
             {
                 *out_word = DSD_IDLE_U32_BE;
             } else {
-                *out_word = u32::from_be_bytes(bytes);
+                *out_word = word;
             }
         }
+
+        self.state = state;
+        self.dither = dither;
+        self.overload_count = overload_count;
 
         Ok(())
     }
@@ -570,6 +673,84 @@ mod tests {
     use crate::rates::DsdBitRateHz;
     use crate::tables::{get_crfb_coefficients, get_crfb7_coefficients};
 
+    fn check_core_overload_detection<C: CrfbCore>(coeffs: C::Coeffs) {
+        let values = [
+            0.0,
+            STABILITY_THRESHOLD,
+            -STABILITY_THRESHOLD,
+            STABILITY_THRESHOLD + 1.0,
+            -STABILITY_THRESHOLD - 1.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ];
+        for index in 0..C::ORDER {
+            for value in values {
+                let mut state = C::zero_state();
+                state.as_mut()[index] = value;
+                for input in [0.0, 0.5, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                    for feedback in [-1.0, 1.0] {
+                        let (next, overloaded) = C::step(&coeffs, &state, input, feedback);
+                        let expected = next
+                            .as_ref()
+                            .iter()
+                            .any(|s| !(s.abs() <= STABILITY_THRESHOLD));
+                        assert_eq!(
+                            overloaded,
+                            expected,
+                            "order {}, state {state:?}, input {input}, feedback {feedback}",
+                            C::ORDER,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_overload_reduction_rejects_nonfinite_states() {
+        check_core_overload_detection::<CrfbCore5>(
+            *get_crfb_coefficients(DsdBitRateHz::DSD512).unwrap(),
+        );
+        check_core_overload_detection::<CrfbCore7>(
+            *get_crfb7_coefficients(DsdBitRateHz::DSD512).unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_nan_input_error_and_mute_recovery() {
+        for order in [5, 7] {
+            let mut error = Modulator::new(
+                order,
+                DsdBitRateHz::DSD512,
+                DitherType::Tpdf,
+                OverloadPolicy::Error,
+            )
+            .unwrap();
+            assert!(matches!(
+                error.process_tile_bytes(&[f64::NAN; 8], &mut [0]),
+                Err(ModulatorError::Overload { .. })
+            ));
+            assert_eq!(error.overload_count(), 1);
+            assert!(error.state_slice().iter().all(|s| s.is_finite()));
+
+            let mut recover = Modulator::new(
+                order,
+                DsdBitRateHz::DSD512,
+                DitherType::Tpdf,
+                OverloadPolicy::MuteRecover,
+            )
+            .unwrap();
+            let mut input = [0.0; 64];
+            input[31] = f64::NAN;
+            let mut words = [0; 2];
+            recover.process_tile_u32(&input, &mut words).unwrap();
+            assert_eq!(words[0], DSD_IDLE_U32_BE);
+            assert_eq!(recover.overload_count(), 1);
+            assert!(recover.state_slice().iter().all(|s| s.is_finite()));
+        }
+    }
+
     #[test]
     fn test_modulator_silence_stability_order5() {
         let coeffs = *get_crfb_coefficients(DsdBitRateHz::DSD64).unwrap();
@@ -668,6 +849,46 @@ mod tests {
     }
 
     #[test]
+    fn test_modulator_tone_within_headroom_dsd512_order5() {
+        let coeffs = *get_crfb_coefficients(DsdBitRateHz::DSD512).unwrap();
+        let mut mod_loop = CrfbModulator::new(coeffs, DitherType::Tpdf, OverloadPolicy::Error);
+
+        let f_bit = 22_579_200.0;
+        let n_samples = 65_536;
+        let amp = 10.0_f64.powf(-6.0 / 20.0);
+        let mut input = Vec::with_capacity(n_samples);
+        for i in 0..n_samples {
+            let t = i as f64 / f_bit;
+            input.push(amp * (2.0 * std::f64::consts::PI * 1000.0 * t).sin());
+        }
+
+        let mut out_words = vec![0u32; n_samples / 32];
+        let res = mod_loop.process_tile_u32(&input, &mut out_words);
+        assert!(res.is_ok());
+        assert_eq!(mod_loop.overload_count(), 0);
+    }
+
+    #[test]
+    fn test_modulator_tone_within_headroom_dsd512_order7() {
+        let coeffs = *get_crfb7_coefficients(DsdBitRateHz::DSD512).unwrap();
+        let mut mod_loop = CrfbModulator7::new(coeffs, DitherType::Tpdf, OverloadPolicy::Error);
+
+        let f_bit = 22_579_200.0;
+        let n_samples = 65_536;
+        let amp = 10.0_f64.powf(-6.0 / 20.0);
+        let mut input = Vec::with_capacity(n_samples);
+        for i in 0..n_samples {
+            let t = i as f64 / f_bit;
+            input.push(amp * (2.0 * std::f64::consts::PI * 1000.0 * t).sin());
+        }
+
+        let mut out_words = vec![0u32; n_samples / 32];
+        let res = mod_loop.process_tile_u32(&input, &mut out_words);
+        assert!(res.is_ok());
+        assert_eq!(mod_loop.overload_count(), 0);
+    }
+
+    #[test]
     fn test_modulator_overload_and_recovery_order5() {
         let coeffs = *get_crfb_coefficients(DsdBitRateHz::DSD64).unwrap();
         let mut mod_err = CrfbModulator::new(coeffs, DitherType::None, OverloadPolicy::Error);
@@ -732,6 +953,46 @@ mod tests {
         .unwrap();
         assert_eq!(mod7.order(), 7);
         assert_eq!(mod7.state_slice().len(), 7);
+
+        let mod5_512 = Modulator::new(
+            5,
+            DsdBitRateHz::DSD512,
+            DitherType::Tpdf,
+            OverloadPolicy::MuteRecover,
+        )
+        .unwrap();
+        assert_eq!(mod5_512.order(), 5);
+        assert_eq!(mod5_512.state_slice().len(), 5);
+
+        let mod7_512 = Modulator::new(
+            7,
+            DsdBitRateHz::DSD512,
+            DitherType::Tpdf,
+            OverloadPolicy::MuteRecover,
+        )
+        .unwrap();
+        assert_eq!(mod7_512.order(), 7);
+        assert_eq!(mod7_512.state_slice().len(), 7);
+
+        let mod5_512_48 = Modulator::new(
+            5,
+            DsdBitRateHz::DSD512_48,
+            DitherType::Tpdf,
+            OverloadPolicy::MuteRecover,
+        )
+        .unwrap();
+        assert_eq!(mod5_512_48.order(), 5);
+        assert_eq!(mod5_512_48.state_slice().len(), 5);
+
+        let mod7_512_48 = Modulator::new(
+            7,
+            DsdBitRateHz::DSD512_48,
+            DitherType::Tpdf,
+            OverloadPolicy::MuteRecover,
+        )
+        .unwrap();
+        assert_eq!(mod7_512_48.order(), 7);
+        assert_eq!(mod7_512_48.state_slice().len(), 7);
 
         let mod_bad = Modulator::new(
             6,

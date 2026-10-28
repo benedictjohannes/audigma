@@ -111,9 +111,11 @@ fn parse_rate(rate_str: &str) -> (DsdBitRateHz, u32, usize, u32) {
         "dsd64" => (DsdBitRateHz::DSD64, 2_822_400, 6, 44_100),
         "dsd128" => (DsdBitRateHz::DSD128, 5_644_800, 7, 44_100),
         "dsd256" => (DsdBitRateHz::DSD256, 11_289_600, 8, 44_100),
+        "dsd512" => (DsdBitRateHz::DSD512, 22_579_200, 9, 44_100),
         "dsd64_48" => (DsdBitRateHz::DSD64_48, 3_072_000, 6, 48_000),
         "dsd128_48" => (DsdBitRateHz::DSD128_48, 6_144_000, 7, 48_000),
         "dsd256_48" => (DsdBitRateHz::DSD256_48, 12_288_000, 8, 48_000),
+        "dsd512_48" => (DsdBitRateHz::DSD512_48, 24_576_000, 9, 48_000),
         other => panic!("Unknown rate: {other}"),
     }
 }
@@ -680,17 +682,17 @@ fn run_benchmark(
     baseband_fs: u32,
 ) {
     let multiplier = 1usize << cascade_stages;
-    const TILE_BASEBAND: usize = 64; // Block size = 64 frames (e.g. 1.45 ms at 44.1 kHz)
-    let tile_expanded = TILE_BASEBAND * multiplier;
+    let tile_baseband: usize = if multiplier >= 512 { 32 } else { 64 };
+    let tile_expanded = tile_baseband * multiplier;
 
     let mut cascade = HalfBandCascade::new(
         config.preset,
         FilterPhase::Linear,
         Apodization::Off,
         cascade_stages,
-        TILE_BASEBAND,
+        tile_baseband,
     );
-    let mut bb_scratch = [0.0f64; TILE_BASEBAND];
+    let mut bb_scratch = vec![0.0f64; tile_baseband];
     let mut exp_scratch = vec![0.0f64; tile_expanded];
     let mut out_tile_bytes = vec![0u8; tile_expanded / 8];
 
@@ -732,7 +734,7 @@ fn run_benchmark(
     let p999_ns = block_times_ns[BENCH_BLOCKS * 999 / 1000];
     let avg_ns = block_times_ns.iter().sum::<u64>() / BENCH_BLOCKS as u64;
 
-    let audio_block_duration_sec = TILE_BASEBAND as f64 / baseband_fs as f64;
+    let audio_block_duration_sec = tile_baseband as f64 / baseband_fs as f64;
     let audio_block_duration_micros = audio_block_duration_sec * 1_000_000.0;
     let total_audio_duration_sec = BENCH_BLOCKS as f64 * audio_block_duration_sec;
     let throughput_x_realtime = total_audio_duration_sec / total_elapsed.as_secs_f64();
@@ -763,7 +765,7 @@ fn run_benchmark(
             config.order,
             config.preset,
             BENCH_BLOCKS,
-            TILE_BASEBAND,
+            tile_baseband,
             audio_block_duration_micros,
             throughput_x_realtime,
             min_ns as f64 / 1000.0,

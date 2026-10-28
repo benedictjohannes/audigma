@@ -89,6 +89,23 @@ pub const CRFB5_DSD256: CrfbCoefficients5 = CrfbCoefficients5 {
 /// Backward-compatible alias for 5th-order DSD256 coefficients.
 pub const CRFB_DSD256: CrfbCoefficients = CRFB5_DSD256;
 
+/// 5th-order CRFB coefficients for DSD512 (f_bit=22579200 Hz, OSR=564.48).
+pub const CRFB5_DSD512: CrfbCoefficients5 = CrfbCoefficients5 {
+    g1: 1.33619066029488920e-05,
+    g2: 2.75380321099749636e-05,
+    a: [
+        2.79324250515236062e-04,
+        3.92566278161815899e-03,
+        2.96892259056814392e-02,
+        1.47382367375296086e-01,
+        4.89806352024732439e-01,
+    ],
+    b1: 2.79721135408347215e-04,
+};
+
+/// Backward-compatible alias for 5th-order DSD512 coefficients.
+pub const CRFB_DSD512: CrfbCoefficients = CRFB5_DSD512;
+
 /// 5th-order CRFB coefficients for DSD64_48 (f_bit=3072000 Hz, OSR=76.80).
 pub const CRFB5_DSD64_48: CrfbCoefficients5 = CrfbCoefficients5 {
     g1: 7.21800982657061496e-04,
@@ -140,6 +157,23 @@ pub const CRFB5_DSD256_48: CrfbCoefficients5 = CrfbCoefficients5 {
 /// Backward-compatible alias for 5th-order DSD256_48 coefficients.
 pub const CRFB_DSD256_48: CrfbCoefficients = CRFB5_DSD256_48;
 
+/// 5th-order CRFB coefficients for DSD512_48 (f_bit=24576000 Hz, OSR=614.40).
+pub const CRFB5_DSD512_48: CrfbCoefficients5 = CrfbCoefficients5 {
+    g1: 1.12788081993997480e-05,
+    g2: 2.32449042483207080e-05,
+    a: [
+        2.79379922146350554e-04,
+        3.92584158321114020e-03,
+        2.96916840168111838e-02,
+        1.47384515510417258e-01,
+        4.89804725458455992e-01,
+    ],
+    b1: 2.79714937369957451e-04,
+};
+
+/// Backward-compatible alias for 5th-order DSD512_48 coefficients.
+pub const CRFB_DSD512_48: CrfbCoefficients = CRFB5_DSD512_48;
+
 /// 7th-order CRFB coefficients for DSD64 (f_bit=2822400 Hz, OSR=70.56).
 pub const CRFB7_DSD64: CrfbCoefficients7 = CrfbCoefficients7 {
     g1: 3.26503937486455342e-04,
@@ -189,6 +223,23 @@ pub const CRFB7_DSD256: CrfbCoefficients7 = CrfbCoefficients7 {
         4.89846972625609944e-01,
     ],
     b1: 1.21277348701750597e-06,
+};
+
+/// 7th-order CRFB coefficients for DSD512 (f_bit=22579200 Hz, OSR=564.48).
+pub const CRFB7_DSD512: CrfbCoefficients7 = CrfbCoefficients7 {
+    g1: 5.10176066859102662e-06,
+    g2: 1.70317932390862126e-05,
+    g3: 2.79018338475989225e-05,
+    a: [
+        1.20944552862133191e-06,
+        3.32935612076919256e-05,
+        4.74967755684845992e-04,
+        4.49690211141903079e-03,
+        3.03123639912457471e-02,
+        1.46896737253546517e-01,
+        4.89808682368934045e-01,
+    ],
+    b1: 1.21187133552960977e-06,
 };
 
 /// 7th-order CRFB coefficients for DSD64_48 (f_bit=3072000 Hz, OSR=76.80).
@@ -242,6 +293,23 @@ pub const CRFB7_DSD256_48: CrfbCoefficients7 = CrfbCoefficients7 {
     b1: 1.21258591418876064e-06,
 };
 
+/// 7th-order CRFB coefficients for DSD512_48 (f_bit=24576000 Hz, OSR=614.40).
+pub const CRFB7_DSD512_48: CrfbCoefficients7 = CrfbCoefficients7 {
+    g1: 4.30640443727092759e-06,
+    g2: 1.43765664664119441e-05,
+    g3: 2.35519900848579766e-05,
+    a: [
+        1.20977680728147888e-06,
+        3.32956838518831872e-05,
+        4.75056324830761423e-04,
+        4.49721277596059395e-03,
+        3.03152335439079747e-02,
+        1.46899371622705027e-01,
+        4.89806692517387732e-01,
+    ],
+    b1: 1.21182446951669806e-06,
+};
+
 /// Looks up the precomputed 5th-order CRFB coefficients for a given DSD bit rate (backward-compatible).
 pub fn get_crfb_coefficients(bit_rate: DsdBitRateHz) -> Option<&'static CrfbCoefficients> {
     get_crfb5_coefficients(bit_rate)
@@ -253,9 +321,11 @@ pub fn get_crfb5_coefficients(bit_rate: DsdBitRateHz) -> Option<&'static CrfbCoe
         DsdBitRateHz::DSD64 => Some(&CRFB5_DSD64),
         DsdBitRateHz::DSD128 => Some(&CRFB5_DSD128),
         DsdBitRateHz::DSD256 => Some(&CRFB5_DSD256),
+        DsdBitRateHz::DSD512 => Some(&CRFB5_DSD512),
         DsdBitRateHz::DSD64_48 => Some(&CRFB5_DSD64_48),
         DsdBitRateHz::DSD128_48 => Some(&CRFB5_DSD128_48),
         DsdBitRateHz::DSD256_48 => Some(&CRFB5_DSD256_48),
+        DsdBitRateHz::DSD512_48 => Some(&CRFB5_DSD512_48),
         _ => None,
     }
 }
@@ -266,9 +336,11 @@ pub fn get_crfb7_coefficients(bit_rate: DsdBitRateHz) -> Option<&'static CrfbCoe
         DsdBitRateHz::DSD64 => Some(&CRFB7_DSD64),
         DsdBitRateHz::DSD128 => Some(&CRFB7_DSD128),
         DsdBitRateHz::DSD256 => Some(&CRFB7_DSD256),
+        DsdBitRateHz::DSD512 => Some(&CRFB7_DSD512),
         DsdBitRateHz::DSD64_48 => Some(&CRFB7_DSD64_48),
         DsdBitRateHz::DSD128_48 => Some(&CRFB7_DSD128_48),
         DsdBitRateHz::DSD256_48 => Some(&CRFB7_DSD256_48),
+        DsdBitRateHz::DSD512_48 => Some(&CRFB7_DSD512_48),
         _ => None,
     }
 }
@@ -22923,9 +22995,11 @@ mod tests {
         assert!(get_crfb_coefficients(DsdBitRateHz::DSD64).is_some());
         assert!(get_crfb_coefficients(DsdBitRateHz::DSD128).is_some());
         assert!(get_crfb_coefficients(DsdBitRateHz::DSD256).is_some());
+        assert!(get_crfb_coefficients(DsdBitRateHz::DSD512).is_some());
         assert!(get_crfb_coefficients(DsdBitRateHz::DSD64_48).is_some());
         assert!(get_crfb_coefficients(DsdBitRateHz::DSD128_48).is_some());
         assert!(get_crfb_coefficients(DsdBitRateHz::DSD256_48).is_some());
+        assert!(get_crfb_coefficients(DsdBitRateHz::DSD512_48).is_some());
 
         let dsd256 = get_crfb_coefficients(DsdBitRateHz::DSD256).unwrap();
         assert!(dsd256.g1 > 0.0);
@@ -22936,12 +23010,23 @@ mod tests {
             assert!(a_val > 0.0);
         }
 
+        let dsd512 = get_crfb_coefficients(DsdBitRateHz::DSD512).unwrap();
+        assert!(dsd512.g1 > 0.0);
+        assert!(dsd512.g2 > 0.0);
+        assert!(dsd512.b1 > 0.0);
+        assert_eq!(dsd512.a.len(), 5);
+        for &a_val in &dsd512.a {
+            assert!(a_val > 0.0);
+        }
+
         assert!(get_crfb7_coefficients(DsdBitRateHz::DSD64).is_some());
         assert!(get_crfb7_coefficients(DsdBitRateHz::DSD128).is_some());
         assert!(get_crfb7_coefficients(DsdBitRateHz::DSD256).is_some());
+        assert!(get_crfb7_coefficients(DsdBitRateHz::DSD512).is_some());
         assert!(get_crfb7_coefficients(DsdBitRateHz::DSD64_48).is_some());
         assert!(get_crfb7_coefficients(DsdBitRateHz::DSD128_48).is_some());
         assert!(get_crfb7_coefficients(DsdBitRateHz::DSD256_48).is_some());
+        assert!(get_crfb7_coefficients(DsdBitRateHz::DSD512_48).is_some());
 
         let dsd256_7 = get_crfb7_coefficients(DsdBitRateHz::DSD256).unwrap();
         assert!(dsd256_7.g1 > 0.0);
@@ -22950,6 +23035,16 @@ mod tests {
         assert!(dsd256_7.b1 > 0.0);
         assert_eq!(dsd256_7.a.len(), 7);
         for &a_val in &dsd256_7.a {
+            assert!(a_val > 0.0);
+        }
+
+        let dsd512_7 = get_crfb7_coefficients(DsdBitRateHz::DSD512).unwrap();
+        assert!(dsd512_7.g1 > 0.0);
+        assert!(dsd512_7.g2 > 0.0);
+        assert!(dsd512_7.g3 > 0.0);
+        assert!(dsd512_7.b1 > 0.0);
+        assert_eq!(dsd512_7.a.len(), 7);
+        for &a_val in &dsd512_7.a {
             assert!(a_val > 0.0);
         }
     }
