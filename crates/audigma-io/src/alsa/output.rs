@@ -544,6 +544,24 @@ impl AudioOutput for AlsaAudioOutput {
     fn xrun_count(&self) -> u64 {
         self.xrun_count
     }
+
+    fn buffered_us(&self) -> Option<u64> {
+        #[cfg(feature = "alsa")]
+        {
+            let rate = self.config.frame_rate_hz as u64;
+            if rate == 0 {
+                return None;
+            }
+            // Negative delay means the device is in an error/underrun state.
+            let frames = self.pcm.delay().ok()?;
+            let frames = u64::try_from(frames).ok()?;
+            Some(frames.saturating_mul(1_000_000) / rate)
+        }
+        #[cfg(not(feature = "alsa"))]
+        {
+            None
+        }
+    }
 }
 
 #[cfg(test)]

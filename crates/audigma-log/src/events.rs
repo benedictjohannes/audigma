@@ -24,3 +24,7 @@ pub const LATE_TARGET: &str = "audigma::late";
 pub const LATE_START: &str = "late_start";
 pub const LATE_SLICE: &str = "late_slice";
 pub const LATE_END: &str = "late_end";
+
+/// End-to-end feed-loop events (read, prep, DSP, emit, device headroom), on [`LATE_TARGET`].
+pub const LOOP_STALL: &str = "loop_stall";
+pub const LOOP_HEALTH: &str = "loop_health";

@@ -214,6 +214,14 @@ pub trait AudioOutput: Write + Send {
         0
     }
 
+    /// Audio currently queued in the device (not yet played), in microseconds.
+    ///
+    /// `None` when the backend cannot report it. Used only for end-to-end feed-loop
+    /// headroom diagnostics.
+    fn buffered_us(&self) -> Option<u64> {
+        None
+    }
+
     /// Seeks to an offset in this sink. Fails with `ErrorKind::Unsupported` if not seekable.
     fn seek_sink(&mut self, _pos: SeekFrom) -> std::io::Result<u64> {
         Err(std::io::Error::new(

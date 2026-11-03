@@ -19,6 +19,7 @@ use crate::late::{LateCounterSource, LateCounters, LateTileMonitor};
 use crate::lifecycle::{
     BlockAction, FrameGain, IdleCarrierFormat, LifecycleController, LifecycleState,
 };
+use crate::loop_timing::{LoopProbe, LoopTimingMonitor, LoopTimingTelemetry};
 use crate::processor::TileProcessor;
 use crate::topology::PipelineTopology;
 use crate::traits::{AudioInput, AudioOutput, EngineError};
@@ -808,6 +809,22 @@ impl LivePipeline {
             )
         });
 
+        // End-to-end feed-loop timing (read, prep, DSP, emit, device headroom). Same
+        // contract as above: the loop touches atomics only; reporting is off-thread.
+        let loop_telemetry = Arc::new(LoopTimingTelemetry::new());
+        let mut loop_probe = LoopProbe::new(Arc::clone(&loop_telemetry));
+        let _loop_monitor = LoopTimingMonitor::spawn(
+            Arc::clone(&loop_telemetry),
+            {
+                let control = control.clone();
+                Arc::new(move || control.late_counters())
+            },
+            self.settings.late_tile_report_interval(),
+            processor
+                .late_telemetry()
+                .map_or(0, |telemetry| telemetry.budget_us()),
+        );
+
         let pcm_sample_format = match target_spec {
             TargetRateSpec::Pcm { sample_format, .. } => sample_format,
             _ => SampleFormat::F32,
@@ -1040,6 +1057,9 @@ impl LivePipeline {
                 );
 
             if can_passthrough && pending_rate_switch.is_none() && !lifecycle.is_draining() {
+                // Passthrough fuses read and write; it is not instrumented, and the
+                // baseline must not carry across it.
+                loop_probe.reset_baseline();
                 let dsd_bytes_to_read = (TILE_BASEBAND_FRAMES * mult) / 8;
                 if let Some(frames) = process_live_dsd_passthrough_tile(
                     input,
@@ -1069,6 +1089,7 @@ impl LivePipeline {
             // input decoder history while clearing the downstream filter tails.
             let draining_input = pending_rate_switch.is_some() && lifecycle.is_draining();
             let read_raw_dsd = raw_dsd_input.is_some() && !draining_input;
+            let t_read0 = Instant::now();
             let input_units = if draining_input {
                 for ch in in_channels.iter_mut() {
                     ch.fill(0.0);
@@ -1086,6 +1107,7 @@ impl LivePipeline {
                 input.read_channels(&mut slices)?
             };
 
+            let t_read1 = Instant::now();
             if input_units == 0 && pending_rate_switch.is_none() {
                 consecutive_empty_polls = consecutive_empty_polls.saturating_add(1);
                 empty_polls_total = empty_polls_total.saturating_add(1);
@@ -1116,7 +1138,9 @@ impl LivePipeline {
                 let to_write = idle_bytes.min(transport_staging.len());
                 let written = lifecycle.emit_idle_frames(&mut transport_staging[..to_write]);
                 if written > 0 {
-                    write_output_all(output, &transport_staging[..written])?;
+                    loop_probe.timed_emit(output, |o| {
+                        write_output_all(o, &transport_staging[..written])
+                    })?;
                 }
                 consecutive_empty_tiles = consecutive_empty_tiles.saturating_add(1);
                 if consecutive_empty_tiles >= idle_threshold_tiles && !is_idle {
@@ -1218,6 +1242,7 @@ impl LivePipeline {
                 linear_gain,
                 drift_ppm: current_drift_ppm,
             };
+            let t_dsp0 = Instant::now();
             let proc_len = if read_raw_dsd {
                 let slices: DsdSlices<'_> = dsd_in_channels
                     .iter()
@@ -1229,6 +1254,11 @@ impl LivePipeline {
                     in_channels.iter().map(|ch| &ch[..input_units]).collect();
                 processor.process_input_pcm(&slices, controls)?
             };
+            loop_probe.record_stages(
+                t_read1.saturating_duration_since(t_read0),
+                t_dsp0.saturating_duration_since(t_read1),
+                t_dsp0.elapsed(),
+            );
 
             if proc_len > 0 {
                 let req_out = proc_len * mult;
@@ -1244,14 +1274,16 @@ impl LivePipeline {
                     }
 
                     // Pack and emit
-                    let frames = pack_and_write_stereo_dsd(
-                        self.carrier,
-                        &mut dop_packer,
-                        out_l,
-                        out_r,
-                        &mut transport_staging,
-                        output,
-                    )?;
+                    let frames = loop_probe.timed_emit(output, |o| {
+                        pack_and_write_stereo_dsd(
+                            self.carrier,
+                            &mut dop_packer,
+                            out_l,
+                            out_r,
+                            &mut transport_staging,
+                            o,
+                        )
+                    })?;
                     total_output_frames += frames as u64;
                 } else {
                     // High-rate PCM output. Quantize to the configured target sample
@@ -1320,7 +1352,7 @@ impl LivePipeline {
                             }
                         }
                     }
-                    write_output_all(output, &pcm_staging)?;
+                    loop_probe.timed_emit(output, |o| write_output_all(o, &pcm_staging))?;
 
                     total_output_frames += req_out as u64;
                 }
