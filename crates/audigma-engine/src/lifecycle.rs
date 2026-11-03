@@ -101,6 +101,27 @@ pub enum BlockAction {
     Muted,
 }
 
+/// One channel-independent pre-SRC lifecycle operation for a single frame.
+/// Absolute silence is distinct from multiplying by zero: tail flushing and
+/// recovery must also discard NaNs/infinities and produce positive zero.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FrameGain {
+    Preserve,
+    Multiply(f64),
+    Silence,
+}
+
+impl FrameGain {
+    #[inline]
+    pub fn apply(self, sample: f64) -> f64 {
+        match self {
+            Self::Preserve => sample,
+            Self::Multiply(gain) => sample * gain,
+            Self::Silence => 0.0,
+        }
+    }
+}
+
 /// Controls click-free transitions, pre-SRC gain ramping, group-delay tail draining,
 /// and DoP marker continuity across the entire engine lifecycle.
 #[derive(Debug)]
@@ -290,6 +311,24 @@ impl LifecycleController {
         }
         let num_frames = channels.iter().map(|s| s.len()).min().unwrap_or(0);
 
+        self.process_input_frames(num_frames, |i, gain| {
+            for ch in channels.iter_mut() {
+                ch[i] = gain.apply(ch[i]);
+            }
+        })
+    }
+
+    /// Advances the shared lifecycle once and prepares identical operations for
+    /// every channel worker. No channel DSP state is accessed by the coordinator.
+    pub fn prepare_input_gains(&mut self, gains: &mut [FrameGain]) -> BlockAction {
+        self.process_input_frames(gains.len(), |i, gain| gains[i] = gain)
+    }
+
+    fn process_input_frames(
+        &mut self,
+        num_frames: usize,
+        mut apply: impl FnMut(usize, FrameGain),
+    ) -> BlockAction {
         match self.state {
             LifecycleState::Running => {
                 if self.is_fading_in {
@@ -306,15 +345,16 @@ impl LifecycleController {
                             self.current_gain = 1.0;
                             self.is_fading_in = false;
                         }
-                        for ch in channels.iter_mut() {
-                            ch[i] *= self.current_gain;
-                        }
+                        apply(i, FrameGain::Multiply(self.current_gain));
                     }
                     BlockAction::FadingIn {
                         current_gain: self.current_gain,
                     }
                 } else {
                     self.current_gain = 1.0;
+                    for i in 0..num_frames {
+                        apply(i, FrameGain::Preserve);
+                    }
                     BlockAction::Normal
                 }
             }
@@ -333,14 +373,10 @@ impl LifecycleController {
                             self.current_gain = 0.0;
                             self.is_fading_out = false;
                         }
-                        for ch in channels.iter_mut() {
-                            ch[i] *= self.current_gain;
-                        }
+                        apply(i, FrameGain::Multiply(self.current_gain));
                     } else {
                         // After fade-out, feed absolute 0.0 into the cascade to clear the tail
-                        for ch in channels.iter_mut() {
-                            ch[i] = 0.0;
-                        }
+                        apply(i, FrameGain::Silence);
                     }
 
                     if self.drain_frames_remaining > 0 {
@@ -360,8 +396,8 @@ impl LifecycleController {
             }
             LifecycleState::Recovering => {
                 // While recovering, zero the input PCM
-                for ch in channels.iter_mut() {
-                    ch[..num_frames].fill(0.0);
+                for i in 0..num_frames {
+                    apply(i, FrameGain::Silence);
                 }
 
                 if self.recovery_timer > 0 {
@@ -383,8 +419,8 @@ impl LifecycleController {
             | LifecycleState::Priming
             | LifecycleState::Reconfiguring
             | LifecycleState::DeviceLost => {
-                for ch in channels.iter_mut() {
-                    ch[..num_frames].fill(0.0);
+                for i in 0..num_frames {
+                    apply(i, FrameGain::Silence);
                 }
                 self.current_gain = 0.0;
                 BlockAction::Muted
@@ -575,5 +611,64 @@ mod tests {
         let mut buf = vec![0u8; 16];
         lc.emit_idle_frames(&mut buf);
         assert!(buf.iter().all(|&b| b == 0x69));
+    }
+
+    #[test]
+    fn shared_frame_gains_preserve_lifecycle_actions_and_nonfinite_silence() {
+        let mut direct = LifecycleController::new(IdleCarrierFormat::NativeDsd, 24, 32);
+        let mut shared = LifecycleController::new(IdleCarrierFormat::NativeDsd, 24, 32);
+        direct.start().unwrap();
+        shared.start().unwrap();
+        for block in 0..12 {
+            if block == 3 {
+                direct.request_stop();
+                shared.request_stop();
+            }
+            if block == 8 {
+                direct.report_overload_trip();
+                shared.report_overload_trip();
+            }
+            let mut left = [
+                1.0,
+                -0.0,
+                f64::NAN,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                -0.5,
+                0.0,
+                0.5,
+                1.0,
+                -1.0,
+                0.25,
+                -0.25,
+                0.1,
+                -0.1,
+                0.0,
+                0.0,
+            ];
+            let mut right = left;
+            let input = left;
+            let mut gains = [FrameGain::Preserve; 16];
+            let expected = direct.process_input_block(&mut left, &mut right);
+            let actual = shared.prepare_input_gains(&mut gains);
+            assert_eq!(actual, expected);
+            assert_eq!(shared.state(), direct.state());
+            for ((sample, gain), expected) in input.into_iter().zip(gains).zip(left) {
+                assert_eq!(gain.apply(sample).to_bits(), expected.to_bits());
+            }
+        }
+        assert_eq!(
+            FrameGain::Silence.apply(f64::NAN).to_bits(),
+            0.0f64.to_bits()
+        );
+        assert_eq!(
+            FrameGain::Silence.apply(f64::INFINITY).to_bits(),
+            0.0f64.to_bits()
+        );
+        assert_eq!(
+            FrameGain::Preserve.apply(-0.0).to_bits(),
+            (-0.0f64).to_bits()
+        );
+        assert!(FrameGain::Multiply(0.0).apply(f64::INFINITY).is_nan());
     }
 }

@@ -3,19 +3,22 @@
 //! Orchestrates live streaming daemon execution:
 //! - Connects audio input (`PipeWireVirtualSink` or `AlsaCapture`) to output (`PipeWirePcmOutput` or `AlsaAudioOutput`).
 //! - Decoupled through an SPSC ring buffer (`AudioSpscQueue`) with monotonic generation tags (`u64`).
-//! - DSP processing worker thread:
+//! - One persistent DSP worker per channel, dispatched before channel DSP:
+//!   - Raw DSD unpacking/decimation or high-rate PCM decimation.
 //!   - Pre-modulator gain and dynamic runtime volume.
-//!   - Low-rate baseband polyphase ASRC drift tracking (`clock.mode = "adaptive-input"`).
+//!   - Low-rate baseband polyphase SRC/ASRC with worker-local history and phase.
 //!   - Power-of-two half-band FIR interpolation cascade ($2^K$).
-//!   - 5th-order CRFB Delta-Sigma Modulator or PCM quantizer.
-//!   - Click-free lifecycle transitions (`LifecycleController`).
+//!   - 5th/7th-order CRFB Delta-Sigma Modulator for DSD output.
+//! - Shared clock-drift control and click-free lifecycle decisions (`LifecycleController`).
+//! - Coordinator-side transport packing, PCM quantization, and device writes.
 //! - Real-time thread priority acquisition with graceful fallback.
 //! - Monitored live telemetry exported via shared state.
 
 use crate::asrc::{AdaptiveClockDriftController, ClockDriftConfig, ClockDriftError};
-use crate::decimator::ChannelDecimatorPool;
 use crate::late::{LateCounterSource, LateCounters, LateTileMonitor};
-use crate::lifecycle::{BlockAction, IdleCarrierFormat, LifecycleController, LifecycleState};
+use crate::lifecycle::{
+    BlockAction, FrameGain, IdleCarrierFormat, LifecycleController, LifecycleState,
+};
 use crate::processor::TileProcessor;
 use crate::topology::PipelineTopology;
 use crate::traits::{AudioInput, AudioOutput, EngineError};
@@ -23,8 +26,8 @@ use crate::transport::{
     is_dsd_passthrough_eligible, pack_and_write_stereo_dsd, process_live_dsd_passthrough_tile,
     write_output_all,
 };
+use crate::worker::{InputDspConfig, InputResampling, InputTileControls};
 use audigma_dsp::config::{DspConfiguration, SampleFormat, TargetRateSpec};
-use audigma_dsp::fir::PolyphaseResampler;
 use audigma_dsp::ftz::ScopedFtzDaz;
 use audigma_dsp::modulator::TpdfDither;
 use audigma_dsp::rates::PcmRateHz;
@@ -44,6 +47,8 @@ const INLINE_CHANNELS: usize = 16;
 
 type ChannelMutSlices<'a> = SmallVec<[&'a mut [f64]; INLINE_CHANNELS]>;
 type ChannelSlices<'a> = SmallVec<[&'a [f64]; INLINE_CHANNELS]>;
+type DsdMutSlices<'a> = SmallVec<[&'a mut [u8]; INLINE_CHANNELS]>;
+type DsdSlices<'a> = SmallVec<[&'a [u8]; INLINE_CHANNELS]>;
 
 /// Sentinel stored in `volume_percent` when the user selected a dB value instead
 /// of a percentage. `NaN` is never a valid percentage.
@@ -735,7 +740,46 @@ impl LivePipeline {
         let is_dsd = self.topology.is_dsd();
         let target_dsd = self.topology.target_dsd_config(&self.plan.dsp_config);
 
-        let mut processor = TileProcessor::new(
+        let is_adaptive = self
+            .settings
+            .clock
+            .as_ref()
+            .map(|c| c.mode == audigma_settings::ClockMode::AdaptiveInput)
+            .unwrap_or(false);
+        let max_ppm = self
+            .settings
+            .clock
+            .as_ref()
+            .and_then(|c| c.max_correction_ppm)
+            .map(|p| p as f64)
+            .unwrap_or(500.0);
+        let asrc_in_rate = if self.topology.decimation_stages > 0 {
+            self.topology.intermediate_rate
+        } else {
+            self.topology.input_rate
+        };
+        let resampling = if is_adaptive {
+            InputResampling::Adaptive {
+                input_rate: asrc_in_rate,
+                output_rate: self.topology.intermediate_rate,
+                max_correction_ppm: max_ppm,
+            }
+        } else if self.topology.requires_rational_src {
+            InputResampling::Rational {
+                input_rate: self.topology.input_rate,
+                output_rate: self.topology.intermediate_rate,
+            }
+        } else {
+            InputResampling::None
+        };
+        let raw_dsd_input = input.dsd_decode_config();
+        let input_config = InputDspConfig {
+            pcm_decimation_stages: self.topology.decimation_stages,
+            dsd: raw_dsd_input,
+            resampling,
+        };
+
+        let mut processor = TileProcessor::new_with_input(
             num_channels,
             preset,
             self.plan.dsp_config.phase,
@@ -744,6 +788,7 @@ impl LivePipeline {
             TILE_BASEBAND_FRAMES,
             target_dsd,
             true,
+            input_config,
             self.thread_init_hook.clone(),
         )?;
         let mult = processor.rate_multiplier();
@@ -777,59 +822,13 @@ impl LivePipeline {
         } else {
             Vec::new()
         };
-        // Clock mode & low-rate ASRC
-        let is_adaptive = self
-            .settings
-            .clock
-            .as_ref()
-            .map(|c| c.mode == audigma_settings::ClockMode::AdaptiveInput)
-            .unwrap_or(false);
-
-        let mut decimator = if self.topology.decimation_stages > 0 {
-            Some(ChannelDecimatorPool::new(
-                preset,
-                self.topology.decimation_stages,
-                num_channels,
-                TILE_BASEBAND_FRAMES * self.topology.decimation_divider() * 4,
-            ))
-        } else {
-            None
-        };
-
-        let mut asrc_resamplers: Vec<PolyphaseResampler> = Vec::new();
-        let mut asrc_drift_ctrl: Option<AdaptiveClockDriftController> = None;
-
-        if is_adaptive {
-            let max_ppm = self
-                .settings
-                .clock
-                .as_ref()
-                .and_then(|c| c.max_correction_ppm)
-                .map(|p| p as f64)
-                .unwrap_or(500.0);
-            let asrc_in_rate = if self.topology.decimation_stages > 0 {
-                self.topology.intermediate_rate
-            } else {
-                self.topology.input_rate
-            };
-            for _ in 0..num_channels {
-                asrc_resamplers.push(PolyphaseResampler::new_asrc(
-                    asrc_in_rate,
-                    self.topology.intermediate_rate,
-                ));
-            }
-            asrc_drift_ctrl = Some(AdaptiveClockDriftController::new(ClockDriftConfig {
+        // The clock controller is shared; workers only apply its common ratio.
+        let mut asrc_drift_ctrl = is_adaptive.then(|| {
+            AdaptiveClockDriftController::new(ClockDriftConfig {
                 max_correction_ppm: max_ppm,
                 ..Default::default()
-            }));
-        } else if self.topology.requires_rational_src {
-            for _ in 0..num_channels {
-                asrc_resamplers.push(PolyphaseResampler::new_rational(
-                    self.topology.input_rate,
-                    self.topology.intermediate_rate,
-                )?);
-            }
-        }
+            })
+        });
 
         let mut dop_packer = match self.carrier {
             IdleCarrierFormat::DoP(fmt) => Some(DopPacker::new(fmt)),
@@ -839,19 +838,16 @@ impl LivePipeline {
         let mut lifecycle = LifecycleController::new(self.carrier, 256, 256);
         let _ = lifecycle.start();
 
-        let cascade_tile_len = TILE_BASEBAND_FRAMES * mult;
-        let dec_divider = self.topology.decimation_divider();
-        let input_tile_frames = TILE_BASEBAND_FRAMES * dec_divider;
+        let cascade_tile_len = processor.output_frame_capacity() * mult;
+        let input_tile_frames = processor.input_frame_capacity();
 
         let mut in_channels: Vec<Vec<f64>> = (0..num_channels)
             .map(|_| vec![0.0; input_tile_frames])
             .collect();
-        let mut baseband_channels: Vec<Vec<f64>> = (0..num_channels)
-            .map(|_| vec![0.0; TILE_BASEBAND_FRAMES * 2])
+        let mut dsd_in_channels: Vec<Vec<u8>> = (0..num_channels)
+            .map(|_| vec![0; processor.input_dsd_byte_capacity()])
             .collect();
-        let mut src_out_channels: Vec<Vec<f64>> = (0..num_channels)
-            .map(|_| vec![0.0; TILE_BASEBAND_FRAMES * 2])
-            .collect();
+        let mut frame_gains = vec![FrameGain::Preserve; TILE_BASEBAND_FRAMES];
 
         let staging_len = (cascade_tile_len * 4 * num_channels.max(2)).max(16384);
         let mut transport_staging = vec![0u8; staging_len];
@@ -1056,7 +1052,7 @@ impl LivePipeline {
                 )? {
                     if is_idle {
                         is_idle = false;
-                        let _ = processor.reset();
+                        processor.reset_output()?;
                         let _ = lifecycle.start();
                     }
                     consecutive_empty_polls = 0;
@@ -1068,19 +1064,29 @@ impl LivePipeline {
                 }
             }
 
-            // Read input frames
-            let frames_read = if pending_rate_switch.is_some() && lifecycle.is_draining() {
+            // Read/split only: channel DSP begins in the workers, not the input driver.
+            // Planned drains inject PCM zeros after DSD decoding, preserving the
+            // input decoder history while clearing the downstream filter tails.
+            let draining_input = pending_rate_switch.is_some() && lifecycle.is_draining();
+            let read_raw_dsd = raw_dsd_input.is_some() && !draining_input;
+            let input_units = if draining_input {
                 for ch in in_channels.iter_mut() {
                     ch.fill(0.0);
                 }
                 TILE_BASEBAND_FRAMES
+            } else if read_raw_dsd {
+                let mut slices: DsdMutSlices<'_> = dsd_in_channels
+                    .iter_mut()
+                    .map(|v| v.as_mut_slice())
+                    .collect();
+                input.read_dsd_bytes(&mut slices)?
             } else {
                 let mut slices: ChannelMutSlices<'_> =
                     in_channels.iter_mut().map(|v| v.as_mut_slice()).collect();
                 input.read_channels(&mut slices)?
             };
 
-            if frames_read == 0 && pending_rate_switch.is_none() {
+            if input_units == 0 && pending_rate_switch.is_none() {
                 consecutive_empty_polls = consecutive_empty_polls.saturating_add(1);
                 empty_polls_total = empty_polls_total.saturating_add(1);
                 // During active streaming, allow a generous grace window (~100 ms) for the next
@@ -1131,44 +1137,27 @@ impl LivePipeline {
 
             if is_idle {
                 is_idle = false;
-                let _ = processor.reset();
+                processor.reset_output()?;
                 let _ = lifecycle.start();
             }
             consecutive_empty_polls = 0;
             consecutive_empty_tiles = 0;
-            total_input_frames += frames_read as u64;
-
-            let (baseband_frames, use_baseband_direct) = if let Some(ref mut dec) = decimator {
-                let dec_in: Vec<&[f64]> = in_channels.iter().map(|ch| &ch[..frames_read]).collect();
-                let mut dec_out: Vec<&mut [f64]> =
-                    baseband_channels.iter_mut().map(|ch| &mut ch[..]).collect();
-                let produced = dec.process(&dec_in, &mut dec_out)?;
-                if produced == 0 {
-                    continue;
-                }
-                (produced, true)
+            let baseband_frames = if read_raw_dsd {
+                processor.dsd_baseband_frames(input_units)?
             } else {
-                (frames_read, false)
+                processor.pcm_baseband_frames(input_units)?
             };
-
-            // Apply pre-SRC gain and lifecycle cosine ramping
-            let active_buf = if use_baseband_direct {
-                &mut baseband_channels
+            // Retain the existing telemetry units: decoded PCM frames for DSD
+            // input, source PCM frames otherwise.
+            total_input_frames += if read_raw_dsd {
+                processor.dsd_decoded_frames(input_units)?
             } else {
-                &mut in_channels
-            };
+                input_units
+            } as u64;
 
-            let mut active_slices: ChannelMutSlices<'_> = active_buf
-                .iter_mut()
-                .map(|v| &mut v[..baseband_frames])
-                .collect();
-            let action = lifecycle.process_input_channels(&mut active_slices);
-            drop(active_slices);
-            for ch in active_buf.iter_mut() {
-                for sample in ch.iter_mut().take(baseband_frames) {
-                    *sample *= linear_gain;
-                }
-            }
+            // Prepare one channel-independent lifecycle envelope. Workers apply
+            // it after decimation and before SRC, in the original operation order.
+            let action = lifecycle.prepare_input_gains(&mut frame_gains[..baseband_frames]);
 
             // Check if muting drain finished
             if action == BlockAction::Drained {
@@ -1183,9 +1172,8 @@ impl LivePipeline {
                 }
             }
 
-            // Polyphase SRC / ASRC
-            let proc_len = if !asrc_resamplers.is_empty() {
-                // Update drift controller BEFORE running resamplers
+            // Update the shared drift controller once BEFORE worker SRC execution.
+            if baseband_frames > 0 {
                 let dt = baseband_frames as f64 / self.topology.intermediate_rate.get() as f64;
                 if let Some(ref mut drift_ctrl) = asrc_drift_ctrl {
                     // Only control the ASRC when the input can report a real
@@ -1217,61 +1205,33 @@ impl LivePipeline {
                             }
                         };
                         current_drift_ppm = ppm;
-                        for r in asrc_resamplers.iter_mut() {
-                            r.set_drift_ppm(ppm);
-                        }
                     }
                 }
-
-                let in_source = if use_baseband_direct {
-                    &baseband_channels
-                } else {
-                    &in_channels
-                };
-                let mut min_prod = usize::MAX;
-                for c in 0..num_channels {
-                    let in_slice = &in_source[c][..baseband_frames];
-                    let (_, prod) = asrc_resamplers[c].process(in_slice, &mut src_out_channels[c]);
-                    min_prod = min_prod.min(prod);
-                }
-
-                min_prod
-            } else {
-                baseband_frames
-            };
+            }
 
             // Update the buffer-fill context used by late-tile capture. This is a
             // lock-free atomic publish; the audio loop adds no I/O or formatting.
             processor.set_buffer_fill_ms(input.buffer_fill_secs().map(|s| s * 1000.0));
 
-            // Interpolation & Modulation in bounded tiles via ChannelWorkerPool
-            let mut offset = 0;
-            while offset < proc_len {
-                let tile = (proc_len - offset).min(TILE_BASEBAND_FRAMES);
-                let req_out = tile * mult;
+            let controls = InputTileControls {
+                frame_gains: &frame_gains[..baseband_frames],
+                linear_gain,
+                drift_ppm: current_drift_ppm,
+            };
+            let proc_len = if read_raw_dsd {
+                let slices: DsdSlices<'_> = dsd_in_channels
+                    .iter()
+                    .map(|ch| &ch[..input_units])
+                    .collect();
+                processor.process_input_dsd(&slices, controls)?
+            } else {
+                let slices: ChannelSlices<'_> =
+                    in_channels.iter().map(|ch| &ch[..input_units]).collect();
+                processor.process_input_pcm(&slices, controls)?
+            };
 
-                let tile_slices: ChannelSlices<'_> = if !asrc_resamplers.is_empty() {
-                    src_out_channels
-                        .iter()
-                        .map(|ch| &ch[offset..offset + tile])
-                        .collect()
-                } else if use_baseband_direct {
-                    baseband_channels
-                        .iter()
-                        .map(|ch| &ch[offset..offset + tile])
-                        .collect()
-                } else {
-                    in_channels
-                        .iter()
-                        .map(|ch| &ch[offset..offset + tile])
-                        .collect()
-                };
-
-                if is_dsd {
-                    processor.process_tile_dsd(&tile_slices)?;
-                } else {
-                    processor.process_tile_pcm(&tile_slices)?;
-                }
+            if proc_len > 0 {
+                let req_out = proc_len * mult;
 
                 if is_dsd {
                     let out_l = processor.channel_dsd(0);
@@ -1364,8 +1324,6 @@ impl LivePipeline {
 
                     total_output_frames += req_out as u64;
                 }
-
-                offset += tile;
             }
 
             sync_telemetry!(false);

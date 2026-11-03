@@ -2,7 +2,9 @@ use audigma_dsp::rates::PcmRateHz;
 use audigma_engine::live_pipeline::{
     DaemonControlHandle, DaemonOutputFormat, DaemonState, LivePipeline,
 };
-use audigma_engine::traits::{AudioInput, AudioOutput, MockAudioInput};
+use audigma_engine::traits::{
+    AudioInput, AudioOutput, DsdDecodeConfig, EngineError, MockAudioInput,
+};
 use audigma_format::AudioStreamInfo;
 use audigma_settings::{OutputContainer, Settings};
 use std::io::Write;
@@ -154,4 +156,173 @@ pcm_rate_hz = 96000
     let (mock_out, res) = handle.join().expect("Thread join");
     assert_eq!(res.unwrap(), audigma_engine::StreamExitReason::Stopped);
     assert!(!mock_out.bytes.is_empty());
+}
+
+/// Raw-only input proves that live conversion does not call the serial decoded
+/// read path. Playback stops deterministically after the final fragment.
+struct RawOnlyDsdInput {
+    info: AudioStreamInfo,
+    bytes: Vec<u8>,
+    pos: usize,
+    fragment_bytes: usize,
+    reads: usize,
+    switch_rate: bool,
+    control: DaemonControlHandle,
+}
+
+impl AudioInput for RawOnlyDsdInput {
+    fn info(&self) -> &AudioStreamInfo {
+        &self.info
+    }
+
+    fn read_stereo(&mut self, _left: &mut [f64], _right: &mut [f64]) -> Result<usize, EngineError> {
+        panic!("live DSD conversion must not decode on the input/coordinator thread");
+    }
+
+    fn dsd_decode_config(&self) -> Option<DsdDecodeConfig> {
+        Some(DsdDecodeConfig {
+            preset: audigma_dsp::FilterPreset::Balanced,
+            decimation_stages: 4,
+            gain_db: 0.0,
+        })
+    }
+
+    fn read_dsd_bytes(&mut self, channels: &mut [&mut [u8]]) -> Result<usize, EngineError> {
+        let bytes = channels
+            .iter()
+            .map(|channel| channel.len())
+            .min()
+            .unwrap_or(0)
+            .min(self.fragment_bytes)
+            .min(self.bytes.len() - self.pos);
+        for channel in channels {
+            channel[..bytes].copy_from_slice(&self.bytes[self.pos..self.pos + bytes]);
+        }
+        self.pos += bytes;
+        self.reads += 1;
+        if self.pos == self.bytes.len() && !self.switch_rate {
+            self.control.stop();
+        }
+        Ok(bytes)
+    }
+
+    fn check_rate_change(&self) -> Option<PcmRateHz> {
+        (self.switch_rate && self.reads > 0).then_some(PcmRateHz::PCM_192000)
+    }
+
+    fn buffer_fill_secs(&self) -> Option<f64> {
+        Some(0.060)
+    }
+    fn can_rewind(&self) -> bool {
+        false
+    }
+    fn rewind(&mut self) -> Result<(), EngineError> {
+        Err(EngineError::TwoPassRequiresSeekableInput)
+    }
+}
+
+fn raw_dsd_settings(target: &str) -> Settings {
+    Settings::from_toml_str(&format!(
+        r#"
+schema_version = 1
+[input]
+backend = "pipewire"
+channels = 2
+allow_dsd = true
+[output]
+backend = "alsa"
+device = "null"
+transport = "native"
+[target]
+{target}
+[gain]
+headroom = "profile"
+overload_policy = "mute-recover"
+[clock]
+mode = "adaptive-input"
+max_correction_ppm = 500
+"#
+    ))
+    .unwrap()
+}
+
+fn raw_only_input(
+    control: DaemonControlHandle,
+    bytes: usize,
+    fragment_bytes: usize,
+    switch_rate: bool,
+) -> RawOnlyDsdInput {
+    RawOnlyDsdInput {
+        info: AudioStreamInfo::new_dsd(audigma_dsp::DsdBitRateHz::DSD64, 2, Some(bytes as u64 * 8)),
+        bytes: vec![0x69; bytes],
+        pos: 0,
+        fragment_bytes,
+        reads: 0,
+        switch_rate,
+        control,
+    }
+}
+
+#[test]
+fn live_raw_dsd512_conversion_preserves_fragmented_input_without_serial_decode() {
+    let settings =
+        raw_dsd_settings("format = \"dsd\"\nrate_family = \"source\"\ndsd_rate = \"dsd512\"");
+    let pipeline = LivePipeline::prepare(settings, PcmRateHz::PCM_176400).unwrap();
+    let control =
+        DaemonControlHandle::new(176400, DaemonOutputFormat::Dsd, 22579200, "balanced", 0.0);
+    let mut input = raw_only_input(control.clone(), 513, 13, false);
+    let mut output = TestOutputSink::default();
+    assert_eq!(
+        pipeline
+            .run_streaming(&mut input, &mut output, control.clone())
+            .unwrap(),
+        audigma_engine::StreamExitReason::Stopped
+    );
+    assert!(input.reads > 1);
+    assert_eq!(control.get_telemetry().total_input_frames, 256);
+    // 256 decoded frames * 128 DSD bits/frame/channel, plus the existing idle tail.
+    assert_eq!(output.bytes.len(), 256 * 128 / 8 * 2 + 1024 * 8);
+}
+
+#[test]
+fn live_raw_dsd_pcm_downsampling_keeps_decoded_input_and_output_counts() {
+    let settings = raw_dsd_settings(
+        "format = \"pcm\"\nrate_family = \"source\"\npcm_rate_hz = 44100\nsample_format = \"f64\"",
+    );
+    let pipeline = LivePipeline::prepare(settings, PcmRateHz::PCM_176400).unwrap();
+    let control = DaemonControlHandle::new(176400, DaemonOutputFormat::Pcm, 44100, "balanced", 0.0);
+    let mut input = raw_only_input(control.clone(), 2049, 31, false);
+    let mut output = TestOutputSink::default();
+    assert_eq!(
+        pipeline
+            .run_streaming(&mut input, &mut output, control.clone())
+            .unwrap(),
+        audigma_engine::StreamExitReason::Stopped
+    );
+    let telemetry = control.get_telemetry();
+    assert_eq!(telemetry.total_input_frames, 1024);
+    assert_eq!(telemetry.total_output_frames, 256);
+    assert_eq!(output.bytes.len(), 256 * 2 * 8 + 1024 * 2 * 4);
+}
+
+#[test]
+fn live_raw_dsd_rate_switch_drains_with_pcm_zeros_without_decoded_reads() {
+    let settings =
+        raw_dsd_settings("format = \"dsd\"\nrate_family = \"source\"\ndsd_rate = \"dsd512\"");
+    let pipeline = LivePipeline::prepare(settings, PcmRateHz::PCM_176400).unwrap();
+    let control =
+        DaemonControlHandle::new(176400, DaemonOutputFormat::Dsd, 22579200, "balanced", 0.0);
+    let mut input = raw_only_input(control.clone(), 512, 512, true);
+    let mut output = TestOutputSink::default();
+    assert_eq!(
+        pipeline
+            .run_streaming(&mut input, &mut output, control)
+            .unwrap(),
+        audigma_engine::StreamExitReason::RateChanged {
+            new_rate: PcmRateHz::PCM_192000,
+            channels: 2
+        }
+    );
+    assert_eq!(input.reads, 1);
+    assert!(!output.bytes.is_empty());
 }

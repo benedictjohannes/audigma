@@ -30,7 +30,9 @@ pub use late::{
     LateCounterSource, LateCounters, LateEpisodeAggregator, LateRecord, LateTileMonitor,
     LateTileTelemetry,
 };
-pub use lifecycle::{BlockAction, IdleCarrierFormat, LifecycleController, LifecycleState};
+pub use lifecycle::{
+    BlockAction, FrameGain, IdleCarrierFormat, LifecycleController, LifecycleState,
+};
 pub use live_pipeline::{
     DaemonControlHandle, DaemonOutputFormat, DaemonState, DaemonTelemetry, DaemonVolumeMode,
     LivePipeline, StreamExitReason,
@@ -42,11 +44,13 @@ pub use queue::{AudioSpscQueue, DEFAULT_CHUNK_SAMPLES, TaggedChunk};
 pub use tail::TailManager;
 pub use topology::PipelineTopology;
 pub use traits::{
-    AudioInput, AudioOutput, DecoderInput, EngineError, HardwareVolumeBridge, MockAudioInput,
-    SeekableSink, StreamSink, VolumeUpdate,
+    AudioInput, AudioOutput, DecoderInput, DsdDecodeConfig, EngineError, HardwareVolumeBridge,
+    MockAudioInput, SeekableSink, StreamSink, VolumeUpdate,
 };
 pub use transport::{
     is_dsd_passthrough_eligible, pack_and_write_stereo_dsd, process_live_dsd_passthrough_tile,
     transfer_offline_dsd_passthrough, write_output_all,
 };
-pub use worker::{ChannelWorkerPool, TargetDsdConfig};
+pub use worker::{
+    ChannelWorkerPool, InputDspConfig, InputResampling, InputTileControls, TargetDsdConfig,
+};

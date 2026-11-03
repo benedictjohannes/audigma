@@ -67,6 +67,15 @@ pub struct VolumeUpdate {
     pub is_muted: Option<bool>,
 }
 
+/// DSP configuration for converting an input's raw, MSB-first DSD bytes to
+/// the intermediate PCM rate advertised by `AudioInput::info()`.
+#[derive(Debug, Clone, Copy)]
+pub struct DsdDecodeConfig {
+    pub preset: audigma_dsp::FilterPreset,
+    pub decimation_stages: usize,
+    pub gain_db: f64,
+}
+
 /// Abstract streaming audio input trait.
 pub trait AudioInput: Send {
     /// Returns metadata describing the input audio stream.
@@ -102,6 +111,16 @@ pub trait AudioInput: Send {
         Err(EngineError::InvalidTopology {
             message: "audio input driver does not support raw DSD reading".into(),
         })
+    }
+
+    /// Opts into raw DSD dispatch to channel workers instead of decoding inside
+    /// `read_channels`. The input remains responsible only for byte ordering,
+    /// channel splitting, queue accounting, and preroll on this path.
+    ///
+    /// Returning `None` preserves the decoded-PCM input path for adapters that
+    /// cannot expose raw DSD or have additional decoding requirements.
+    fn dsd_decode_config(&self) -> Option<DsdDecodeConfig> {
+        None
     }
 
     /// Checks if a dynamic input sample rate change has been negotiated.
@@ -456,6 +475,21 @@ impl MockAudioInput {
 impl AudioInput for MockAudioInput {
     fn info(&self) -> &AudioStreamInfo {
         &self.info
+    }
+
+    fn dsd_decode_config(&self) -> Option<DsdDecodeConfig> {
+        if self.dsd_channels.is_empty() {
+            return None;
+        }
+        let stages = self
+            .info
+            .dsd_bit_rate?
+            .power_of_two_decimation_stages_to(self.info.sample_rate)?;
+        Some(DsdDecodeConfig {
+            preset: audigma_dsp::FilterPreset::Balanced,
+            decimation_stages: stages as usize,
+            gain_db: 0.0,
+        })
     }
 
     fn read_stereo(&mut self, left: &mut [f64], right: &mut [f64]) -> Result<usize, EngineError> {

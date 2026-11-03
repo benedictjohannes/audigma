@@ -9,7 +9,9 @@ use audigma_dsp::config::{Apodization, FilterPhase, FilterPreset, TargetRateSpec
 use crate::late::LateTileTelemetry;
 use crate::topology::PipelineTopology;
 use crate::traits::EngineError;
-use crate::worker::{ChannelWorkerPool, TargetDsdConfig};
+use crate::worker::{
+    ChannelWorkerPool, InputDspConfig, InputResampling, InputTileControls, TargetDsdConfig,
+};
 
 /// Executes individual audio tiles through the half-band filter cascade and delta-sigma modulators,
 /// measuring wall-clock execution against real-time deadline budgets when real-time tracking is enabled.
@@ -38,7 +40,64 @@ impl TileProcessor {
         is_realtime: bool,
         thread_init_hook: Option<Arc<dyn Fn(usize) + Send + Sync>>,
     ) -> Result<Self, EngineError> {
-        let worker_pool = ChannelWorkerPool::new(
+        Self::new_configured(
+            channels,
+            preset,
+            phase,
+            apodization,
+            topology,
+            tile_baseband_frames,
+            target_dsd,
+            is_realtime,
+            None,
+            thread_init_hook,
+        )
+    }
+
+    /// Includes input decimation, lifecycle gain, and SRC in worker execution
+    /// and timing. A full job's budget is its duration before SRC, so cross-family
+    /// conversion does not mistake a larger SRC result for additional input time.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_input(
+        channels: usize,
+        preset: FilterPreset,
+        phase: FilterPhase,
+        apodization: Apodization,
+        topology: PipelineTopology,
+        tile_baseband_frames: usize,
+        target_dsd: Option<TargetDsdConfig>,
+        is_realtime: bool,
+        input_config: InputDspConfig,
+        thread_init_hook: Option<Arc<dyn Fn(usize) + Send + Sync>>,
+    ) -> Result<Self, EngineError> {
+        Self::new_configured(
+            channels,
+            preset,
+            phase,
+            apodization,
+            topology,
+            tile_baseband_frames,
+            target_dsd,
+            is_realtime,
+            Some(input_config),
+            thread_init_hook,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_configured(
+        channels: usize,
+        preset: FilterPreset,
+        phase: FilterPhase,
+        apodization: Apodization,
+        topology: PipelineTopology,
+        tile_baseband_frames: usize,
+        target_dsd: Option<TargetDsdConfig>,
+        is_realtime: bool,
+        input_config: Option<InputDspConfig>,
+        thread_init_hook: Option<Arc<dyn Fn(usize) + Send + Sync>>,
+    ) -> Result<Self, EngineError> {
+        let worker_pool = ChannelWorkerPool::new_with_input(
             channels,
             preset,
             phase,
@@ -46,12 +105,20 @@ impl TileProcessor {
             topology.cascade_stages,
             tile_baseband_frames,
             target_dsd,
+            input_config,
             thread_init_hook,
         )?;
 
+        let budget_rate = match input_config.map(|config| config.resampling) {
+            Some(
+                InputResampling::Rational { input_rate, .. }
+                | InputResampling::Adaptive { input_rate, .. },
+            ) => input_rate,
+            _ => topology.intermediate_rate,
+        };
         let tile_budget = if is_realtime {
             Some(Duration::from_secs_f64(
-                tile_baseband_frames as f64 / topology.intermediate_rate.get() as f64,
+                tile_baseband_frames as f64 / budget_rate.get() as f64,
             ))
         } else {
             None
@@ -103,6 +170,44 @@ impl TileProcessor {
             self.worker_pool.process_tile_dsd(inputs)?;
         }
         Ok(())
+    }
+
+    /// Dispatches input PCM before any channel DSP and measures all worker stages.
+    pub fn process_input_pcm(
+        &mut self,
+        inputs: &[&[f64]],
+        controls: InputTileControls<'_>,
+    ) -> Result<usize, EngineError> {
+        if let Some(budget) = self.tile_budget {
+            let frames = self
+                .worker_pool
+                .pcm_baseband_frames(inputs.first().map_or(0, |input| input.len()))?;
+            let start = Instant::now();
+            let produced = self.worker_pool.process_input_pcm(inputs, controls)?;
+            self.record_tile_metrics(frames, start.elapsed(), budget);
+            Ok(produced)
+        } else {
+            self.worker_pool.process_input_pcm(inputs, controls)
+        }
+    }
+
+    /// Dispatches raw DSD before unpacking/decimation and measures all worker stages.
+    pub fn process_input_dsd(
+        &mut self,
+        inputs: &[&[u8]],
+        controls: InputTileControls<'_>,
+    ) -> Result<usize, EngineError> {
+        if let Some(budget) = self.tile_budget {
+            let frames = self
+                .worker_pool
+                .dsd_baseband_frames(inputs.first().map_or(0, |input| input.len()))?;
+            let start = Instant::now();
+            let produced = self.worker_pool.process_input_dsd(inputs, controls)?;
+            self.record_tile_metrics(frames, start.elapsed(), budget);
+            Ok(produced)
+        } else {
+            self.worker_pool.process_input_dsd(inputs, controls)
+        }
     }
 
     #[inline]

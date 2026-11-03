@@ -10,7 +10,7 @@
 use audigma_dsp::{DsdBitRateHz, PcmRateHz};
 use audigma_engine::VolumeUpdate;
 use audigma_engine::queue::TaggedChunk;
-use audigma_engine::traits::{AudioInput, AudioOutput, EngineError};
+use audigma_engine::traits::{AudioInput, AudioOutput, DsdDecodeConfig, EngineError};
 use audigma_format::AudioStreamInfo;
 use audigma_settings::{InputConfig, RateMode};
 use libspa::param::audio::{AudioFormat, AudioInfoRaw};
@@ -599,6 +599,8 @@ pub struct PipeWireVirtualSink {
     dsd_gain_db: f64,
     dsd_preset: audigma_dsp::FilterPreset,
     dsd_max_intermediate_rate: Option<PcmRateHz>,
+    /// Lazy compatibility decoders for callers of `read_channels`. The live
+    /// worker-input path reads raw bytes and never constructs these cascades.
     decimators: Vec<audigma_dsp::fir::HalfBandDecimationCascade>,
     dsd_scratch: Vec<Vec<u8>>,
     dsd_residue: Vec<Vec<u8>>,
@@ -1460,6 +1462,25 @@ impl PipeWireVirtualSink {
         }
     }
 
+    /// Applies the same duration-based preroll to PCM, decoded DSD, and raw DSD.
+    fn input_ready(&mut self) -> bool {
+        if !self.prerolled {
+            if !input_preroll_ready(
+                self.buffered_duration_secs(),
+                self.preroll_secs,
+                self.is_dsd.load(Ordering::Relaxed),
+                self.consumer.slots(),
+                self.consumer.buffer().capacity(),
+            ) {
+                return false;
+            }
+            self.prerolled = true;
+        } else if self.buffered_units.load(Ordering::Relaxed) == 0 {
+            return false;
+        }
+        true
+    }
+
     /// Reads raw DSD bytes, optionally accounting them against `buffered_units`.
     ///
     /// The public `AudioInput::read_dsd_bytes` accounts each byte read. The
@@ -1476,6 +1497,9 @@ impl PipeWireVirtualSink {
         }
         let max_bytes = channels.iter().map(|s| s.len()).min().unwrap_or(0);
         if max_bytes == 0 {
+            return Ok(0);
+        }
+        if !self.input_ready() {
             return Ok(0);
         }
 
@@ -1563,6 +1587,18 @@ impl AudioInput for PipeWireVirtualSink {
         &self.info
     }
 
+    fn dsd_decode_config(&self) -> Option<DsdDecodeConfig> {
+        let stages = self
+            .info
+            .dsd_bit_rate?
+            .power_of_two_decimation_stages_to(self.info.sample_rate)?;
+        Some(DsdDecodeConfig {
+            preset: self.dsd_preset,
+            decimation_stages: stages as usize,
+            gain_db: self.dsd_gain_db,
+        })
+    }
+
     fn read_stereo(&mut self, left: &mut [f64], right: &mut [f64]) -> Result<usize, EngineError> {
         self.read_channels(&mut [left, right])
     }
@@ -1576,22 +1612,23 @@ impl AudioInput for PipeWireVirtualSink {
             return Ok(0);
         }
 
-        if !self.prerolled {
-            if !input_preroll_ready(
-                self.buffered_duration_secs(),
-                self.preroll_secs,
-                self.is_dsd.load(Ordering::Relaxed),
-                self.consumer.slots(),
-                self.consumer.buffer().capacity(),
-            ) {
-                return Ok(0);
-            }
-            self.prerolled = true;
-        } else if self.buffered_units.load(Ordering::Relaxed) == 0 {
+        if !self.input_ready() {
             return Ok(0);
         }
 
-        if self.info.is_dsd() && !self.decimators.is_empty() {
+        if let Some(config) = self.dsd_decode_config() {
+            if self.decimators.is_empty() {
+                self.decimators = (0..self.info.original_channels)
+                    .map(|_| {
+                        audigma_dsp::fir::HalfBandDecimationCascade::new(
+                            config.preset,
+                            config.decimation_stages,
+                            65536,
+                        )
+                        .with_gain_db(config.gain_db)
+                    })
+                    .collect();
+            }
             let stages = self.decimators[0].num_stages();
             let divider = 1usize << stages;
             let dsd_bytes_per_pcm = divider.div_ceil(8);
@@ -1809,6 +1846,7 @@ impl AudioInput for PipeWireVirtualSink {
         for r in self.dsd_residue.iter_mut() {
             r.clear();
         }
+        self.decimators.clear();
         if self.is_dsd.load(Ordering::SeqCst) {
             let dsd_rate_raw = self.active_dsd_bit_rate.load(Ordering::SeqCst);
             if let Some(dsd_rate) = DsdBitRateHz::new(dsd_rate_raw) {
@@ -1823,24 +1861,9 @@ impl AudioInput for PipeWireVirtualSink {
                     None,
                     intermediate_rate,
                 );
-                let stages = dsd_rate
-                    .power_of_two_decimation_stages_to(intermediate_rate)
-                    .unwrap_or(4) as usize;
-                let ch_count = self.info.original_channels as usize;
-                self.decimators = (0..ch_count)
-                    .map(|_| {
-                        audigma_dsp::fir::HalfBandDecimationCascade::new(
-                            self.dsd_preset,
-                            stages,
-                            65536,
-                        )
-                        .with_gain_db(self.dsd_gain_db)
-                    })
-                    .collect();
                 return;
             }
         }
-        self.decimators.clear();
         self.info = AudioStreamInfo::new_pcm(rate, self.info.original_channels, None, Some(32));
     }
 
@@ -2247,6 +2270,57 @@ mod output_tests {
 mod input_clock_tests {
     use super::*;
 
+    fn dsd_chunk(bytes: usize) -> TaggedChunk {
+        TaggedChunk {
+            generation: 0,
+            channels: 2,
+            is_dsd: true,
+            len: bytes * 2,
+            samples: Vec::new(),
+            dsd_bytes: (0..bytes).flat_map(|_| [0x69, 0x96]).collect(),
+        }
+    }
+
+    // No PipeWire connection or device access: exercise the actual raw/decoded
+    // consumers using only their in-memory capture queue and native-unit counters.
+    fn dsd_sink(bytes: usize) -> (PipeWireVirtualSink, Producer<TaggedChunk>) {
+        let (producer, consumer) = RingBuffer::new(128);
+        (
+            PipeWireVirtualSink {
+                info: AudioStreamInfo::new_dsd(DsdBitRateHz::DSD64, 2, None),
+                _worker: None,
+                consumer,
+                current_chunk: Some(dsd_chunk(bytes)),
+                read_offset: 0,
+                generation: Arc::new(AtomicU64::new(0)),
+                active_rate: Arc::new(AtomicU32::new(176400)),
+                pending_rate: Arc::new(AtomicU32::new(0)),
+                is_dsd: Arc::new(AtomicBool::new(true)),
+                is_lsb: Arc::new(AtomicBool::new(false)),
+                interleave: Arc::new(AtomicI32::new(1)),
+                active_dsd_bit_rate: Arc::new(AtomicU32::new(DsdBitRateHz::DSD64.get())),
+                pending_volume: Arc::new(Mutex::new(None)),
+                running: Arc::new(AtomicBool::new(true)),
+                dropped_chunks: Arc::new(AtomicU64::new(0)),
+                processed_chunks: Arc::new(AtomicU64::new(1)),
+                buffered_units: Arc::new(AtomicU64::new(bytes as u64)),
+                dsd_gain_db: 3.0,
+                dsd_preset: audigma_dsp::FilterPreset::Reference,
+                dsd_max_intermediate_rate: None,
+                decimators: Vec::new(),
+                dsd_scratch: Vec::new(),
+                dsd_residue: Vec::new(),
+                prerolled: false,
+                preroll_secs: 0.090,
+                capture_cushion_ns: Arc::new(AtomicU64::new(90_000_000)),
+                rt_consumer: None,
+                dropped_rt_events: Arc::new(AtomicU64::new(0)),
+                decimation_recorder: Arc::new(audigma_log::DecimationErrorRecorder::new()),
+            },
+            producer,
+        )
+    }
+
     #[test]
     fn fixed_dsd_buffer_bounds_are_exact() {
         let bytes = build_buffers_pod_bounds(2, 512, 512, 512).unwrap();
@@ -2278,5 +2352,67 @@ mod input_clock_tests {
         assert!(input_preroll_ready(0.006, 0.090, true, 64, 128));
         assert!(input_preroll_ready(0.090, 0.090, true, 4, 128));
         assert!(!input_preroll_ready(0.006, 0.090, false, 64, 128));
+    }
+
+    #[test]
+    fn raw_dsd_reads_preserve_preroll_accounting_and_do_not_construct_decoders() {
+        let (mut sink, mut producer) = dsd_sink(512);
+        let mut left = [0; 2];
+        let mut right = [0; 2];
+        assert_eq!(
+            sink.read_dsd_bytes(&mut [&mut left, &mut right]).unwrap(),
+            0
+        );
+        assert!(!sink.prerolled);
+        assert_eq!(sink.read_offset, 0);
+
+        producer.push(dsd_chunk(40000)).unwrap();
+        sink.buffered_units.fetch_add(40000, Ordering::Relaxed);
+        assert_eq!(
+            sink.read_dsd_bytes(&mut [&mut left, &mut right]).unwrap(),
+            2
+        );
+        assert_eq!(left, [0x69; 2]);
+        assert_eq!(right, [0x96; 2]);
+        assert_eq!(sink.buffered_units.load(Ordering::Relaxed), 40510);
+        assert!(sink.decimators.is_empty());
+        assert!(sink.dsd_scratch.is_empty());
+        let config = sink.dsd_decode_config().unwrap();
+        assert_eq!(config.preset, audigma_dsp::FilterPreset::Reference);
+        assert_eq!(config.decimation_stages, 4);
+        assert_eq!(config.gain_db, 3.0);
+
+        AudioInput::set_active_rate(&mut sink, PcmRateHz::PCM_176400);
+        assert!(!sink.prerolled);
+        assert_eq!(
+            sink.read_dsd_bytes(&mut [&mut left, &mut right]).unwrap(),
+            0
+        );
+        assert!(sink.decimators.is_empty());
+    }
+
+    #[test]
+    fn decoded_dsd_read_compatibility_retains_filter_gain_and_sample_bits() {
+        let (mut sink, _producer) = dsd_sink(40000);
+        let mut left = [0.0; 256];
+        let mut right = [0.0; 256];
+        assert_eq!(sink.read_stereo(&mut left, &mut right).unwrap(), 256);
+        assert_eq!(sink.decimators.len(), 2);
+        assert_eq!(sink.buffered_units.load(Ordering::Relaxed), 40000 - 512);
+        for (actual, byte) in [(&left, 0x69), (&right, 0x96)] {
+            let mut reference = audigma_dsp::fir::HalfBandDecimationCascade::new(
+                audigma_dsp::FilterPreset::Reference,
+                4,
+                65536,
+            )
+            .with_gain_db(3.0);
+            let mut expected = [0.0; 256];
+            reference
+                .process_dsd_bytes(&[byte; 512], &mut expected)
+                .unwrap();
+            for (actual, expected) in actual.iter().zip(expected) {
+                assert_eq!(actual.to_bits(), expected.to_bits());
+            }
+        }
     }
 }
