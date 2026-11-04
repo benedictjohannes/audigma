@@ -46,7 +46,7 @@ In `audigma`, architectural decisions are enforced directly by the Rust type sys
 7. **Decoupled OS Process & PipeWire Graph Lifecycles (`audigma-engine` / `audigma-io`):**
    - USB DAC disconnects, power-cycles, or undocking must never cause the `audigma` daemon process to crash or exit abruptly (unless explicitly configured to fail fast with `device_wait_ms = 0`).
    - The engine decouples the **Process Lifecycle** (`[output] device_wait_ms`, default `-1` = wait indefinitely for device) from the **PipeWire Graph Lifecycle** (`[output] keep_audio_sink_ms`, default `5000` ms grace period).
-   - **Event-Driven Push Detection:** The daemon uses event-driven notification rather than polling loops: ALSA `ENODEV` / `POLLERR` instantly triggers transition to `WaitingForDevice`, while Linux `inotify` on `/dev/snd` (`IN_CREATE`) detects device re-appearance immediately.
+   - **Error-Driven Loss Detection & Inotify Arrival Detection:** Device loss is detected by the output write path: an ALSA `ENODEV` / `EBADFD` / `EIO` returned from a write immediately triggers transition to `WaitingForDevice`. Re-appearance is detected by a Linux `inotify` watch on `/dev/snd` (`IN_CREATE`), which the daemon loop polls in short (200 ms) slices while waiting. Wake-up on arrival is event-driven (no directory scanning, no busy-spin); the slices only bound how often the shutdown flag is checked.
    - **Silent Bit-Bucket Pacing:** While in `WaitingForDevice` within the `keep_audio_sink_ms` window, `PipeWireVirtualSink` continues draining incoming frames into a silent bit-bucket at nominal stream clock, preventing PipeWire application stalls while the DAC settles or reconnects.
 
 8. **Unified Volume Control Boundaries (`audigma-io` / `audigma-engine`):**
@@ -220,9 +220,9 @@ The engine state machine runs through:
 - **Planned Stop / Rate Switch:** Ramp PCM gain to zero pre-SRC $\to$ run `filter_group_delay` frames until the FIR tail clears $\to$ emit the balanced DSD idle pattern (`0x69`) while holding DoP marker alternation (`0x05`/`0xFA`) during device settling.
 - **Resilient Device Disconnect & Reconnect Sequence:**
   $$\text{Running} \xrightarrow{\text{ALSA ENODEV}} \text{WaitingForDevice (draining bit-bucket)} \xrightarrow{\text{inotify /dev/snd arrival}} \text{Re-reserving D-Bus} \xrightarrow{\text{re-open ALSA}} \text{Priming} \xrightarrow{\text{cosine ramp}} \text{Running}$$
-  1. *ALSA Error Push:* When an active hardware device disconnects (unplug or power-off), the ALSA file descriptor emits `POLLERR` / `POLLHUP` and returns `ENODEV`. The engine transitions immediately to `WaitingForDevice`.
+  1. *ALSA Write Error:* When an active hardware device disconnects (unplug or power-off), the next ALSA write fails with `ENODEV` (or `EBADFD` / `EIO`). The engine transitions immediately to `WaitingForDevice`.
   2. *Bit-Bucket Pacing & Grace Period:* If `keep_audio_sink_ms` is positive or `-1`, `PipeWireVirtualSink` stays registered in the PipeWire graph and discards incoming audio frames at nominal stream clock rate. If `keep_audio_sink_ms` expires before the hardware returns, the sink node unregisters from PipeWire to allow desktop audio routing to fall back cleanly to secondary speakers.
-  3. *Zero-Spin Hotplug Arrival:* Linux `inotify` on `/dev/snd` (`IN_CREATE`) wakes the daemon instantly on DAC reconnection. Audigma re-acquires the D-Bus device reservation (`org.freedesktop.ReserveDevice1`), re-opens the ALSA device, re-primes the carrier, re-registers `PipeWireVirtualSink` (if previously torn down), and fades in audio smoothly with a cosine ramp.
+  3. *Event-Driven Hotplug Arrival:* Linux `inotify` on `/dev/snd` (`IN_CREATE`), polled in 200 ms slices that also check for shutdown, wakes the daemon on DAC reconnection without busy-spinning. Audigma re-acquires the D-Bus device reservation (`org.freedesktop.ReserveDevice1`), re-opens the ALSA device, re-primes the carrier, re-registers `PipeWireVirtualSink` (if previously torn down), and fades in audio smoothly with a cosine ramp.
 
 ---
 
@@ -532,8 +532,8 @@ Every filter preset and modulator order in `audigma-dsp` (`presets.rs`) is verif
 2. **Stability & Envelope Tests:**
    - Verify bounded integrator states across DC offsets, $-6\text{ dBFS}$ coherent tones, high-crest-factor multitone bursts, digital silence, and forced overload recovery.
 3. **Real-Time Throughput & Deadline Budget:**
-   - Sustained average DSP throughput $\ge 2\times$ real-time on the host CPU.
-   - **p99.9 worker execution time $\le 70\%$** of the audio-block duration, with zero heap allocations inside `process()`.
+   - **Offline gate (`tools/measure/` harness, `audigma benchmark`):** sustained average DSP throughput $\ge 2\times$ real-time on the host CPU, and **p99.9 worker execution time $\le 70\%$** of the audio-block duration, with zero heap allocations inside `process()`. Worker execution time is the time a worker spends processing its tile, excluding wake-up and barrier waits.
+   - **Live health (`audigma run`):** the live daemon additionally pays for input DSP, worker wake-up and barrier synchronisation, so its per-tile dispatch time is reported separately and is not held to the 70% gate. Live criteria: zero xruns, starvations and dropped chunks; tiles whose dispatch time exceeds the tile budget are tolerated only while the device buffer absorbs them, and are counted and logged (`late_slice` events).
 
 ---
 
