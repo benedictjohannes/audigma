@@ -1,19 +1,17 @@
 //! Handlers for daemon control and IPC subcommands (`stop`, `status`, `set`).
 
-use std::path::PathBuf;
-
 use clap::{Args, Subcommand};
 use serde_json::json;
 
+use super::InstanceArgs;
 use crate::error::CliError;
-use crate::ipc::{ControlClient, IpcError, IpcRequest, IpcResponse, default_socket_path};
+use crate::ipc::{ControlClient, Instance, IpcError, IpcRequest, IpcResponse, list_live_instances};
 use crate::volume::{VolumeArg, parse_volume_arg, validate_volume_db};
 
 #[derive(Args, Debug)]
 pub struct StopArgs {
-    /// Optional control socket path override
-    #[arg(long = "socket")]
-    pub socket: Option<PathBuf>,
+    #[command(flatten)]
+    pub instance: InstanceArgs,
 }
 
 #[derive(Args, Debug)]
@@ -26,9 +24,8 @@ pub struct StatusArgs {
     #[arg(long = "json")]
     pub json: bool,
 
-    /// Optional control socket path override
-    #[arg(long = "socket")]
-    pub socket: Option<PathBuf>,
+    #[command(flatten)]
+    pub instance: InstanceArgs,
 }
 
 #[derive(Args, Debug)]
@@ -36,9 +33,8 @@ pub struct SetArgs {
     #[command(subcommand)]
     pub command: SetCommands,
 
-    /// Optional control socket path override
-    #[arg(long = "socket")]
-    pub socket: Option<PathBuf>,
+    #[command(flatten)]
+    pub instance: InstanceArgs,
 }
 
 #[derive(Subcommand, Debug)]
@@ -53,105 +49,177 @@ pub enum SetCommands {
     Preset { name: String },
 }
 
+/// Picks the instance a control command targets.
+/// Explicit name wins; otherwise the sole live instance; with none live, `default` (so errors
+/// read "not running"); with several live, an error listing them.
+fn resolve_target(explicit: Option<&str>) -> Result<Instance, CliError> {
+    if let Some(name) = explicit {
+        return Ok(Instance::new(name)?);
+    }
+    let mut live = list_live_instances(None);
+    match live.len() {
+        0 => Ok(Instance::default_instance()),
+        1 => Ok(Instance::new(live.remove(0))?),
+        _ => Err(CliError::Other(format!(
+            "multiple audigma instances are running ({}); choose one with -i/--instance",
+            live.join(", ")
+        ))),
+    }
+}
+
+fn print_telemetry(telem: &audigma_engine::DaemonTelemetry) {
+    println!("  State:               {}", telem.state);
+    if let Some(ref target) = telem.device_target {
+        println!("  Device Target:       {}", target);
+    }
+    if let Some(dur) = telem.disconnect_duration_ms {
+        println!("  Disconnected For:    {} ms", dur);
+    }
+    println!("  Uptime:              {}s", telem.uptime_secs);
+
+    println!("  Input Rate:          {} Hz", telem.input_rate_hz);
+    println!(
+        "  Output Target:       {} @ {} Hz",
+        telem.output_format, telem.output_rate_hz
+    );
+    println!("  Active Preset:       {}", telem.preset);
+    let vol_pct = telem.volume_percent;
+    let mute_str = if telem.is_muted { " [MUTED]" } else { "" };
+    println!(
+        "  Volume:              {:.1} dB ({:.0}%){mute_str} (mode: {}, preamp: {:.1} dB)",
+        telem.volume_db, vol_pct, telem.volume_mode, telem.preamp_db
+    );
+    println!(
+        "  Frames In / Out:     {} / {}",
+        telem.total_input_frames, telem.total_output_frames
+    );
+    println!(
+        "  Queue Occupancy:     {:.1}% ({:.1} ms)",
+        telem.queue_fill_pct, telem.buffer_fill_ms
+    );
+    println!(
+        "  Input Ring Chunks:   {} processed, {} dropped",
+        telem.processed_chunks, telem.dropped_chunks
+    );
+    let fault_str = if telem.asrc_fault_active {
+        " [FAULT ACTIVE]"
+    } else {
+        ""
+    };
+    println!(
+        "  ASRC Clock Drift:    {:.1} ppm (starvations: {}, overruns: {}){fault_str}",
+        telem.drift_ppm, telem.asrc_starvations, telem.asrc_overruns
+    );
+    println!(
+        "  Pipeline Health:     {} empty polls, {} idle entries ({} tiles)",
+        telem.empty_polls, telem.idle_entries, telem.idle_tiles
+    );
+    println!(
+        "  DSP Tile Execution:  max {} µs, {} late tiles",
+        telem.max_dsp_tile_us, telem.late_dsp_tiles
+    );
+    println!("  Overload Events:     {}", telem.overload_count);
+    println!("  ALSA XRuns:          {}", telem.xrun_count);
+    if telem.rate_switch_count > 0 {
+        println!("  Rate Switches:       {}", telem.rate_switch_count);
+    }
+}
+
 pub fn run_stop(args: StopArgs) -> Result<(), CliError> {
-    let socket_path = args.socket.unwrap_or_else(default_socket_path);
-    match ControlClient::send(&socket_path, IpcRequest::Stop) {
+    let target = resolve_target(args.instance.instance.as_deref())?;
+    match ControlClient::send(&target, IpcRequest::Stop) {
         Ok(IpcResponse::Ok) => {
-            eprintln!("audigma: stop request sent to daemon.");
+            eprintln!(
+                "audigma: stop request sent to instance '{}'.",
+                target.name()
+            );
             Ok(())
         }
         Ok(IpcResponse::Error(msg)) => Err(CliError::Daemon(msg)),
         Ok(_) => Ok(()),
-        Err(IpcError::DaemonNotRunning(_)) => {
-            eprintln!("audigma: daemon is not running.");
+        Err(IpcError::DaemonNotRunning(name)) => {
+            eprintln!("audigma: instance '{name}' is not running.");
             Ok(())
         }
         Err(e) => Err(CliError::Ipc(e)),
     }
 }
 
+/// Queries one instance. `Ok(None)` means it is not running.
+fn query_status(
+    target: &Instance,
+) -> Result<Option<Box<audigma_engine::DaemonTelemetry>>, CliError> {
+    match ControlClient::send(target, IpcRequest::GetStatus) {
+        Ok(IpcResponse::Telemetry(telem)) => Ok(Some(telem)),
+        Ok(IpcResponse::Error(msg)) => Err(CliError::Daemon(msg)),
+        Ok(_) => Ok(None),
+        Err(IpcError::DaemonNotRunning(_)) => Ok(None),
+        Err(e) => Err(CliError::Ipc(e)),
+    }
+}
+
+fn telemetry_json(
+    name: &str,
+    telem: &audigma_engine::DaemonTelemetry,
+) -> Result<serde_json::Value, CliError> {
+    let mut value =
+        serde_json::to_value(telem).map_err(|e| CliError::Serialization(e.to_string()))?;
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("instance".to_string(), json!(name));
+    }
+    Ok(value)
+}
+
 pub fn run_status(args: StatusArgs) -> Result<(), CliError> {
-    let socket_path = args.socket.unwrap_or_else(default_socket_path);
+    // Bare `status` reports every live instance; `-i` reports exactly one.
+    let targets: Vec<Instance> = match args.instance.instance.as_deref() {
+        Some(name) => vec![Instance::new(name)?],
+        None => {
+            let live = list_live_instances(None);
+            if live.is_empty() {
+                vec![Instance::default_instance()]
+            } else {
+                live.into_iter()
+                    .map(Instance::new)
+                    .collect::<Result<_, _>>()?
+            }
+        }
+    };
+    if args.watch && targets.len() > 1 {
+        return Err(CliError::Other(
+            "--watch needs a single instance; choose one with -i/--instance".to_string(),
+        ));
+    }
 
     loop {
-        match ControlClient::send(&socket_path, IpcRequest::GetStatus) {
-            Ok(IpcResponse::Telemetry(telem)) => {
-                if args.json {
-                    let json_val = serde_json::to_string_pretty(&telem)
-                        .map_err(|e| CliError::Serialization(e.to_string()))?;
-                    println!("{json_val}");
-                } else {
-                    println!("Audigma Daemon Status:");
-                    println!("  State:               {}", telem.state);
-                    if let Some(ref target) = telem.device_target {
-                        println!("  Device Target:       {}", target);
+        let mut json_out = Vec::new();
+        for (idx, target) in targets.iter().enumerate() {
+            match query_status(target)? {
+                Some(telem) if args.json => json_out.push(telemetry_json(target.name(), &telem)?),
+                Some(telem) => {
+                    if idx > 0 {
+                        println!();
                     }
-                    if let Some(dur) = telem.disconnect_duration_ms {
-                        println!("  Disconnected For:    {} ms", dur);
-                    }
-                    println!("  Uptime:              {}s", telem.uptime_secs);
-
-                    println!("  Input Rate:          {} Hz", telem.input_rate_hz);
-                    println!(
-                        "  Output Target:       {} @ {} Hz",
-                        telem.output_format, telem.output_rate_hz
-                    );
-                    println!("  Active Preset:       {}", telem.preset);
-                    let vol_pct = telem.volume_percent;
-                    let mute_str = if telem.is_muted { " [MUTED]" } else { "" };
-                    println!(
-                        "  Volume:              {:.1} dB ({:.0}%){mute_str} (mode: {}, preamp: {:.1} dB)",
-                        telem.volume_db, vol_pct, telem.volume_mode, telem.preamp_db
-                    );
-                    println!(
-                        "  Frames In / Out:     {} / {}",
-                        telem.total_input_frames, telem.total_output_frames
-                    );
-                    println!(
-                        "  Queue Occupancy:     {:.1}% ({:.1} ms)",
-                        telem.queue_fill_pct, telem.buffer_fill_ms
-                    );
-                    println!(
-                        "  Input Ring Chunks:   {} processed, {} dropped",
-                        telem.processed_chunks, telem.dropped_chunks
-                    );
-                    let fault_str = if telem.asrc_fault_active {
-                        " [FAULT ACTIVE]"
-                    } else {
-                        ""
-                    };
-                    println!(
-                        "  ASRC Clock Drift:    {:.1} ppm (starvations: {}, overruns: {}){fault_str}",
-                        telem.drift_ppm, telem.asrc_starvations, telem.asrc_overruns
-                    );
-                    println!(
-                        "  Pipeline Health:     {} empty polls, {} idle entries ({} tiles)",
-                        telem.empty_polls, telem.idle_entries, telem.idle_tiles
-                    );
-                    println!(
-                        "  DSP Tile Execution:  max {} µs, {} late tiles",
-                        telem.max_dsp_tile_us, telem.late_dsp_tiles
-                    );
-                    println!("  Overload Events:     {}", telem.overload_count);
-                    println!("  ALSA XRuns:          {}", telem.xrun_count);
-                    if telem.rate_switch_count > 0 {
-                        println!("  Rate Switches:       {}", telem.rate_switch_count);
-                    }
+                    println!("Audigma Daemon Status (instance: {}):", target.name());
+                    print_telemetry(&telem);
                 }
+                None if args.json => json_out.push(json!({
+                    "instance": target.name(),
+                    "status": "stopped",
+                    "running": false
+                })),
+                None => eprintln!("audigma: instance '{}' is not running.", target.name()),
             }
-            Ok(IpcResponse::Error(msg)) => {
-                return Err(CliError::Daemon(msg));
-            }
-            Ok(_) => {}
-            Err(IpcError::DaemonNotRunning(_)) => {
-                if args.json {
-                    println!("{}", json!({ "status": "stopped", "running": false }));
-                } else {
-                    eprintln!("audigma: daemon is not currently running (no active socket).");
-                }
-                return Ok(());
-            }
-            Err(e) => return Err(CliError::Ipc(e)),
+        }
+        if args.json {
+            let value = if json_out.len() == 1 {
+                json_out.remove(0)
+            } else {
+                serde_json::Value::Array(json_out)
+            };
+            let text = serde_json::to_string_pretty(&value)
+                .map_err(|e| CliError::Serialization(e.to_string()))?;
+            println!("{text}");
         }
 
         if !args.watch {
@@ -164,7 +232,7 @@ pub fn run_status(args: StatusArgs) -> Result<(), CliError> {
 }
 
 pub fn run_set(args: SetArgs) -> Result<(), CliError> {
-    let socket_path = args.socket.unwrap_or_else(default_socket_path);
+    let target = resolve_target(args.instance.instance.as_deref())?;
     let req = match args.command {
         SetCommands::Volume { value } => {
             match parse_volume_arg(&value).map_err(CliError::Volume)? {
@@ -177,7 +245,7 @@ pub fn run_set(args: SetArgs) -> Result<(), CliError> {
         SetCommands::Preset { name } => IpcRequest::SetPreset { preset: name },
     };
 
-    match ControlClient::send(&socket_path, req) {
+    match ControlClient::send(&target, req) {
         Ok(IpcResponse::Ok) => {
             eprintln!("audigma: setting updated successfully.");
             Ok(())

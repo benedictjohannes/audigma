@@ -43,6 +43,17 @@ pub struct Cli {
     pub command: Commands,
 }
 
+/// Selects which daemon instance a command targets. Flattened into `run`, `stop`, `status`
+/// and `set` only (`-i` is already taken by `convert --input`).
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct InstanceArgs {
+    /// Daemon instance name, for running several daemons side by side (1-32 chars of [A-Za-z0-9_-]).
+    /// `run` defaults to "default". `status` lists all live instances; `stop` and `set` target the
+    /// sole live instance when there is exactly one.
+    #[arg(short = 'i', long = "instance", env = "AUDIGMA_INSTANCE")]
+    pub instance: Option<String>,
+}
+
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     /// Run live audio streaming daemon in foreground

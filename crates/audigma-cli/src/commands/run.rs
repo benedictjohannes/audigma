@@ -26,7 +26,7 @@ use clap::Args;
 
 use super::resolve_config_path;
 use crate::error::CliError;
-use crate::ipc::{ControlServer, default_socket_path};
+use crate::ipc::{ControlServer, Instance};
 
 /// Atomic pointer to the daemon running flag for signal handler shutdown (§9, §13.12).
 static DAEMON_RUNNING_PTR: AtomicPtr<AtomicBool> = AtomicPtr::new(std::ptr::null_mut());
@@ -45,9 +45,16 @@ pub struct RunArgs {
     /// Optional configuration file path (defaults to ~/.config/audigma/config.toml)
     #[arg(short = 'c', long = "config")]
     pub config: Option<PathBuf>,
+
+    #[command(flatten)]
+    pub instance: super::InstanceArgs,
 }
 
 pub fn run_run(args: RunArgs) -> Result<(), CliError> {
+    let instance = match args.instance.instance.clone() {
+        Some(name) => Instance::new(name)?,
+        None => Instance::default_instance(),
+    };
     let daemon_start_time = Instant::now();
     let config_path = resolve_config_path(args.config.as_deref());
     if !config_path.exists() {
@@ -55,8 +62,23 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
     }
 
     let content = std::fs::read_to_string(&config_path)?;
-    let settings = Settings::from_toml_str(&content)?;
+    let mut settings = Settings::from_toml_str(&content)?;
     settings.validate()?;
+
+    // Take the single-instance lock before touching any device or PipeWire node, so a duplicate
+    // instance fails fast without disturbing the running one.
+    let instance_lock = instance.acquire_lock()?;
+
+    // An explicit input node name wins; otherwise derive one from the instance so that
+    // concurrent instances never create identically named virtual sinks.
+    if let Some(input) = settings.input.as_mut()
+        && input
+            .node_name
+            .as_deref()
+            .is_none_or(|n| n.trim().is_empty())
+    {
+        input.node_name = Some(format!("audigma_sink_{}", instance.name()));
+    }
 
     let in_cfg = settings
         .input
@@ -84,6 +106,7 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
     tracing::info!(
         target: "audigma::daemon",
         event = audigma_log::DAEMON_START,
+        instance = instance.name(),
         config = %config_path.display(),
         input_backend = ?in_cfg.backend,
         input_rate_hz = input_rate.get(),
@@ -184,7 +207,7 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
                 let tiles_per_sec = (pw_rate as f64 / 64.0).ceil() as usize;
                 let queue_depth = ((tiles_per_sec * out_buf_ms as usize) / 1000).clamp(64, 256);
                 let pw_out = PipeWirePcmOutput::new(
-                    "audigma_pcm_out",
+                    &format!("audigma_pcm_out_{}", instance.name()),
                     target_node,
                     pw_rate,
                     channels as u32,
@@ -240,13 +263,13 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
     }
 
     // Start Unix Control Socket
-    let socket_path = default_socket_path();
-    let _server =
-        ControlServer::start(socket_path.clone(), control.clone()).map_err(CliError::Ipc)?;
+    let _server = ControlServer::start(instance.clone(), instance_lock, control.clone())
+        .map_err(CliError::Ipc)?;
     tracing::info!(
         target: "audigma::ipc",
         event = audigma_log::CONTROL_SOCKET_BOUND,
-        path = %socket_path.display(),
+        instance = instance.name(),
+        endpoint = %instance.display_endpoint(),
         "control socket bound"
     );
 
