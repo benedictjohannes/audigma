@@ -145,11 +145,7 @@ impl HistSnapshot {
         let count = self.count();
         StageStats {
             count,
-            mean_us: if count == 0 {
-                0
-            } else {
-                self.sum_ns / count / 1_000
-            },
+            mean_us: self.sum_ns.checked_div(count).map_or(0, |ns| ns / 1_000),
             p50_us: self.quantile_us(0.50, max_us).unwrap_or(0),
             p99_us: self.quantile_us(0.99, max_us).unwrap_or(0),
             p999_us: self.quantile_us(0.999, max_us).unwrap_or(0),

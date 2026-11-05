@@ -32,6 +32,17 @@ fn max_state_magnitude(a: f64, b: f64) -> f64 {
     if a > b { a } else { b }
 }
 
+/// True when `magnitude` is above the stability threshold or is NaN.
+///
+/// The negated `<=` is deliberate: every comparison with NaN is false, so
+/// `!(x <= T)` flags a diverged (NaN) state as overloaded, whereas the
+/// "simplified" `x > T` would silently report it as stable.
+#[inline(always)]
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
+fn exceeds_stability(magnitude: f64) -> bool {
+    !(magnitude <= STABILITY_THRESHOLD)
+}
+
 /// Modulator error conditions.
 #[derive(Debug, Error, PartialEq)]
 pub enum ModulatorError {
@@ -168,7 +179,7 @@ impl CrfbCore for CrfbCore5 {
             max_state_magnitude(max_state_magnitude(x1, x2), max_state_magnitude(x3, x4)),
             x5,
         );
-        let overloaded = !(max_state <= STABILITY_THRESHOLD);
+        let overloaded = exceeds_stability(max_state);
 
         ([x1, x2, x3, x4, x5], overloaded)
     }
@@ -219,7 +230,7 @@ impl CrfbCore for CrfbCore7 {
             max_state_magnitude(max_state_magnitude(x1, x2), max_state_magnitude(x3, x4)),
             max_state_magnitude(max_state_magnitude(x5, x6), x7),
         );
-        let overloaded = !(max_state <= STABILITY_THRESHOLD);
+        let overloaded = exceeds_stability(max_state);
 
         ([x1, x2, x3, x4, x5, x6, x7], overloaded)
     }
@@ -382,7 +393,7 @@ impl<C: CrfbCore> GenericCrfbModulator<C> {
         let mut state = self.state;
         let mut dither = self.dither.clone();
         let mut overload_count = self.overload_count;
-        let coeffs = self.coeffs.clone();
+        let coeffs = self.coeffs;
 
         for (byte_idx, out_byte) in out_bytes[..required_bytes].iter_mut().enumerate() {
             let in_off = byte_idx * 8;
@@ -464,7 +475,7 @@ impl<C: CrfbCore> GenericCrfbModulator<C> {
         let mut state = self.state;
         let mut dither = self.dither.clone();
         let mut overload_count = self.overload_count;
-        let coeffs = self.coeffs.clone();
+        let coeffs = self.coeffs;
 
         for (word_idx, out_word) in out_words[..required_words].iter_mut().enumerate() {
             let in_off = word_idx * 32;
@@ -694,7 +705,7 @@ mod tests {
                         let expected = next
                             .as_ref()
                             .iter()
-                            .any(|s| !(s.abs() <= STABILITY_THRESHOLD));
+                            .any(|s| s.is_nan() || s.abs() > STABILITY_THRESHOLD);
                         assert_eq!(
                             overloaded,
                             expected,

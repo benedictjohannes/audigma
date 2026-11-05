@@ -332,7 +332,8 @@ pub enum LateRecord {
         partial_tiles: u64,
         counters_delta: LateCounters,
         /// Worker/dispatch timing over this slice, when the pool exposes histograms.
-        timing: Option<TimingReport>,
+        /// Boxed to keep `LateRecord` small; records are built off the real-time path.
+        timing: Option<Box<TimingReport>>,
     },
     End {
         episode_id: u64,
@@ -593,7 +594,10 @@ impl LateEpisodeAggregator {
             self.last_counters = counters;
 
             episode.totals.add_interval(&episode.pending);
-            let timing = self.timing.as_mut().map(TimingTracker::window);
+            let timing = self
+                .timing
+                .as_mut()
+                .map(|tracker| Box::new(tracker.window()));
             records.push(Self::make_slice(
                 self.telemetry.as_ref(),
                 episode,
@@ -712,7 +716,7 @@ impl LateEpisodeAggregator {
         mono_now_ns: u64,
         wall_now: SystemTime,
         delta: LateCounters,
-        timing: Option<TimingReport>,
+        timing: Option<Box<TimingReport>>,
     ) -> LateRecord {
         let end_mono = episode.pending.last_late_mono_ns.max(episode.start_mono_ns);
         LateRecord::Slice {
