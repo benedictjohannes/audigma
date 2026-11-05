@@ -192,7 +192,15 @@ pub fn run_play(args: PlayArgs) -> Result<(), CliError> {
     };
 
     // 4. Prepare Pipeline and layer the CLI volume on top of the configured preamp
-    let pipeline = OfflinePipeline::prepare(settings.clone(), input_rate)?;
+    let pipeline = {
+        let placement = crate::runtime::resolve(&settings, 2, true)?;
+        crate::runtime::apply_housekeeping(&placement);
+        OfflinePipeline::prepare_with_workers(
+            settings.clone(),
+            input_rate,
+            Some(crate::runtime::worker_setup(&placement)),
+        )?
+    };
     let pipeline = match user_volume_db {
         Some(db) => pipeline.with_user_volume_db(db),
         None => pipeline,

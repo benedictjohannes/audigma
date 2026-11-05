@@ -326,3 +326,67 @@ fn live_raw_dsd_rate_switch_drains_with_pcm_zeros_without_decoded_reads() {
     assert_eq!(input.reads, 1);
     assert!(!output.bytes.is_empty());
 }
+
+#[test]
+fn test_dsp_session_keeps_workers_across_streams_and_rates() {
+    use audigma_engine::live_pipeline::DspSession;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let settings = Settings::default_offline(OutputContainer::Raw);
+    let started = Arc::new(AtomicUsize::new(0));
+    let hook: audigma_engine::ThreadInitHook = {
+        let started = Arc::clone(&started);
+        Arc::new(move |_, _| {
+            started.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+    };
+    let setup = audigma_engine::WorkerSetup {
+        placements: Vec::new(),
+        hook: Some(hook),
+        ..Default::default()
+    };
+
+    let mut session = DspSession::new();
+    assert!(!session.is_active());
+
+    for hz in [44100u32, 96000, 44100] {
+        let rate = PcmRateHz::new(hz).unwrap();
+        let pipeline =
+            LivePipeline::prepare_with_workers(settings.clone(), rate, Some(setup.clone()))
+                .unwrap();
+        let frames = hz as usize / 4;
+        let info = AudioStreamInfo::new_pcm(rate, 2, Some(frames as u64), Some(32));
+        let mut mock_in = MockAudioInput::new(info, vec![0.1; frames], vec![0.1; frames], false);
+        let mut mock_out = TestOutputSink::default();
+        let control =
+            DaemonControlHandle::new(hz, DaemonOutputFormat::Dsd, 11289600, "balanced", 0.0);
+        let ctrl = control.clone();
+        std::thread::scope(|scope| {
+            let h = scope.spawn(|| {
+                pipeline.run_streaming_with_session(
+                    &mut session,
+                    &mut mock_in,
+                    &mut mock_out,
+                    ctrl,
+                    None,
+                )
+            });
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            control.stop();
+            assert_eq!(
+                h.join().unwrap().unwrap(),
+                audigma_engine::StreamExitReason::Stopped
+            );
+        });
+        assert!(session.is_active());
+        assert!(
+            !mock_out.bytes.is_empty(),
+            "stream at {hz} Hz produced no output"
+        );
+    }
+
+    // Two channel workers, spawned once for three streams.
+    assert_eq!(started.load(Ordering::SeqCst), 2);
+}

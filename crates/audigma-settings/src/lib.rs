@@ -490,6 +490,192 @@ pub const DEFAULT_LATE_TILE_REPORT_INTERVAL_MS: u64 = 10_000;
 /// this bound are clamped when the pipeline reads the setting.
 pub const MIN_LATE_TILE_REPORT_INTERVAL_MS: u64 = 100;
 
+/// Lowest accepted `[runtime] realtime_priority` (loop = p, pw = p-1, DSP = p-2 must stay >= 1).
+pub const MIN_REALTIME_PRIORITY: u8 = 3;
+/// Highest accepted `[runtime] realtime_priority`.
+pub const MAX_REALTIME_PRIORITY: u8 = 99;
+/// Default `[runtime] realtime_priority` (matches RTKit's default maximum).
+pub const DEFAULT_REALTIME_PRIORITY: u8 = 20;
+
+/// `[runtime] dsp_threads`: `"auto"`, `"inline"` or an integer >= 1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DspThreads {
+    #[default]
+    Auto,
+    /// No worker threads: all channels are processed sequentially on the loop thread.
+    Inline,
+    Count(u32),
+}
+
+impl Serialize for DspThreads {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Auto => serializer.serialize_str("auto"),
+            Self::Inline => serializer.serialize_str("inline"),
+            Self::Count(n) => serializer.serialize_u32(*n),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for DspThreads {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = DspThreads;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("\"auto\", \"inline\" or an integer >= 1")
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<DspThreads, E> {
+                match v {
+                    "auto" => Ok(DspThreads::Auto),
+                    "inline" => Ok(DspThreads::Inline),
+                    _ => Err(E::invalid_value(serde::de::Unexpected::Str(v), &self)),
+                }
+            }
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<DspThreads, E> {
+                match u32::try_from(v) {
+                    Ok(n) if n >= 1 => Ok(DspThreads::Count(n)),
+                    _ => Err(E::invalid_value(serde::de::Unexpected::Unsigned(v), &self)),
+                }
+            }
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<DspThreads, E> {
+                u64::try_from(v)
+                    .map_err(|_| E::invalid_value(serde::de::Unexpected::Signed(v), &self))
+                    .and_then(|u| self.visit_u64(u))
+            }
+        }
+        deserializer.deserialize_any(V)
+    }
+}
+
+/// `[runtime] realtime`: RT scheduling policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RealtimeMode {
+    /// Try RT scheduling; warn and continue at normal priority on failure.
+    #[default]
+    Auto,
+    /// Startup fails when RT scheduling cannot be acquired.
+    Required,
+    /// Never request RT scheduling.
+    Off,
+}
+
+/// `[runtime] core_selection`: which cores DSP workers prefer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreSelection {
+    /// Fastest cores first.
+    #[default]
+    Performance,
+    /// Slowest cores first.
+    Efficient,
+    /// No automatic pinning; the OS scheduler decides.
+    Os,
+}
+
+/// `[runtime] smt_siblings`: tolerance for placing DSP workers on SMT siblings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SmtSiblings {
+    /// Use siblings only once all allowed physical cores are taken.
+    #[default]
+    Avoid,
+    /// Never share a physical core between DSP workers; fail at startup if impossible.
+    Never,
+}
+
+/// `[runtime]` section: threading, core placement and RT scheduling.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct RuntimeConfig {
+    pub dsp_threads: DspThreads,
+    pub realtime: RealtimeMode,
+    pub realtime_priority: u8,
+    pub core_selection: CoreSelection,
+    pub smt_siblings: SmtSiblings,
+    /// Explicit CPU for the `audigma-loop` thread.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loop_cpu: Option<u32>,
+    /// Explicit CPUs for DSP workers (one per worker).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dsp_cpus: Option<Vec<u32>>,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            dsp_threads: DspThreads::Auto,
+            realtime: RealtimeMode::Auto,
+            realtime_priority: DEFAULT_REALTIME_PRIORITY,
+            core_selection: CoreSelection::Performance,
+            smt_siblings: SmtSiblings::Avoid,
+            loop_cpu: None,
+            dsp_cpus: None,
+        }
+    }
+}
+
+impl RuntimeConfig {
+    /// Cross-field checks that do not need the machine.
+    fn validate(&self) -> Result<(), SettingsError> {
+        if !(MIN_REALTIME_PRIORITY..=MAX_REALTIME_PRIORITY).contains(&self.realtime_priority) {
+            return Err(SettingsError::Validation(
+                "[runtime] realtime_priority must be in 3..=99",
+            ));
+        }
+        if let DspThreads::Count(0) = self.dsp_threads {
+            return Err(SettingsError::Validation(
+                "[runtime] dsp_threads must be \"auto\", \"inline\" or >= 1",
+            ));
+        }
+        if self.dsp_threads == DspThreads::Inline && self.dsp_cpus.is_some() {
+            return Err(SettingsError::Validation(
+                "[runtime] dsp_cpus cannot be combined with dsp_threads = \"inline\"",
+            ));
+        }
+        if let Some(cpus) = &self.dsp_cpus {
+            if cpus.is_empty() {
+                return Err(SettingsError::Validation(
+                    "[runtime] dsp_cpus must not be empty",
+                ));
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            if !cpus.iter().all(|c| seen.insert(*c)) {
+                return Err(SettingsError::Validation(
+                    "[runtime] dsp_cpus must not contain duplicates",
+                ));
+            }
+            if let DspThreads::Count(n) = self.dsp_threads
+                && usize::try_from(n).ok() != Some(cpus.len())
+            {
+                return Err(SettingsError::Validation(
+                    "[runtime] dsp_cpus length must equal dsp_threads",
+                ));
+            }
+            if let Some(loop_cpu) = self.loop_cpu
+                && cpus.contains(&loop_cpu)
+            {
+                return Err(SettingsError::Validation(
+                    "[runtime] loop_cpu must not be in dsp_cpus",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Worker count implied by explicit settings, if any: `0` for inline, `dsp_threads` when
+    /// numeric, else the `dsp_cpus` length capped at `channels`. `None` means fully automatic.
+    pub fn explicit_worker_count(&self, channels: u8) -> Option<usize> {
+        match (self.dsp_threads, &self.dsp_cpus) {
+            (DspThreads::Inline, _) => Some(0),
+            (DspThreads::Count(n), _) => Some(n as usize),
+            (DspThreads::Auto, Some(cpus)) => Some(cpus.len().min(usize::from(channels))),
+            (DspThreads::Auto, None) => None,
+        }
+    }
+}
+
 /// `[logging]` options.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct LoggingConfig {
@@ -522,6 +708,7 @@ pub struct Settings {
     pub clock: Option<ClockConfig>,
     pub offline: Option<OfflineConfig>,
     pub logging: Option<LoggingConfig>,
+    pub runtime: Option<RuntimeConfig>,
 }
 
 /// Concrete resolution produced by `Settings::explain_for_input_rate` (`audigma config explain`).
@@ -602,6 +789,7 @@ impl Settings {
                     dsf_pad_mode: DsfPadMode::SpecZero,
                 }),
                 logging: None,
+                runtime: None,
             },
             OutputContainer::Wav => Self {
                 schema_version: SCHEMA_VERSION_V1,
@@ -662,6 +850,7 @@ impl Settings {
                     dsf_pad_mode: DsfPadMode::SpecZero,
                 }),
                 logging: None,
+                runtime: None,
             },
             OutputContainer::Flac => Self {
                 schema_version: SCHEMA_VERSION_V1,
@@ -722,6 +911,7 @@ impl Settings {
                     dsf_pad_mode: DsfPadMode::SpecZero,
                 }),
                 logging: None,
+                runtime: None,
             },
             OutputContainer::Raw => Self {
                 schema_version: SCHEMA_VERSION_V1,
@@ -778,6 +968,7 @@ impl Settings {
                 clock: None,
                 offline: None,
                 logging: None,
+                runtime: None,
             },
         }
     }
@@ -788,6 +979,10 @@ impl Settings {
             return Err(SettingsError::UnsupportedSchemaVersion {
                 got: self.schema_version,
             });
+        }
+
+        if let Some(runtime) = &self.runtime {
+            runtime.validate()?;
         }
 
         if self.target.is_none() {
@@ -943,6 +1138,16 @@ impl Settings {
         Ok(())
     }
 
+    /// Returns `[input].channels` (default 2).
+    pub fn input_channels(&self) -> u8 {
+        self.input.as_ref().and_then(|i| i.channels).unwrap_or(2)
+    }
+
+    /// Returns the `[runtime]` section, or defaults when absent.
+    pub fn runtime_config(&self) -> RuntimeConfig {
+        self.runtime.clone().unwrap_or_default()
+    }
+
     /// Returns the configured DSP deadline-miss aggregation interval.
     pub fn late_tile_report_interval(&self) -> std::time::Duration {
         let ms = self
@@ -1072,6 +1277,105 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn runtime_toml(runtime: &str) -> String {
+        format!(
+            "schema_version = 1\n[target]\nformat = \"dsd\"\nrate_family = \"44100\"\ndsd_rate = \"dsd128\"\n{runtime}"
+        )
+    }
+
+    #[test]
+    fn test_runtime_defaults_when_absent() {
+        let s = Settings::from_toml_str(&runtime_toml("")).unwrap();
+        assert!(s.runtime.is_none());
+        let r = s.runtime_config();
+        assert_eq!(r.dsp_threads, DspThreads::Auto);
+        assert_eq!(r.realtime, RealtimeMode::Auto);
+        assert_eq!(r.realtime_priority, 20);
+        assert_eq!(r.core_selection, CoreSelection::Performance);
+        assert_eq!(r.smt_siblings, SmtSiblings::Avoid);
+        assert_eq!(r.explicit_worker_count(2), None);
+    }
+
+    #[test]
+    fn test_runtime_full_section_parses() {
+        let s = Settings::from_toml_str(&runtime_toml(
+            "[runtime]\ndsp_threads = 2\nrealtime = \"required\"\nrealtime_priority = 30\ncore_selection = \"efficient\"\nsmt_siblings = \"never\"\nloop_cpu = 4\ndsp_cpus = [0, 2]\n",
+        ))
+        .unwrap();
+        let r = s.runtime_config();
+        assert_eq!(r.dsp_threads, DspThreads::Count(2));
+        assert_eq!(r.realtime, RealtimeMode::Required);
+        assert_eq!(r.realtime_priority, 30);
+        assert_eq!(r.core_selection, CoreSelection::Efficient);
+        assert_eq!(r.smt_siblings, SmtSiblings::Never);
+        assert_eq!(r.loop_cpu, Some(4));
+        assert_eq!(r.dsp_cpus, Some(vec![0, 2]));
+    }
+
+    #[test]
+    fn test_runtime_inline_parses_and_rejects_pins() {
+        let s = Settings::from_toml_str(&runtime_toml("[runtime]\ndsp_threads = \"inline\"\n"))
+            .unwrap();
+        let r = s.runtime_config();
+        assert_eq!(r.dsp_threads, DspThreads::Inline);
+        assert_eq!(r.explicit_worker_count(2), Some(0));
+        assert!(
+            Settings::from_toml_str(&runtime_toml(
+                "[runtime]\ndsp_threads = \"inline\"\ndsp_cpus = [0]\n"
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_runtime_auto_parses() {
+        let s =
+            Settings::from_toml_str(&runtime_toml("[runtime]\ndsp_threads = \"auto\"\n")).unwrap();
+        assert_eq!(s.runtime_config(), RuntimeConfig::default());
+    }
+
+    #[test]
+    fn test_runtime_rejects_bad_values() {
+        for bad in [
+            "[runtime]\ndsp_threads = 0\n",
+            "[runtime]\ndsp_threads = -1\n",
+            "[runtime]\ndsp_threads = \"many\"\n",
+            "[runtime]\nrealtime = \"yes\"\n",
+            "[runtime]\ncore_selection = \"fast\"\n",
+            "[runtime]\nsmt_siblings = \"off\"\n",
+            "[runtime]\nrealtime_priority = 2\n",
+            "[runtime]\nrealtime_priority = 100\n",
+            "[runtime]\nbogus = 1\n",
+            "[runtime]\ndsp_cpus = []\n",
+            "[runtime]\ndsp_cpus = [0, 0]\n",
+            "[runtime]\ndsp_threads = 2\ndsp_cpus = [0]\n",
+            "[runtime]\nloop_cpu = 2\ndsp_cpus = [0, 2]\n",
+        ] {
+            assert!(
+                Settings::from_toml_str(&runtime_toml(bad)).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_runtime_auto_threads_with_pins_caps_at_channels() {
+        let s =
+            Settings::from_toml_str(&runtime_toml("[runtime]\ndsp_cpus = [0, 2, 4]\n")).unwrap();
+        assert_eq!(s.runtime_config().explicit_worker_count(2), Some(2));
+        assert_eq!(s.runtime_config().explicit_worker_count(8), Some(3));
+    }
+
+    #[test]
+    fn test_runtime_roundtrips_through_toml() {
+        let s = Settings::from_toml_str(&runtime_toml(
+            "[runtime]\ndsp_threads = 2\ndsp_cpus = [0, 2]\n",
+        ))
+        .unwrap();
+        let text = toml::to_string(&s).unwrap();
+        assert_eq!(Settings::from_toml_str(&text).unwrap(), s);
+    }
 
     #[test]
     fn test_logging_config_section() {

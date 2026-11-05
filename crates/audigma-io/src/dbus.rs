@@ -1,8 +1,7 @@
 //! D-Bus interfaces for real-time thread scheduling and ALSA device reservation (`Design.md §1`, `§3.4`).
 //!
 //! Provides:
-//! - `request_realtime_priority`: Acquires real-time priority via `org.freedesktop.RealtimeKit1` over the system D-Bus
-//!   with zero C-FFI and graceful fallback to normal priority.
+//! - `rtkit_make_realtime`: RealtimeKit fallback used by `sched::apply`.
 //! - `DeviceReservation`: Implements `org.freedesktop.ReserveDevice1` over the session D-Bus to dynamically
 //!   request sound servers (WirePlumber / PipeWire) yield the ALSA hardware DAC, and restores ownership
 //!   when dropped.
@@ -27,70 +26,45 @@ pub enum DBusError {
     RealtimeKitFailed(String),
 }
 
-/// The mechanism through which real-time priority was acquired.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RealtimePriorityAcquisition {
-    /// Acquired directly via POSIX `SCHED_FIFO` (`pthread_setschedparam`).
-    DirectSchedFifo,
-    /// Acquired via `org.freedesktop.RealtimeKit1` D-Bus IPC.
-    RealtimeKit,
+static SYSTEM_BUS: std::sync::OnceLock<Connection> = std::sync::OnceLock::new();
+
+/// One system-bus connection per process for RealtimeKit requests (not one per call).
+/// A concurrent first use may connect twice; the loser's connection is dropped.
+async fn shared_system_bus() -> Result<Connection, zbus::Error> {
+    if let Some(conn) = SYSTEM_BUS.get() {
+        return Ok(conn.clone());
+    }
+    let conn = Connection::system().await?;
+    Ok(SYSTEM_BUS.get_or_init(|| conn).clone())
 }
 
-impl std::fmt::Display for RealtimePriorityAcquisition {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::DirectSchedFifo => write!(f, "POSIX SCHED_FIFO"),
-            Self::RealtimeKit => write!(f, "RealtimeKit"),
-        }
-    }
-}
-
-/// Requests real-time priority for the calling thread (`Design.md §1`).
+/// Asks RealtimeKit (`org.freedesktop.RealtimeKit1`) to make the calling thread realtime.
 ///
-/// First attempts direct POSIX real-time scheduling (`SCHED_FIFO` via `pthread_setschedparam`),
-/// which succeeds immediately with zero IPC overhead if the user session has real-time privileges (`RLIMIT_RTPRIO` / `ulimit -r`).
-/// If unprivileged (`EPERM`), falls back to RealtimeKit (`org.freedesktop.RealtimeKit1`) over the system D-Bus.
-///
-/// If RTKit is unavailable, permissions are denied, or the system does not run RTKit,
-/// returns a descriptive error allowing callers to log and fall back cleanly.
-pub fn request_realtime_priority(priority: u32) -> Result<RealtimePriorityAcquisition, DBusError> {
-    #[cfg(target_os = "linux")]
-    {
-        unsafe {
-            let mut param: libc::sched_param = core::mem::zeroed();
-            param.sched_priority = priority as i32;
-            if libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_FIFO, &param) == 0 {
-                return Ok(RealtimePriorityAcquisition::DirectSchedFifo);
-            }
-        }
-    }
-
+/// Used by `sched::apply` when direct `sched_setattr` is refused.
+pub fn rtkit_make_realtime(priority: u32) -> Result<(), DBusError> {
     #[cfg(target_os = "linux")]
     let thread_id = unsafe { libc::syscall(libc::SYS_gettid) as u64 };
     #[cfg(not(target_os = "linux"))]
     let thread_id = 0u64;
 
     zbus::block_on(async {
-        let conn = Connection::system().await?;
+        let conn = shared_system_bus().await?;
         let pid = std::process::id() as u64;
 
-        let reply: Result<(), zbus::Error> = conn
-            .call_method(
-                Some("org.freedesktop.RealtimeKit1"),
-                "/org/freedesktop/RealtimeKit1",
-                Some("org.freedesktop.RealtimeKit1"),
-                "MakeThreadRealtimeWithPID",
-                &(pid, thread_id, priority),
-            )
-            .await
-            .map(|_| ());
-
-        match reply {
-            Ok(()) => Ok(RealtimePriorityAcquisition::RealtimeKit),
-            Err(e) => Err(DBusError::RealtimeKitFailed(format!(
+        conn.call_method(
+            Some("org.freedesktop.RealtimeKit1"),
+            "/org/freedesktop/RealtimeKit1",
+            Some("org.freedesktop.RealtimeKit1"),
+            "MakeThreadRealtimeWithPID",
+            &(pid, thread_id, priority),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| {
+            DBusError::RealtimeKitFailed(format!(
                 "Failed to acquire RT priority {priority} for thread {thread_id}: {e}"
-            ))),
-        }
+            ))
+        })
     })
 }
 

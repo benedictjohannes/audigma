@@ -14,7 +14,9 @@ mod input;
 
 pub use input::{InputDspConfig, InputResampling, InputTileControls};
 
+use crate::cpu::ThreadPlacement;
 use crate::lifecycle::FrameGain;
+use crate::timing::PoolTimings;
 use crate::traits::EngineError;
 use audigma_dsp::config::{Apodization, DitherType, FilterPhase, FilterPreset, OverloadPolicy};
 use audigma_dsp::fir::HalfBandCascade;
@@ -26,6 +28,7 @@ use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 const CMD_IDLE: u32 = 0;
 const CMD_PCM: u32 = 1;
@@ -35,6 +38,7 @@ const CMD_STOP: u32 = 4;
 const CMD_INPUT_PCM: u32 = 5;
 const CMD_INPUT_DSD: u32 = 6;
 const CMD_RESET_OUTPUT: u32 = 7;
+const CMD_RECONFIGURE: u32 = 8;
 
 // At DSD512 this is 32 baseband frames; at DSD256 it is 64. Keep the
 // externally scheduled tile intact and interpolate/modulate each slice while
@@ -153,7 +157,6 @@ struct WorkerSync {
     input_len: AtomicUsize,
     output_len: AtomicUsize,
     has_error: AtomicBool,
-    overload_count: AtomicU64,
 }
 
 impl WorkerSync {
@@ -165,7 +168,6 @@ impl WorkerSync {
             input_len: AtomicUsize::new(0),
             output_len: AtomicUsize::new(0),
             has_error: AtomicBool::new(false),
-            overload_count: AtomicU64::new(0),
         }
     }
 }
@@ -176,6 +178,8 @@ struct WorkerBuffers {
     dsd_in_buf: UnsafeCell<Vec<u8>>,
     pcm_out_buf: UnsafeCell<Vec<f64>>,
     dsd_out_buf: UnsafeCell<Vec<u8>>,
+    /// Modulator overload count of this channel (written by its worker).
+    overload_count: AtomicU64,
 }
 
 unsafe impl Sync for WorkerBuffers {}
@@ -227,15 +231,332 @@ impl InputControlBuffer {
     }
 }
 
+/// One worker thread. It owns the states of the channels assigned to it
+/// (`channel % workers`, in channel order).
 struct WorkerSlot {
     sync: Arc<WorkerSync>,
-    buffers: Arc<WorkerBuffers>,
     error: Arc<Mutex<Option<EngineError>>>,
+    /// Staging area for `CMD_RECONFIGURE`: the coordinator parks the new states here,
+    /// the worker swaps them with its own and leaves the retired states behind.
+    mailbox: Arc<Mutex<Option<Vec<ChannelState>>>>,
+}
+
+/// Everything one channel worker owns that depends on the active rate/preset.
+struct ChannelState {
+    cascade: HalfBandCascade,
+    modulator: Option<Modulator>,
+    input_processor: Option<InputProcessor>,
+    buffers: Arc<WorkerBuffers>,
+    input_controls: Option<Arc<InputControlBuffer>>,
+    mult: usize,
+    subtile_frames: usize,
+}
+
+impl ChannelState {
+    /// Executes one dispatched command; returns the result and produced frame count.
+    fn run(&mut self, cmd: u32, input_len: usize) -> (Result<(), EngineError>, usize) {
+        let mut output_frames = 0;
+        let mult = self.mult;
+        let subtile_frames = self.subtile_frames;
+        let result = match cmd {
+            CMD_RESET | CMD_RESET_OUTPUT => {
+                self.cascade.reset();
+                if let Some(ref mut m) = self.modulator {
+                    m.reset();
+                }
+                if cmd == CMD_RESET {
+                    if let Some(ref mut processor) = self.input_processor {
+                        processor.reset();
+                    }
+                }
+                Ok(())
+            }
+            CMD_PCM | CMD_DSD => {
+                let in_len = input_len;
+                output_frames = in_len;
+                let in_buf = unsafe { &*self.buffers.in_buf.get() };
+                let in_slice = &in_buf[..in_len];
+                let pcm_buf = unsafe { &mut *self.buffers.pcm_out_buf.get() };
+                let pcm_out = &mut pcm_buf[..in_len * mult];
+                if let Some(m) = self.modulator.as_mut().filter(|_| cmd == CMD_DSD) {
+                    let req_bytes = pcm_out.len() / 8;
+                    let dsd_buf = unsafe { &mut *self.buffers.dsd_out_buf.get() };
+                    let dsd_out = &mut dsd_buf[..req_bytes];
+                    let result = process_dsd_tile(
+                        &mut self.cascade,
+                        m,
+                        in_slice,
+                        pcm_out,
+                        dsd_out,
+                        subtile_frames,
+                    );
+                    self.buffers
+                        .overload_count
+                        .store(m.overload_count(), Ordering::Relaxed);
+                    result
+                } else {
+                    process_pcm_tile(&mut self.cascade, in_slice, pcm_out, subtile_frames)
+                }
+            }
+            CMD_INPUT_PCM | CMD_INPUT_DSD => (|| {
+                let processor =
+                    self.input_processor
+                        .as_mut()
+                        .ok_or_else(|| EngineError::InvalidTopology {
+                            message: "channel worker has no input DSP configuration".into(),
+                        })?;
+                let control_buffer = self.input_controls.as_ref().unwrap();
+                let controls = unsafe { control_buffer.controls() };
+                let in_len = input_len;
+                let prepared = if cmd == CMD_INPUT_DSD {
+                    let input = unsafe { &*self.buffers.dsd_in_buf.get() };
+                    processor.process_dsd(&input[..in_len], controls)?
+                } else {
+                    let input = unsafe { &*self.buffers.in_buf.get() };
+                    processor.process_pcm(&input[..in_len], controls)?
+                };
+                let frames = prepared.len();
+                output_frames = frames;
+                let pcm_buf = unsafe { &mut *self.buffers.pcm_out_buf.get() };
+                let pcm_out = &mut pcm_buf[..frames * mult];
+                if let Some(ref mut m) = self.modulator {
+                    let dsd_buf = unsafe { &mut *self.buffers.dsd_out_buf.get() };
+                    let dsd_bytes = pcm_out.len() / 8;
+                    let result = process_dsd_tile(
+                        &mut self.cascade,
+                        m,
+                        prepared,
+                        pcm_out,
+                        &mut dsd_buf[..dsd_bytes],
+                        subtile_frames,
+                    );
+                    self.buffers
+                        .overload_count
+                        .store(m.overload_count(), Ordering::Relaxed);
+                    result
+                } else {
+                    process_pcm_tile(&mut self.cascade, prepared, pcm_out, subtile_frames)
+                }
+            })(),
+            _ => Ok(()),
+        };
+        (result, output_frames)
+    }
+}
+
+/// Splits per-channel states into per-worker groups: channel `c` goes to worker `c % workers`.
+fn distribute_states(states: Vec<ChannelState>, workers: usize) -> Vec<Vec<ChannelState>> {
+    let mut groups: Vec<Vec<ChannelState>> = (0..workers).map(|_| Vec::new()).collect();
+    for (ch, state) in states.into_iter().enumerate() {
+        groups[ch % workers].push(state);
+    }
+    groups
+}
+
+/// Runs one command over every channel a worker owns. Returns the first error and the
+/// produced frame count (all of a worker's channels must agree).
+fn run_channels(
+    states: &mut [ChannelState],
+    cmd: u32,
+    input_len: usize,
+) -> (Result<(), EngineError>, usize) {
+    let mut result = Ok(());
+    let mut frames = None;
+    for state in states.iter_mut() {
+        let (r, f) = state.run(cmd, input_len);
+        if let Err(e) = r
+            && result.is_ok()
+        {
+            result = Err(e);
+        }
+        match frames {
+            None => frames = Some(f),
+            Some(prev) if prev != f && result.is_ok() => {
+                result = Err(EngineError::Pipeline(
+                    "channels of one worker produced different frame counts".into(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    (result, frames.unwrap_or(0))
+}
+
+/// Page granularity used for pre-touching (the smallest common page size).
+const PRETOUCH_STRIDE_BYTES: usize = 4096;
+
+/// Writes one element per page so first-touch page faults happen at construction, not in
+/// the first tiles. Leaves the contents unchanged (the buffers are zero-filled).
+fn pretouch<T: Copy + Default>(buf: &mut [T]) {
+    let elem = std::mem::size_of::<T>().max(1);
+    let step = (PRETOUCH_STRIDE_BYTES / elem).max(1);
+    let mut i = 0;
+    while i < buf.len() {
+        // SAFETY: `i < buf.len()`.
+        unsafe { std::ptr::write_volatile(buf.as_mut_ptr().add(i), T::default()) };
+        i += step;
+    }
+    if let Some(last) = buf.last_mut() {
+        // SAFETY: valid exclusive reference.
+        unsafe { std::ptr::write_volatile(last, T::default()) };
+    }
+}
+
+/// Pool-level facts derived while building the per-channel states.
+struct PoolShape {
+    input_bounds: Option<InputBounds>,
+    input_controls: Option<Arc<InputControlBuffer>>,
+    mult: usize,
+    group_delay_output_samples: usize,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_channel_states(
+    channels: usize,
+    preset: FilterPreset,
+    phase: FilterPhase,
+    apodization: Apodization,
+    stages: usize,
+    tile_baseband_frames: usize,
+    target_dsd: Option<&TargetDsdConfig>,
+    input_config: Option<InputDspConfig>,
+) -> Result<(Vec<ChannelState>, PoolShape), EngineError> {
+    if channels == 0 {
+        return Err(EngineError::InvalidTopology {
+            message: "ChannelWorkerPool requires at least 1 channel".into(),
+        });
+    }
+    if tile_baseband_frames == 0 {
+        return Err(EngineError::InvalidTopology {
+            message: "ChannelWorkerPool requires a nonzero tile capacity".into(),
+        });
+    }
+
+    let input_bounds = input_config
+        .map(|config| config.bounds(tile_baseband_frames))
+        .transpose()?;
+    let input_frames = input_bounds.map_or(tile_baseband_frames, |bounds| bounds.pcm_frames);
+    let input_dsd_bytes = input_bounds.map_or(0, |bounds| bounds.dsd_bytes);
+    // Output-only commands remain valid on input-configured pools, even
+    // when SRC downsampling produces fewer frames than the outer tile.
+    let output_frames = input_bounds.map_or(tile_baseband_frames, |bounds| {
+        bounds.output_frames.max(tile_baseband_frames)
+    });
+    let input_controls =
+        input_config.map(|_| Arc::new(InputControlBuffer::new(tile_baseband_frames)));
+
+    let mult = 1usize << stages;
+    let subtile_frames = if target_dsd.is_some() {
+        tile_baseband_frames.min((DSD_SUBTILE_SAMPLES / mult).max(1))
+    } else {
+        tile_baseband_frames
+    };
+    let cascade_probe = HalfBandCascade::new(preset, phase, apodization, stages, subtile_frames);
+    let mult = cascade_probe.rate_multiplier();
+    let group_delay_output_samples = cascade_probe.total_group_delay_output_samples();
+    let cascade_tile_len =
+        output_frames
+            .checked_mul(mult)
+            .ok_or_else(|| EngineError::InvalidTopology {
+                message: "worker output tile capacity overflow".into(),
+            })?;
+    let dsd_tile_bytes = cascade_tile_len / 8;
+
+    let mut states = Vec::with_capacity(channels);
+    for ch in 0..channels {
+        let mut in_buf = vec![0.0f64; input_frames];
+        let mut dsd_in_buf = vec![0u8; input_dsd_bytes];
+        let mut pcm_out_buf = vec![0.0f64; cascade_tile_len];
+        let mut dsd_out_buf = vec![0u8; dsd_tile_bytes.max(1)];
+        // Zeroed allocations are lazily mapped; fault the pages in now, off the hot path.
+        pretouch(&mut in_buf);
+        pretouch(&mut dsd_in_buf);
+        pretouch(&mut pcm_out_buf);
+        pretouch(&mut dsd_out_buf);
+        let buffers = Arc::new(WorkerBuffers {
+            in_buf: UnsafeCell::new(in_buf),
+            dsd_in_buf: UnsafeCell::new(dsd_in_buf),
+            pcm_out_buf: UnsafeCell::new(pcm_out_buf),
+            dsd_out_buf: UnsafeCell::new(dsd_out_buf),
+            overload_count: AtomicU64::new(0),
+        });
+        let cascade = HalfBandCascade::new(preset, phase, apodization, stages, subtile_frames);
+        let modulator = if let Some(dsd_cfg) = target_dsd {
+            let mut m = Modulator::new(
+                dsd_cfg.modulator_order,
+                dsd_cfg.bit_rate,
+                dsd_cfg.dither,
+                dsd_cfg.overload_policy,
+            )?;
+            m.set_dither_seed(dsd_cfg.seed_base.wrapping_add(ch as u64));
+            Some(m)
+        } else {
+            None
+        };
+        let input_processor = input_config
+            .zip(input_bounds)
+            .map(|(config, bounds)| {
+                InputProcessor::new(preset, tile_baseband_frames, config, bounds)
+            })
+            .transpose()?;
+        states.push(ChannelState {
+            cascade,
+            modulator,
+            input_processor,
+            buffers,
+            input_controls: input_controls.clone(),
+            mult,
+            subtile_frames,
+        });
+    }
+
+    Ok((
+        states,
+        PoolShape {
+            input_bounds,
+            input_controls,
+            mult,
+            group_delay_output_samples,
+        },
+    ))
+}
+
+/// Spin iterations before a waiting thread falls back to `futex_wait`.
+const WORKER_SPIN_ITERATIONS: u32 = 2048;
+
+/// Per-worker OS setup callback: `(worker index, placement)`. Runs on the worker thread after
+/// `ScopedFtzDaz`, before the worker loop. The engine performs no syscalls itself.
+pub type ThreadInitHook = Arc<dyn Fn(usize, &ThreadPlacement) -> Result<(), String> + Send + Sync>;
+
+/// Placement and OS-setup hook for a pool's worker threads.
+///
+/// `workers` is the number of worker threads (`None` = one per channel, capped at the channel
+/// count). Channel `c` runs on worker `c % workers`. `Some(0)` selects inline mode: no threads,
+/// no hand-off; every command runs sequentially on the calling thread (which must already have
+/// its own placement applied; hook and `placements` are ignored).
+/// `placements[w]` describes worker `w` (missing entries use `ThreadPlacement::default()`:
+/// unpinned, normal priority, spinning allowed). The worker reads its own `spin` flag; the
+/// coordinator only spins at the barrier when every worker may spin.
+#[derive(Clone, Default)]
+pub struct WorkerSetup {
+    pub workers: Option<usize>,
+    pub placements: Vec<ThreadPlacement>,
+    pub hook: Option<ThreadInitHook>,
+    /// Startup handshake: when true, `new_with_input` waits for every worker's hook result and
+    /// fails (stopping the workers) if any hook returned an error. When false, hook errors are
+    /// only logged by the hook itself.
+    pub require_hook_ok: bool,
 }
 
 /// Persistent real-time worker pool for multi-channel audio DSP.
 pub struct ChannelWorkerPool {
+    /// One per worker thread (empty in inline mode).
     slots: Vec<WorkerSlot>,
+    /// Inline mode: per-channel states run on the calling thread (empty when workers exist).
+    inline_states: Vec<ChannelState>,
+    inline: bool,
+    /// One per channel.
+    channel_buffers: Vec<Arc<WorkerBuffers>>,
     thread_handles: Vec<JoinHandle<()>>,
     failed_worker: Option<usize>,
     current_generation: u32,
@@ -248,6 +569,8 @@ pub struct ChannelWorkerPool {
     input_controls: Option<Arc<InputControlBuffer>>,
     pcm_residue_frames: usize,
     dsd_residue_bytes: usize,
+    coordinator_spin: bool,
+    timings: Arc<PoolTimings>,
 }
 
 impl ChannelWorkerPool {
@@ -262,7 +585,7 @@ impl ChannelWorkerPool {
         stages: usize,
         tile_baseband_frames: usize,
         target_dsd: Option<TargetDsdConfig>,
-        thread_init_hook: Option<Arc<dyn Fn(usize) + Send + Sync>>,
+        worker_setup: Option<WorkerSetup>,
     ) -> Result<Self, EngineError> {
         Self::new_with_input(
             channels,
@@ -273,7 +596,7 @@ impl ChannelWorkerPool {
             tile_baseband_frames,
             target_dsd,
             None,
-            thread_init_hook,
+            worker_setup,
         )
     }
 
@@ -290,261 +613,279 @@ impl ChannelWorkerPool {
         tile_baseband_frames: usize,
         target_dsd: Option<TargetDsdConfig>,
         input_config: Option<InputDspConfig>,
-        thread_init_hook: Option<Arc<dyn Fn(usize) + Send + Sync>>,
+        worker_setup: Option<WorkerSetup>,
     ) -> Result<Self, EngineError> {
-        if channels == 0 {
-            return Err(EngineError::InvalidTopology {
-                message: "ChannelWorkerPool requires at least 1 channel".into(),
-            });
-        }
+        let (states, shape) = build_channel_states(
+            channels,
+            preset,
+            phase,
+            apodization,
+            stages,
+            tile_baseband_frames,
+            target_dsd.as_ref(),
+            input_config,
+        )?;
 
-        if tile_baseband_frames == 0 {
-            return Err(EngineError::InvalidTopology {
-                message: "ChannelWorkerPool requires a nonzero tile capacity".into(),
-            });
-        }
-
-        let input_bounds = input_config
-            .map(|config| config.bounds(tile_baseband_frames))
-            .transpose()?;
-        let input_frames = input_bounds.map_or(tile_baseband_frames, |bounds| bounds.pcm_frames);
-        let input_dsd_bytes = input_bounds.map_or(0, |bounds| bounds.dsd_bytes);
-        // Output-only commands remain valid on input-configured pools, even
-        // when SRC downsampling produces fewer frames than the outer tile.
-        let output_frames = input_bounds.map_or(tile_baseband_frames, |bounds| {
-            bounds.output_frames.max(tile_baseband_frames)
-        });
-        let input_controls =
-            input_config.map(|_| Arc::new(InputControlBuffer::new(tile_baseband_frames)));
-
-        let mult = 1usize << stages;
-        let subtile_frames = if target_dsd.is_some() {
-            tile_baseband_frames.min((DSD_SUBTILE_SAMPLES / mult).max(1))
+        let setup = worker_setup.unwrap_or_default();
+        let inline = setup.workers == Some(0);
+        let worker_count = if inline {
+            0
         } else {
-            tile_baseband_frames
+            setup.workers.unwrap_or(channels).clamp(1, channels)
         };
-        let cascade_probe =
-            HalfBandCascade::new(preset, phase, apodization, stages, subtile_frames);
-        let mult = cascade_probe.rate_multiplier();
-        let group_delay_output_samples = cascade_probe.total_group_delay_output_samples();
-        let cascade_tile_len =
-            output_frames
-                .checked_mul(mult)
-                .ok_or_else(|| EngineError::InvalidTopology {
-                    message: "worker output tile capacity overflow".into(),
-                })?;
-        let dsd_tile_bytes = cascade_tile_len / 8;
+        let mut inline_states = Vec::new();
+        let channel_buffers: Vec<Arc<WorkerBuffers>> =
+            states.iter().map(|s| Arc::clone(&s.buffers)).collect();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<(usize, Result<(), String>)>();
+        let coordinator_spin =
+            (0..worker_count).all(|w| setup.placements.get(w).is_none_or(|p| p.spin));
+        let timings = PoolTimings::new(worker_count.max(1));
+        let mut slots = Vec::with_capacity(worker_count);
+        let mut thread_handles = Vec::with_capacity(worker_count);
 
-        let mut slots = Vec::with_capacity(channels);
-        let mut thread_handles = Vec::with_capacity(channels);
-
-        for ch in 0..channels {
+        let groups = if inline {
+            inline_states = states;
+            Vec::new()
+        } else {
+            distribute_states(states, worker_count)
+        };
+        for (w, mut states) in groups.into_iter().enumerate() {
             let sync = Arc::new(WorkerSync::new());
-            let buffers = Arc::new(WorkerBuffers {
-                in_buf: UnsafeCell::new(vec![0.0f64; input_frames]),
-                dsd_in_buf: UnsafeCell::new(vec![0u8; input_dsd_bytes]),
-                pcm_out_buf: UnsafeCell::new(vec![0.0f64; cascade_tile_len]),
-                dsd_out_buf: UnsafeCell::new(vec![0u8; dsd_tile_bytes.max(1)]),
-            });
             let error = Arc::new(Mutex::new(None));
-
-            let slot = WorkerSlot {
+            let mailbox: Arc<Mutex<Option<Vec<ChannelState>>>> = Arc::new(Mutex::new(None));
+            slots.push(WorkerSlot {
                 sync: Arc::clone(&sync),
-                buffers: Arc::clone(&buffers),
                 error: Arc::clone(&error),
-            };
-            slots.push(slot);
+                mailbox: Arc::clone(&mailbox),
+            });
 
-            // Construct isolated cascade and modulator for this worker
-            let mut cascade =
-                HalfBandCascade::new(preset, phase, apodization, stages, subtile_frames);
-            let mut modulator = if let Some(ref dsd_cfg) = target_dsd {
-                let mut m = Modulator::new(
-                    dsd_cfg.modulator_order,
-                    dsd_cfg.bit_rate,
-                    dsd_cfg.dither,
-                    dsd_cfg.overload_policy,
-                )?;
-                m.set_dither_seed(dsd_cfg.seed_base.wrapping_add(ch as u64));
-                Some(m)
+            let thread_hook = setup.hook.clone();
+            let ready = ready_tx.clone();
+            let worker_timings = Arc::clone(&timings);
+            let placement = setup
+                .placements
+                .get(w)
+                .cloned()
+                .unwrap_or_else(ThreadPlacement::default);
+            let spin_limit: u32 = if placement.spin {
+                WORKER_SPIN_ITERATIONS
             } else {
-                None
+                0
             };
-            let mut input_processor = input_config
-                .zip(input_bounds)
-                .map(|(config, bounds)| {
-                    InputProcessor::new(preset, tile_baseband_frames, config, bounds)
-                })
-                .transpose()?;
-
-            let thread_sync = Arc::clone(&sync);
-            let thread_buffers = Arc::clone(&buffers);
-            let thread_error = Arc::clone(&error);
-            let thread_hook = thread_init_hook.clone();
-            let thread_input_controls = input_controls.clone();
-
             let handle = std::thread::Builder::new()
-                .name(format!("audigma-ch{ch}"))
+                .name(format!("audigma-dsp-{w}"))
                 .spawn(move || {
                     let _ftz = ScopedFtzDaz::new();
 
-                    if let Some(ref hook) = thread_hook {
-                        hook(ch);
+                    let hook_result = match thread_hook {
+                        Some(ref hook) => hook(w, &placement),
+                        None => Ok(()),
+                    };
+                    if let Err(ref e) = hook_result {
+                        tracing::debug!(worker = w, error = %e, "worker placement hook failed");
                     }
+                    // Report and release the sender so the constructor never waits on a
+                    // worker that already finished its setup (or died before it).
+                    let _ = ready.send((w, hook_result));
+                    drop(ready);
 
                     let mut current_gen = 0u32;
                     loop {
                         let mut spins = 0;
-                        while thread_sync.target_generation.load(Ordering::Acquire) == current_gen
-                            && spins < 2048
+                        while sync.target_generation.load(Ordering::Acquire) == current_gen
+                            && spins < spin_limit
                         {
                             core::hint::spin_loop();
                             spins += 1;
                         }
-                        while thread_sync.target_generation.load(Ordering::Acquire) == current_gen {
-                            futex_wait(&thread_sync.target_generation, current_gen);
+                        while sync.target_generation.load(Ordering::Acquire) == current_gen {
+                            futex_wait(&sync.target_generation, current_gen);
                         }
 
-                        current_gen = thread_sync.target_generation.load(Ordering::Acquire);
-                        let cmd = thread_sync.command.load(Ordering::Acquire);
+                        current_gen = sync.target_generation.load(Ordering::Acquire);
+                        let cmd = sync.command.load(Ordering::Acquire);
 
-                        let mut output_frames = 0;
-                        let result = match cmd {
+                        let (result, output_frames) = match cmd {
                             CMD_STOP => break,
-                            CMD_RESET | CMD_RESET_OUTPUT => {
-                                cascade.reset();
-                                if let Some(ref mut m) = modulator {
-                                    m.reset();
-                                }
-                                if cmd == CMD_RESET {
-                                    if let Some(ref mut processor) = input_processor {
-                                        processor.reset();
+                            CMD_RECONFIGURE => {
+                                // Swap in the coordinator-built states and hand the old
+                                // ones back through the same Vec: no allocation here, and
+                                // the coordinator frees them off the real-time thread.
+                                let mut slot = mailbox.lock().unwrap();
+                                let result = match slot.as_mut() {
+                                    Some(next) => {
+                                        std::mem::swap(&mut states, next);
+                                        Ok(())
                                     }
-                                }
-                                Ok(())
-                            }
-                            CMD_PCM | CMD_DSD => {
-                                let in_len = thread_sync.input_len.load(Ordering::Relaxed);
-                                output_frames = in_len;
-                                let in_buf = unsafe { &*thread_buffers.in_buf.get() };
-                                let in_slice = &in_buf[..in_len];
-                                let pcm_buf = unsafe { &mut *thread_buffers.pcm_out_buf.get() };
-                                let pcm_out = &mut pcm_buf[..in_len * mult];
-                                if let Some(m) = modulator.as_mut().filter(|_| cmd == CMD_DSD) {
-                                    let req_bytes = pcm_out.len() / 8;
-                                    let dsd_buf = unsafe { &mut *thread_buffers.dsd_out_buf.get() };
-                                    let dsd_out = &mut dsd_buf[..req_bytes];
-                                    let result = process_dsd_tile(
-                                        &mut cascade,
-                                        m,
-                                        in_slice,
-                                        pcm_out,
-                                        dsd_out,
-                                        subtile_frames,
-                                    );
-                                    thread_sync
-                                        .overload_count
-                                        .store(m.overload_count(), Ordering::Relaxed);
-                                    result
-                                } else {
-                                    process_pcm_tile(
-                                        &mut cascade,
-                                        in_slice,
-                                        pcm_out,
-                                        subtile_frames,
-                                    )
-                                }
-                            }
-                            CMD_INPUT_PCM | CMD_INPUT_DSD => (|| {
-                                let processor = input_processor.as_mut().ok_or_else(|| {
-                                    EngineError::InvalidTopology {
-                                        message: "channel worker has no input DSP configuration"
-                                            .into(),
-                                    }
-                                })?;
-                                let control_buffer = thread_input_controls.as_ref().unwrap();
-                                let controls = unsafe { control_buffer.controls() };
-                                let in_len = thread_sync.input_len.load(Ordering::Relaxed);
-                                let prepared = if cmd == CMD_INPUT_DSD {
-                                    let input = unsafe { &*thread_buffers.dsd_in_buf.get() };
-                                    processor.process_dsd(&input[..in_len], controls)?
-                                } else {
-                                    let input = unsafe { &*thread_buffers.in_buf.get() };
-                                    processor.process_pcm(&input[..in_len], controls)?
+                                    None => Err(EngineError::Pipeline(
+                                        "worker reconfigure without staged state".into(),
+                                    )),
                                 };
-                                let frames = prepared.len();
-                                output_frames = frames;
-                                let pcm_buf = unsafe { &mut *thread_buffers.pcm_out_buf.get() };
-                                let pcm_out = &mut pcm_buf[..frames * mult];
-                                if let Some(ref mut m) = modulator {
-                                    let dsd_buf = unsafe { &mut *thread_buffers.dsd_out_buf.get() };
-                                    let dsd_bytes = pcm_out.len() / 8;
-                                    let result = process_dsd_tile(
-                                        &mut cascade,
-                                        m,
-                                        prepared,
-                                        pcm_out,
-                                        &mut dsd_buf[..dsd_bytes],
-                                        subtile_frames,
-                                    );
-                                    thread_sync
-                                        .overload_count
-                                        .store(m.overload_count(), Ordering::Relaxed);
-                                    result
-                                } else {
-                                    process_pcm_tile(
-                                        &mut cascade,
-                                        prepared,
-                                        pcm_out,
-                                        subtile_frames,
-                                    )
-                                }
-                            })(),
-                            _ => Ok(()),
+                                (result, 0)
+                            }
+                            CMD_PCM | CMD_DSD | CMD_INPUT_PCM | CMD_INPUT_DSD => {
+                                // Execution time only: the wake-up is already behind us.
+                                let t0 = Instant::now();
+                                let out = run_channels(
+                                    &mut states,
+                                    cmd,
+                                    sync.input_len.load(Ordering::Relaxed),
+                                );
+                                worker_timings.record_worker(w, t0.elapsed().as_nanos() as u64);
+                                out
+                            }
+                            _ => run_channels(
+                                &mut states,
+                                cmd,
+                                sync.input_len.load(Ordering::Relaxed),
+                            ),
                         };
-                        thread_sync
-                            .output_len
-                            .store(output_frames, Ordering::Relaxed);
+                        sync.output_len.store(output_frames, Ordering::Relaxed);
                         if let Err(e) = result {
-                            thread_sync.has_error.store(true, Ordering::Release);
-                            let mut err = thread_error.lock().unwrap();
+                            sync.has_error.store(true, Ordering::Release);
+                            let mut err = error.lock().unwrap();
                             *err = Some(e);
                         }
 
-                        thread_sync
-                            .completed_generation
+                        sync.completed_generation
                             .store(current_gen, Ordering::Release);
-                        futex_wake(&thread_sync.completed_generation);
+                        futex_wake(&sync.completed_generation);
                     }
                 })
                 .map_err(|e| EngineError::WorkerThread {
-                    channel: ch,
-                    reason: format!("failed to spawn worker thread {ch}: {e}"),
+                    channel: w,
+                    reason: format!("failed to spawn worker thread {w}: {e}"),
                 })?;
 
             thread_handles.push(handle);
         }
 
-        Ok(Self {
+        drop(ready_tx);
+
+        let pool = Self {
             slots,
+            inline_states,
+            inline,
+            channel_buffers,
             thread_handles,
             failed_worker: None,
             current_generation: 0,
             last_frames: 0,
             tile_baseband_frames,
-            mult,
-            group_delay_output_samples,
+            mult: shape.mult,
+            group_delay_output_samples: shape.group_delay_output_samples,
             input_config,
-            input_bounds,
-            input_controls,
+            input_bounds: shape.input_bounds,
+            input_controls: shape.input_controls,
             pcm_residue_frames: 0,
             dsd_residue_bytes: 0,
-        })
+            coordinator_spin,
+            timings,
+        };
+
+        // Startup handshake: collect every worker's setup result. A worker that died before
+        // reporting simply disconnects its sender; that surfaces on first dispatch instead.
+        let mut first_failure = None;
+        while let Ok((ch, result)) = ready_rx.recv() {
+            if let Err(reason) = result
+                && first_failure.is_none()
+            {
+                first_failure = Some((ch, reason));
+            }
+        }
+        if setup.require_hook_ok
+            && let Some((channel, reason)) = first_failure
+        {
+            // Dropping `pool` stops and joins the workers.
+            return Err(EngineError::WorkerThread {
+                channel,
+                reason: format!("worker {channel} setup failed: {reason}"),
+            });
+        }
+        Ok(pool)
     }
 
-    /// Number of active channel workers.
+    /// Rebuilds every channel's per-rate DSP state (cascade, modulator, input
+    /// processor, buffers) and swaps it into the running workers, keeping the
+    /// threads (and their placement) alive. All allocation happens on the
+    /// calling thread before the swap; the result is equivalent to a freshly
+    /// constructed pool (filter history, residues and overload counts reset).
+    /// The channel count is fixed for the pool's lifetime.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reconfigure(
+        &mut self,
+        preset: FilterPreset,
+        phase: FilterPhase,
+        apodization: Apodization,
+        stages: usize,
+        tile_baseband_frames: usize,
+        target_dsd: Option<TargetDsdConfig>,
+        input_config: Option<InputDspConfig>,
+    ) -> Result<(), EngineError> {
+        self.ensure_ready()?;
+        let (mut states, shape) = build_channel_states(
+            self.channel_buffers.len(),
+            preset,
+            phase,
+            apodization,
+            stages,
+            tile_baseband_frames,
+            target_dsd.as_ref(),
+            input_config,
+        )?;
+        let new_buffers: Vec<Arc<WorkerBuffers>> =
+            states.iter().map(|s| Arc::clone(&s.buffers)).collect();
+        if self.inline {
+            // Nothing runs concurrently: swap directly and free the old states here.
+            std::mem::swap(&mut self.inline_states, &mut states);
+            drop(states);
+        } else {
+            for (slot, group) in self
+                .slots
+                .iter()
+                .zip(distribute_states(states, self.slots.len()))
+            {
+                *slot.mailbox.lock().unwrap() = Some(group);
+            }
+
+            let result = self.dispatch_command(CMD_RECONFIGURE, 0);
+            // Workers are idle at the barrier: reclaim the previous state here.
+            let retired: Vec<_> = self
+                .slots
+                .iter()
+                .map(|slot| slot.mailbox.lock().unwrap().take())
+                .collect();
+            result?;
+            drop(retired);
+        }
+
+        self.channel_buffers = new_buffers;
+        self.tile_baseband_frames = tile_baseband_frames;
+        self.mult = shape.mult;
+        self.group_delay_output_samples = shape.group_delay_output_samples;
+        self.input_config = input_config;
+        self.input_bounds = shape.input_bounds;
+        self.input_controls = shape.input_controls;
+        self.pcm_residue_frames = 0;
+        self.dsd_residue_bytes = 0;
+        self.last_frames = 0;
+        Ok(())
+    }
+
+    /// Shared timing histograms (persist across `reconfigure`).
+    pub fn timings(&self) -> Arc<PoolTimings> {
+        Arc::clone(&self.timings)
+    }
+
+    /// Number of audio channels.
     #[inline]
     pub fn channels(&self) -> usize {
+        self.channel_buffers.len()
+    }
+
+    /// Number of worker threads (at most `channels()`; 0 in inline mode).
+    #[inline]
+    pub fn worker_count(&self) -> usize {
         self.slots.len()
     }
 
@@ -619,17 +960,16 @@ impl ChannelWorkerPool {
     /// Cumulative overload count across all channels.
     #[inline]
     pub fn total_overload_count(&self) -> u64 {
-        self.slots
+        self.channel_buffers
             .iter()
-            .map(|s| s.sync.overload_count.load(Ordering::Relaxed))
+            .map(|b| b.overload_count.load(Ordering::Relaxed))
             .sum()
     }
 
     /// Overload count for a specific channel.
     #[inline]
     pub fn channel_overload_count(&self, channel: usize) -> u64 {
-        self.slots[channel]
-            .sync
+        self.channel_buffers[channel]
             .overload_count
             .load(Ordering::Relaxed)
     }
@@ -646,7 +986,22 @@ impl ChannelWorkerPool {
 
     fn dispatch_command(&mut self, cmd: u32, frames: usize) -> Result<(), EngineError> {
         self.ensure_ready()?;
+        let timed = matches!(cmd, CMD_PCM | CMD_DSD | CMD_INPUT_PCM | CMD_INPUT_DSD);
+        if self.inline {
+            // The guard restores the caller's FP environment on return.
+            let _ftz = ScopedFtzDaz::new();
+            let t0 = timed.then(Instant::now);
+            let (result, output_frames) = run_channels(&mut self.inline_states, cmd, frames);
+            if let Some(t0) = t0 {
+                let ns = t0.elapsed().as_nanos() as u64;
+                self.timings.record_worker(0, ns);
+                self.timings.record_dispatch(ns);
+            }
+            self.last_frames = if result.is_ok() { output_frames } else { 0 };
+            return result;
+        }
         let next_gen = self.current_generation.wrapping_add(1);
+        let dispatch_start = timed.then(Instant::now);
 
         for slot in &self.slots {
             slot.sync.input_len.store(frames, Ordering::Relaxed);
@@ -657,10 +1012,16 @@ impl ChannelWorkerPool {
             futex_wake(&slot.sync.target_generation);
         }
 
+        let coordinator_spin_limit = if self.coordinator_spin {
+            WORKER_SPIN_ITERATIONS
+        } else {
+            0
+        };
         let mut failed_worker = None;
         for (ch, slot) in self.slots.iter().enumerate() {
             let mut spins = 0;
-            while slot.sync.completed_generation.load(Ordering::Acquire) != next_gen && spins < 2048
+            while slot.sync.completed_generation.load(Ordering::Acquire) != next_gen
+                && spins < coordinator_spin_limit
             {
                 core::hint::spin_loop();
                 spins += 1;
@@ -675,6 +1036,12 @@ impl ChannelWorkerPool {
         }
 
         self.current_generation = next_gen;
+        if let Some(start) = dispatch_start
+            && failed_worker.is_none()
+        {
+            self.timings
+                .record_dispatch(start.elapsed().as_nanos() as u64);
+        }
         if failed_worker.is_some() {
             // Reclaim shared buffers only after all surviving workers have
             // completed, and reject later dispatches before publishing controls.
@@ -713,10 +1080,10 @@ impl ChannelWorkerPool {
     /// Processes one multi-channel tile through the half-band FIR cascade only (PCM output).
     pub fn process_tile_pcm(&mut self, inputs: &[&[f64]]) -> Result<(), EngineError> {
         self.ensure_ready()?;
-        if inputs.len() != self.slots.len() {
+        if inputs.len() != self.channel_buffers.len() {
             return Err(EngineError::Pipeline(format!(
                 "ChannelWorkerPool channel count mismatch: expected {}, got {}",
-                self.slots.len(),
+                self.channel_buffers.len(),
                 inputs.len()
             )));
         }
@@ -738,7 +1105,7 @@ impl ChannelWorkerPool {
                 )));
             }
             unsafe {
-                let buf = &mut *self.slots[i].buffers.in_buf.get();
+                let buf = &mut *self.channel_buffers[i].in_buf.get();
                 buf[..frames].copy_from_slice(in_ch);
             }
         }
@@ -749,10 +1116,10 @@ impl ChannelWorkerPool {
     /// Processes one multi-channel tile through the half-band cascade and CRFB modulator (DSD output).
     pub fn process_tile_dsd(&mut self, inputs: &[&[f64]]) -> Result<(), EngineError> {
         self.ensure_ready()?;
-        if inputs.len() != self.slots.len() {
+        if inputs.len() != self.channel_buffers.len() {
             return Err(EngineError::Pipeline(format!(
                 "ChannelWorkerPool channel count mismatch: expected {}, got {}",
-                self.slots.len(),
+                self.channel_buffers.len(),
                 inputs.len()
             )));
         }
@@ -774,7 +1141,7 @@ impl ChannelWorkerPool {
                 )));
             }
             unsafe {
-                let buf = &mut *self.slots[i].buffers.in_buf.get();
+                let buf = &mut *self.channel_buffers[i].in_buf.get();
                 buf[..frames].copy_from_slice(in_ch);
             }
         }
@@ -787,7 +1154,7 @@ impl ChannelWorkerPool {
         inputs: &[&[T]],
         capacity: usize,
     ) -> Result<usize, EngineError> {
-        if inputs.len() != self.slots.len() {
+        if inputs.len() != self.channel_buffers.len() {
             return Err(EngineError::Pipeline(
                 "input DSP channel count mismatch".into(),
             ));
@@ -835,8 +1202,8 @@ impl ChannelWorkerPool {
         let frames = self.validate_input_channels(inputs, self.input_frame_capacity())?;
         let baseband_frames = self.pcm_baseband_frames(frames)?;
         self.publish_input_controls(controls, baseband_frames)?;
-        for (slot, input) in self.slots.iter().zip(inputs) {
-            let buffer = unsafe { &mut *slot.buffers.in_buf.get() };
+        for (buffers, input) in self.channel_buffers.iter().zip(inputs) {
+            let buffer = unsafe { &mut *buffers.in_buf.get() };
             buffer[..frames].copy_from_slice(input);
         }
         let result = self.dispatch_command(CMD_INPUT_PCM, frames);
@@ -861,8 +1228,8 @@ impl ChannelWorkerPool {
         let decoded_frames = self.dsd_decoded_frames(bytes)?;
         let baseband_frames = self.dsd_baseband_frames(bytes)?;
         self.publish_input_controls(controls, baseband_frames)?;
-        for (slot, input) in self.slots.iter().zip(inputs) {
-            let buffer = unsafe { &mut *slot.buffers.dsd_in_buf.get() };
+        for (buffers, input) in self.channel_buffers.iter().zip(inputs) {
+            let buffer = unsafe { &mut *buffers.dsd_in_buf.get() };
             buffer[..bytes].copy_from_slice(input);
         }
         let result = self.dispatch_command(CMD_INPUT_DSD, bytes);
@@ -879,7 +1246,7 @@ impl ChannelWorkerPool {
     pub fn channel_pcm(&self, channel: usize) -> &[f64] {
         let out_len = self.last_frames * self.mult;
         unsafe {
-            let buf = &*self.slots[channel].buffers.pcm_out_buf.get();
+            let buf = &*self.channel_buffers[channel].pcm_out_buf.get();
             &buf[..out_len]
         }
     }
@@ -889,7 +1256,7 @@ impl ChannelWorkerPool {
     pub fn channel_dsd(&self, channel: usize) -> &[u8] {
         let out_bytes = (self.last_frames * self.mult) / 8;
         unsafe {
-            let buf = &*self.slots[channel].buffers.dsd_out_buf.get();
+            let buf = &*self.channel_buffers[channel].dsd_out_buf.get();
             &buf[..out_bytes]
         }
     }

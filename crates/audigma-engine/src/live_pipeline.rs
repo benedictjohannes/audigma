@@ -20,15 +20,17 @@ use crate::lifecycle::{
     BlockAction, FrameGain, IdleCarrierFormat, LifecycleController, LifecycleState,
 };
 use crate::loop_timing::{LoopProbe, LoopTimingMonitor, LoopTimingTelemetry};
+use crate::pipeline_topology::PipelineTopology;
 use crate::processor::TileProcessor;
-use crate::topology::PipelineTopology;
 use crate::traits::{AudioInput, AudioOutput, EngineError};
 use crate::transport::{
     is_dsd_passthrough_eligible, pack_and_write_stereo_dsd, process_live_dsd_passthrough_tile,
     write_output_all,
 };
-use crate::worker::{InputDspConfig, InputResampling, InputTileControls};
-use audigma_dsp::config::{DspConfiguration, SampleFormat, TargetRateSpec};
+use crate::worker::{
+    InputDspConfig, InputResampling, InputTileControls, TargetDsdConfig, WorkerSetup,
+};
+use audigma_dsp::config::{DspConfiguration, FilterPreset, SampleFormat, TargetRateSpec};
 use audigma_dsp::ftz::ScopedFtzDaz;
 use audigma_dsp::modulator::TpdfDither;
 use audigma_dsp::rates::PcmRateHz;
@@ -642,6 +644,77 @@ pub enum StreamExitReason {
     RateChanged { new_rate: PcmRateHz, channels: u8 },
 }
 
+/// Long-lived DSP worker pool shared by successive streaming sessions (Design §3.4).
+///
+/// Worker threads (and the placement/RT priority applied to them) are created on
+/// the first stream and kept across rate switches and device reconnects; each
+/// later stream only rebuilds per-channel DSP state via `reconfigure`.
+#[derive(Default)]
+pub struct DspSession {
+    processor: Option<TileProcessor>,
+}
+
+impl DspSession {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether the worker pool has been spawned yet.
+    pub fn is_active(&self) -> bool {
+        self.processor.is_some()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn configure(
+        &mut self,
+        channels: usize,
+        preset: FilterPreset,
+        phase: audigma_dsp::config::FilterPhase,
+        apodization: audigma_dsp::config::Apodization,
+        topology: PipelineTopology,
+        tile_baseband_frames: usize,
+        target_dsd: Option<TargetDsdConfig>,
+        input_config: InputDspConfig,
+        worker_setup: Option<WorkerSetup>,
+    ) -> Result<&mut TileProcessor, EngineError> {
+        if self
+            .processor
+            .as_ref()
+            .is_some_and(|p| p.channels() != channels)
+        {
+            // Channel count is constant for a daemon; a mismatch means a fresh pool.
+            self.processor = None;
+        }
+        match self.processor {
+            Some(ref mut processor) => processor.reconfigure(
+                preset,
+                phase,
+                apodization,
+                topology,
+                tile_baseband_frames,
+                target_dsd,
+                true,
+                Some(input_config),
+            )?,
+            None => {
+                self.processor = Some(TileProcessor::new_with_input(
+                    channels,
+                    preset,
+                    phase,
+                    apodization,
+                    topology,
+                    tile_baseband_frames,
+                    target_dsd,
+                    true,
+                    input_config,
+                    worker_setup,
+                )?);
+            }
+        }
+        Ok(self.processor.as_mut().expect("processor configured above"))
+    }
+}
+
 /// Prepared real-time live streaming pipeline.
 #[derive(Clone)]
 pub struct LivePipeline {
@@ -649,18 +722,18 @@ pub struct LivePipeline {
     plan: ResolvedPipelinePlan,
     topology: PipelineTopology,
     carrier: IdleCarrierFormat,
-    thread_init_hook: Option<Arc<dyn Fn(usize) + Send + Sync>>,
+    worker_setup: Option<WorkerSetup>,
 }
 
 impl LivePipeline {
     pub fn prepare(settings: Settings, input_rate: PcmRateHz) -> Result<Self, EngineError> {
-        Self::prepare_with_hook(settings, input_rate, None)
+        Self::prepare_with_workers(settings, input_rate, None)
     }
 
-    pub fn prepare_with_hook(
+    pub fn prepare_with_workers(
         settings: Settings,
         input_rate: PcmRateHz,
-        thread_init_hook: Option<Arc<dyn Fn(usize) + Send + Sync>>,
+        worker_setup: Option<WorkerSetup>,
     ) -> Result<Self, EngineError> {
         if let Some(gain) = settings.gain.as_ref() {
             if gain.peak_analysis == audigma_settings::PeakAnalysisMode::TwoPass {
@@ -681,13 +754,13 @@ impl LivePipeline {
             plan,
             topology,
             carrier,
-            thread_init_hook,
+            worker_setup,
         })
     }
 
     /// Sets or replaces the thread initialization hook for channel worker threads.
-    pub fn set_thread_init_hook(&mut self, hook: Option<Arc<dyn Fn(usize) + Send + Sync>>) {
-        self.thread_init_hook = hook;
+    pub fn set_worker_setup(&mut self, setup: Option<WorkerSetup>) {
+        self.worker_setup = setup;
     }
 
     /// Returns the resolved input sample rate.
@@ -725,8 +798,24 @@ impl LivePipeline {
     }
 
     /// Runs the streaming loop with an optional hardware volume bridge (`Design.md §1.8`).
+    ///
+    /// Uses a throwaway [`DspSession`]; long-lived callers should keep one and call
+    /// [`Self::run_streaming_with_session`] so worker threads survive rate switches.
     pub fn run_streaming_with_bridge(
         &self,
+        input: &mut dyn AudioInput,
+        output: &mut dyn AudioOutput,
+        control: DaemonControlHandle,
+        hw_bridge: Option<&mut dyn crate::traits::HardwareVolumeBridge>,
+    ) -> Result<StreamExitReason, EngineError> {
+        self.run_streaming_with_session(&mut DspSession::new(), input, output, control, hw_bridge)
+    }
+
+    /// Runs the streaming loop on the persistent worker pool owned by `session`.
+    /// The pool is created on first use and re-targeted (not respawned) afterwards.
+    pub fn run_streaming_with_session(
+        &self,
+        session: &mut DspSession,
         input: &mut dyn AudioInput,
         output: &mut dyn AudioOutput,
         control: DaemonControlHandle,
@@ -780,7 +869,7 @@ impl LivePipeline {
             resampling,
         };
 
-        let mut processor = TileProcessor::new_with_input(
+        let processor = session.configure(
             num_channels,
             preset,
             self.plan.dsp_config.phase,
@@ -788,9 +877,8 @@ impl LivePipeline {
             self.topology,
             TILE_BASEBAND_FRAMES,
             target_dsd,
-            true,
             input_config,
-            self.thread_init_hook.clone(),
+            self.worker_setup.clone(),
         )?;
         let mult = processor.rate_multiplier();
 
@@ -806,6 +894,7 @@ impl LivePipeline {
                 telemetry,
                 late_counters,
                 self.settings.late_tile_report_interval(),
+                Some(processor.timings()),
             )
         });
 
@@ -823,6 +912,7 @@ impl LivePipeline {
             processor
                 .late_telemetry()
                 .map_or(0, |telemetry| telemetry.budget_us()),
+            Some(processor.timings()),
         );
 
         let pcm_sample_format = match target_spec {

@@ -98,7 +98,15 @@ pub fn run_benchmark(args: BenchmarkArgs) -> Result<(), CliError> {
     // Sink into in-memory cursor or dev-null-like sink
     let output = Box::new(std::io::Cursor::new(Vec::new()));
 
-    let pipeline = OfflinePipeline::prepare(settings.clone(), input_rate)?;
+    let pipeline = {
+        let placement = crate::runtime::resolve(&settings, 2, true)?;
+        crate::runtime::apply_housekeeping(&placement);
+        OfflinePipeline::prepare_with_workers(
+            settings.clone(),
+            input_rate,
+            Some(crate::runtime::worker_setup(&placement)),
+        )?
+    };
     let plan = pipeline.plan().clone();
 
     let start_bench = Instant::now();

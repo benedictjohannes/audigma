@@ -16,6 +16,9 @@ pub enum CliError {
     #[error("configuration error: {0}")]
     Config(String),
 
+    #[error("realtime = \"required\" could not be satisfied: {0}")]
+    Realtime(String),
+
     #[error("{0}")]
     Override(String),
 

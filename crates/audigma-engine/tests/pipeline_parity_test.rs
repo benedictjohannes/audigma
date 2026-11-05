@@ -3,7 +3,7 @@
 
 use audigma_dsp::config::{Apodization, FilterPhase, OverloadPolicy, TargetRateSpec};
 use audigma_dsp::rates::{DsdBitRateHz, PcmRateHz};
-use audigma_engine::topology::is_dsd_passthrough_eligible;
+use audigma_engine::pipeline_topology::is_dsd_passthrough_eligible;
 use audigma_engine::{IdleCarrierFormat, LivePipeline, OfflinePipeline};
 use audigma_format::decoder::AudioStreamInfo;
 use audigma_settings::Settings;

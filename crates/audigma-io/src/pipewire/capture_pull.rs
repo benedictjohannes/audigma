@@ -270,6 +270,7 @@ mod tests {
             audigma_dsp::FilterPreset::Balanced,
             None,
             128,
+            None,
         )
         .unwrap();
         std::thread::sleep(Duration::from_millis(500));

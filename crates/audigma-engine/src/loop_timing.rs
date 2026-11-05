@@ -11,7 +11,7 @@
 //! the backend reported an xrun.
 //!
 //! The audio path only touches relaxed atomics. A non-real-time thread
-//! (`audigma-loop`) polls them and emits `audigma::late` records through `tracing`.
+//! (`audigma-health`) polls them and emits `audigma::late` records through `tracing`.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
@@ -19,6 +19,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::late::{LATE_POLL_INTERVAL, LateCounterSource, LateCounters};
+use crate::timing::{MaxSlot, PoolTimings, TimingReport, TimingTracker};
 use crate::traits::AudioOutput;
 
 /// Minimum spacing between `loop_stall` records; anomalies in between are merged.
@@ -212,12 +213,32 @@ impl LoopProbe {
     }
 }
 
+/// Number of recent poll intervals whose empty-poll counts still explain a stall. A stall is
+/// recorded when the loop finally emits after its gap, so the empty polls happened in the
+/// (non-anomalous, already discarded) intervals just before.
+const EMPTY_POLL_MEMORY: usize = 3;
+
+/// Rolling record of the last few intervals' empty-poll deltas.
+#[derive(Default)]
+struct EmptyPollMemory([u64; EMPTY_POLL_MEMORY]);
+
+impl EmptyPollMemory {
+    fn push(&mut self, empty_polls: u64) {
+        self.0.rotate_left(1);
+        self.0[EMPTY_POLL_MEMORY - 1] = empty_polls;
+    }
+
+    fn recent(&self) -> u64 {
+        self.0.iter().fold(0, |a, b| a.saturating_add(*b))
+    }
+}
+
 /// Decides whether a merged window deserves a `loop_stall` record.
 fn is_anomalous(s: &LoopSnapshot, d: &LateCounters) -> bool {
     s.starved > 0 || d.xruns > 0 || d.overruns > 0 || d.starvations > 0 || d.dropped_chunks > 0
 }
 
-/// Owns the `audigma-loop` aggregator thread.
+/// Owns the `audigma-health` aggregator thread.
 pub struct LoopTimingMonitor {
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
@@ -230,18 +251,21 @@ impl LoopTimingMonitor {
         counters: LateCounterSource,
         health_interval: Duration,
         tile_budget_us: u64,
+        timings: Option<Arc<PoolTimings>>,
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = Arc::clone(&stop);
         let handle = std::thread::Builder::new()
-            .name("audigma-loop".to_string())
+            .name("audigma-health".to_string())
             .spawn(move || {
                 let mut pending = LoopSnapshot::default();
                 let mut health = LoopSnapshot::default();
                 let mut last_counters = counters();
                 let mut pending_delta = LateCounters::default();
+                let mut empty_memory = EmptyPollMemory::default();
                 let mut last_emit = Instant::now() - STALL_MIN_SPACING;
                 let mut last_health = Instant::now();
+                let mut tracker = timings.map(|t| TimingTracker::new(t, MaxSlot::Health));
                 loop {
                     let stopping = stop_thread.load(Ordering::Acquire);
                     let snap = telemetry.take_interval();
@@ -251,10 +275,14 @@ impl LoopTimingMonitor {
                     pending.merge(&snap);
                     health.merge(&snap);
                     pending_delta = add_counters(&pending_delta, &d);
+                    empty_memory.push(d.empty_polls);
 
                     if is_anomalous(&pending, &pending_delta)
                         && (stopping || last_emit.elapsed() >= STALL_MIN_SPACING)
                     {
+                        // Empty polls from just before this window still explain the stall.
+                        pending_delta.empty_polls =
+                            pending_delta.empty_polls.max(empty_memory.recent());
                         emit_stall(&pending, &pending_delta, tile_budget_us);
                         pending = LoopSnapshot::default();
                         pending_delta = LateCounters::default();
@@ -266,7 +294,8 @@ impl LoopTimingMonitor {
                     }
 
                     if last_health.elapsed() >= health_interval {
-                        emit_health(&health, tile_budget_us);
+                        let report = tracker.as_mut().map(TimingTracker::window);
+                        emit_health(&health, tile_budget_us, report.as_ref());
                         health = LoopSnapshot::default();
                         last_health = Instant::now();
                     }
@@ -283,7 +312,7 @@ impl LoopTimingMonitor {
             tracing::warn!(
                 target: audigma_log::LATE_TARGET,
                 event = audigma_log::STREAMING_ERROR,
-                error = "failed to spawn audigma-loop thread",
+                error = "failed to spawn audigma-health thread",
                 error_kind = "thread_spawn",
                 "loop-timing aggregator unavailable"
             );
@@ -312,10 +341,41 @@ fn add_counters(a: &LateCounters, b: &LateCounters) -> LateCounters {
     }
 }
 
+/// Best-effort explanation of a stall window, from stage maxima and backend counters.
+///
+/// - `input_empty`: the loop polled empty input (waiting out the grace window before idle fill)
+///   while every stage it controls was fast, i.e. the loop was waiting, not slow. This is what
+///   an input that ends or stops delivering looks like.
+/// - `dsp_slow` / `read_slow` / `prep_slow`: the named stage alone exceeded the tile budget (the
+///   slowest such stage wins). `emit_slow` additionally requires a starved emit, because the
+///   emit stage blocks by design when the device buffer is full.
+/// - `unknown`: nothing above explains it (for example a device xrun with fast stages).
+pub fn classify_stall(s: &LoopSnapshot, d: &LateCounters, tile_budget_us: u64) -> &'static str {
+    if tile_budget_us == 0 {
+        return "unknown";
+    }
+    let stages = [
+        ("dsp_slow", s.dsp_max_us),
+        ("emit_slow", if s.starved > 0 { s.emit_max_us } else { 0 }),
+        ("read_slow", s.read_max_us),
+        ("prep_slow", s.prep_max_us),
+    ];
+    let slowest = stages
+        .iter()
+        .filter(|(_, us)| *us > tile_budget_us)
+        .max_by_key(|(_, us)| *us);
+    match slowest {
+        Some((name, _)) => name,
+        None if d.empty_polls > 0 => "input_empty",
+        None => "unknown",
+    }
+}
+
 fn emit_stall(s: &LoopSnapshot, d: &LateCounters, tile_budget_us: u64) {
     tracing::warn!(
         target: audigma_log::LATE_TARGET,
         event = audigma_log::LOOP_STALL,
+        cause = classify_stall(s, d, tile_budget_us),
         tiles = s.tiles,
         starved_emits = s.starved,
         // `None` omits the field, so a genuine -1 stays distinguishable from "unavailable".
@@ -337,7 +397,7 @@ fn emit_stall(s: &LoopSnapshot, d: &LateCounters, tile_budget_us: u64) {
     );
 }
 
-fn emit_health(s: &LoopSnapshot, tile_budget_us: u64) {
+fn emit_health(s: &LoopSnapshot, tile_budget_us: u64, timing: Option<&TimingReport>) {
     if s.tiles == 0 {
         return;
     }
@@ -354,12 +414,93 @@ fn emit_health(s: &LoopSnapshot, tile_budget_us: u64) {
         dsp_max_us = s.dsp_max_us,
         emit_max_us = s.emit_max_us,
         tile_budget_us = tile_budget_us,
+        // Worker execution (inside the worker) vs dispatch (wake-up + barrier, as seen by
+        // the loop). Window percentiles have 25 us resolution; `*_cum_*` cover the stream.
+        worker_exec_mean_us = timing.map(|t| t.worker.mean_us),
+        worker_exec_p50_us = timing.map(|t| t.worker.p50_us),
+        worker_exec_p99_us = timing.map(|t| t.worker.p99_us),
+        worker_exec_max_us = timing.map(|t| t.worker.max_us),
+        worker_exec_cum_p999_us = timing.map(|t| t.worker_cumulative.p999_us),
+        worker_exec_cum_max_us = timing.map(|t| t.worker_cumulative.max_us),
+        worker_p99_us = timing.map(|t| t.per_worker_list(|s| s.p99_us)),
+        worker_max_us = timing.map(|t| t.per_worker_list(|s| s.max_us)),
+        dispatch_mean_us = timing.map(|t| t.dispatch.mean_us),
+        dispatch_p50_us = timing.map(|t| t.dispatch.p50_us),
+        dispatch_p99_us = timing.map(|t| t.dispatch.p99_us),
+        dispatch_cum_p999_us = timing.map(|t| t.dispatch_cumulative.p999_us),
         "feed loop health"
     );
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn empty_poll_memory_keeps_only_recent_intervals() {
+        let mut m = EmptyPollMemory::default();
+        assert_eq!(m.recent(), 0);
+        m.push(100);
+        m.push(0);
+        m.push(0);
+        assert_eq!(m.recent(), 100);
+        m.push(0);
+        assert_eq!(m.recent(), 0);
+    }
+
+    #[test]
+    fn stall_cause_classification() {
+        let budget = 1_451;
+        let snap = |dsp, emit, read| LoopSnapshot {
+            dsp_max_us: dsp,
+            emit_max_us: emit,
+            read_max_us: read,
+            ..Default::default()
+        };
+        let polls = LateCounters {
+            empty_polls: 226,
+            ..Default::default()
+        };
+        let none = LateCounters::default();
+        // The mpc-stop case: loop idle-waiting, every stage fast.
+        assert_eq!(
+            classify_stall(&snap(0, 73, 0), &polls, budget),
+            "input_empty"
+        );
+        // A slow stage wins even if empty polls were seen.
+        assert_eq!(
+            classify_stall(&snap(3_000, 70, 0), &polls, budget),
+            "dsp_slow"
+        );
+        let starved = |mut s: LoopSnapshot| {
+            s.starved = 1;
+            s
+        };
+        assert_eq!(
+            classify_stall(&starved(snap(900, 5_000, 0)), &none, budget),
+            "emit_slow"
+        );
+        assert_eq!(
+            classify_stall(&starved(snap(2_000, 9_000, 0)), &none, budget),
+            "emit_slow"
+        );
+        // A long blocking emit with no starvation is normal (full device buffer).
+        assert_eq!(
+            classify_stall(&snap(900, 5_000, 0), &none, budget),
+            "unknown"
+        );
+        assert_eq!(
+            classify_stall(&snap(900, 4_555, 0), &polls, budget),
+            "input_empty"
+        );
+        assert_eq!(
+            classify_stall(&snap(0, 0, 4_000), &none, budget),
+            "read_slow"
+        );
+        // Fast stages and no empty input: xrun with no visible cause.
+        assert_eq!(classify_stall(&snap(500, 70, 20), &none, budget), "unknown");
+        // No budget information.
+        assert_eq!(classify_stall(&snap(0, 0, 0), &polls, 0), "unknown");
+    }
+
     use super::*;
     use std::io::Write;
 

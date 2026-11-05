@@ -612,6 +612,37 @@ pub struct PipeWireVirtualSink {
     decimation_recorder: Arc<audigma_log::DecimationErrorRecorder>,
 }
 
+/// Applies the thread's placement (housekeeping affinity + RT). Never fatal: a failure
+/// (including on reconnect, after startup) logs an `RT_PRIORITY` event and the thread keeps
+/// running at normal priority.
+fn apply_thread_placement(thread: &str, placement: Option<&audigma_engine::ThreadPlacement>) {
+    let Some(p) = placement else { return };
+    #[cfg(target_os = "linux")]
+    match crate::sched::apply(p) {
+        Ok(applied) => tracing::info!(
+            target: "audigma::daemon",
+            event = audigma_log::RT_PRIORITY,
+            thread,
+            acquired = applied.realtime.is_some(),
+            priority = p.rt_priority,
+            cpus = ?p.cpus,
+            method = applied.realtime.map(|m| m.to_string()).unwrap_or_default(),
+            "thread placement applied"
+        ),
+        Err(e) => tracing::warn!(
+            target: "audigma::daemon",
+            event = audigma_log::RT_PRIORITY,
+            thread,
+            acquired = false,
+            priority = p.rt_priority,
+            error = %e,
+            "thread placement failed; continuing at normal priority"
+        ),
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (thread, p);
+}
+
 impl PipeWireVirtualSink {
     /// Creates and binds a new virtual sink node in the PipeWire graph using an `InputConfig`.
     pub fn from_input_config(
@@ -624,6 +655,7 @@ impl PipeWireVirtualSink {
             default_rate_hz,
             audigma_dsp::FilterPreset::Balanced,
             queue_chunks,
+            None,
         )
     }
 
@@ -634,6 +666,7 @@ impl PipeWireVirtualSink {
         default_rate_hz: u32,
         fallback_preset: audigma_dsp::FilterPreset,
         queue_chunks: usize,
+        placement: Option<audigma_engine::ThreadPlacement>,
     ) -> Result<Self, PipeWireError> {
         let node_name = in_cfg.node_name.as_deref().unwrap_or("audigma_sink");
         let channels = in_cfg.channels.unwrap_or(2) as u32;
@@ -658,6 +691,7 @@ impl PipeWireVirtualSink {
             dsd_preset,
             dsd_max_intermediate,
             queue_chunks,
+            placement,
         )
     }
 
@@ -697,6 +731,7 @@ impl PipeWireVirtualSink {
         dsd_preset: audigma_dsp::FilterPreset,
         dsd_max_intermediate: Option<PcmRateHz>,
         queue_chunks: usize,
+        placement: Option<audigma_engine::ThreadPlacement>,
     ) -> Result<Self, PipeWireError> {
         let desc = format!("Audigma Virtual Sink ({node_name})");
         let node_name_owned = node_name.to_string();
@@ -759,6 +794,7 @@ impl PipeWireVirtualSink {
         let worker = std::thread::Builder::new()
             .name("audigma-pw-in".to_string())
             .spawn(move || {
+                apply_thread_placement("audigma-pw-in", placement.as_ref());
                 pipewire::init();
                 let mainloop = match pipewire::main_loop::MainLoopBox::new(None) {
                     Ok(m) => m,
@@ -1948,6 +1984,7 @@ impl PipeWirePcmOutput {
         rate_hz: u32,
         channels: u32,
         queue_depth: usize,
+        placement: Option<audigma_engine::ThreadPlacement>,
     ) -> Result<Self, PipeWireError> {
         let (producer, mut consumer) = RingBuffer::<Vec<u8>>::new(queue_depth);
         let running = Arc::new(AtomicBool::new(true));
@@ -1965,6 +2002,7 @@ impl PipeWirePcmOutput {
         let worker = std::thread::Builder::new()
             .name("audigma-pw-out".to_string())
             .spawn(move || {
+                apply_thread_placement("audigma-pw-out", placement.as_ref());
                 pipewire::init();
                 let mainloop = match pipewire::main_loop::MainLoopBox::new(None) {
                     Ok(m) => m,

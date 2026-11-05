@@ -7,10 +7,11 @@ use std::time::{Duration, Instant};
 use audigma_dsp::config::{Apodization, FilterPhase, FilterPreset, TargetRateSpec};
 
 use crate::late::LateTileTelemetry;
-use crate::topology::PipelineTopology;
+use crate::pipeline_topology::PipelineTopology;
 use crate::traits::EngineError;
 use crate::worker::{
     ChannelWorkerPool, InputDspConfig, InputResampling, InputTileControls, TargetDsdConfig,
+    WorkerSetup,
 };
 
 /// Executes individual audio tiles through the half-band filter cascade and delta-sigma modulators,
@@ -38,7 +39,7 @@ impl TileProcessor {
         tile_baseband_frames: usize,
         target_dsd: Option<TargetDsdConfig>,
         is_realtime: bool,
-        thread_init_hook: Option<Arc<dyn Fn(usize) + Send + Sync>>,
+        worker_setup: Option<WorkerSetup>,
     ) -> Result<Self, EngineError> {
         Self::new_configured(
             channels,
@@ -50,7 +51,7 @@ impl TileProcessor {
             target_dsd,
             is_realtime,
             None,
-            thread_init_hook,
+            worker_setup,
         )
     }
 
@@ -68,7 +69,7 @@ impl TileProcessor {
         target_dsd: Option<TargetDsdConfig>,
         is_realtime: bool,
         input_config: InputDspConfig,
-        thread_init_hook: Option<Arc<dyn Fn(usize) + Send + Sync>>,
+        worker_setup: Option<WorkerSetup>,
     ) -> Result<Self, EngineError> {
         Self::new_configured(
             channels,
@@ -80,7 +81,7 @@ impl TileProcessor {
             target_dsd,
             is_realtime,
             Some(input_config),
-            thread_init_hook,
+            worker_setup,
         )
     }
 
@@ -95,7 +96,7 @@ impl TileProcessor {
         target_dsd: Option<TargetDsdConfig>,
         is_realtime: bool,
         input_config: Option<InputDspConfig>,
-        thread_init_hook: Option<Arc<dyn Fn(usize) + Send + Sync>>,
+        worker_setup: Option<WorkerSetup>,
     ) -> Result<Self, EngineError> {
         let worker_pool = ChannelWorkerPool::new_with_input(
             channels,
@@ -106,9 +107,28 @@ impl TileProcessor {
             tile_baseband_frames,
             target_dsd,
             input_config,
-            thread_init_hook,
+            worker_setup,
         )?;
 
+        let (tile_budget, late_telemetry) =
+            Self::timing_for(&topology, tile_baseband_frames, is_realtime, input_config);
+
+        Ok(Self {
+            worker_pool,
+            topology,
+            tile_baseband_frames,
+            tile_budget,
+            late_telemetry,
+        })
+    }
+
+    /// Deadline budget and late-tile telemetry for one stream configuration.
+    fn timing_for(
+        topology: &PipelineTopology,
+        tile_baseband_frames: usize,
+        is_realtime: bool,
+        input_config: Option<InputDspConfig>,
+    ) -> (Option<Duration>, Option<Arc<LateTileTelemetry>>) {
         let budget_rate = match input_config.map(|config| config.resampling) {
             Some(
                 InputResampling::Rational { input_rate, .. }
@@ -137,13 +157,40 @@ impl TileProcessor {
             ))
         });
 
-        Ok(Self {
-            worker_pool,
-            topology,
+        (tile_budget, late_telemetry)
+    }
+
+    /// Re-targets the persistent worker pool to a new stream configuration
+    /// (rate switch, reconnect) without respawning worker threads. Telemetry
+    /// counters start fresh, as they did with a newly built processor.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reconfigure(
+        &mut self,
+        preset: FilterPreset,
+        phase: FilterPhase,
+        apodization: Apodization,
+        topology: PipelineTopology,
+        tile_baseband_frames: usize,
+        target_dsd: Option<TargetDsdConfig>,
+        is_realtime: bool,
+        input_config: Option<InputDspConfig>,
+    ) -> Result<(), EngineError> {
+        self.worker_pool.reconfigure(
+            preset,
+            phase,
+            apodization,
+            topology.cascade_stages,
             tile_baseband_frames,
-            tile_budget,
-            late_telemetry,
-        })
+            target_dsd,
+            input_config,
+        )?;
+        let (tile_budget, late_telemetry) =
+            Self::timing_for(&topology, tile_baseband_frames, is_realtime, input_config);
+        self.topology = topology;
+        self.tile_baseband_frames = tile_baseband_frames;
+        self.tile_budget = tile_budget;
+        self.late_telemetry = late_telemetry;
+        Ok(())
     }
 
     /// Processes one multi-channel tile through the half-band FIR cascade (PCM output).
@@ -271,6 +318,11 @@ impl TileProcessor {
             .as_ref()
             .map(|t| t.total_tiles_processed())
             .unwrap_or(0)
+    }
+
+    /// Worker/dispatch timing histograms; persists across `reconfigure`.
+    pub fn timings(&self) -> Arc<crate::timing::PoolTimings> {
+        self.worker_pool.timings()
     }
 
     /// Returns the shared deadline-miss telemetry, if this processor is real-time.

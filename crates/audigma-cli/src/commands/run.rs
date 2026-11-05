@@ -9,7 +9,8 @@ use audigma_dsp::config::TargetRateSpec;
 use audigma_dsp::rates::PcmRateHz;
 use audigma_engine::StreamExitReason;
 use audigma_engine::live_pipeline::{
-    DaemonControlHandle, DaemonOutputFormat, DaemonState, DaemonVolumeMode, LivePipeline,
+    DaemonControlHandle, DaemonOutputFormat, DaemonState, DaemonVolumeMode, DspSession,
+    LivePipeline,
 };
 use audigma_engine::traits::{AudioInput, AudioOutput, EngineError};
 use audigma_io::alsa::{
@@ -17,7 +18,7 @@ use audigma_io::alsa::{
     resolve_card_index, wait_for_alsa_device,
 };
 #[cfg(feature = "dbus")]
-use audigma_io::dbus::{DeviceReservation, request_realtime_priority};
+use audigma_io::dbus::DeviceReservation;
 #[cfg(feature = "pipewire")]
 use audigma_io::pipewire::{PipeWirePcmOutput, PipeWireVirtualSink};
 use audigma_settings::{InputBackend, OutputBackend, Settings};
@@ -69,6 +70,14 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
     let input_rate = in_cfg.rate_hz.unwrap_or(PcmRateHz::PCM_48000);
     let channels = in_cfg.channels.unwrap_or(2);
 
+    // Resolve placement before any thread is spawned or affinity narrowed, then restrict the
+    // supervisor to the housekeeping set so helper threads inherit it.
+    let placement = crate::runtime::resolve(&settings, usize::from(channels), false)?;
+    crate::runtime::apply_housekeeping(&placement);
+    let worker_setup = crate::runtime::worker_setup(&placement);
+    #[cfg(feature = "pipewire")]
+    let pw_placement = placement.pipewire();
+
     let plan = settings.explain_for_input_rate(input_rate)?;
     let target_spec = plan.stream_spec.target;
 
@@ -83,67 +92,6 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
         preset = ?plan.dsp_config.preset,
         "starting live daemon"
     );
-
-    // D-Bus device reservation if exclusive ALSA output is selected
-    #[cfg(feature = "dbus")]
-    let mut _reservation: Option<DeviceReservation> =
-        if out_cfg.backend == OutputBackend::Alsa && out_cfg.reserve_device.unwrap_or(true) {
-            let card_idx = out_cfg
-                .device
-                .as_deref()
-                .and_then(resolve_card_index)
-                .unwrap_or(0);
-
-            match DeviceReservation::acquire(card_idx, "audigma", 100) {
-                Ok(res) => {
-                    tracing::info!(
-                        target: "audigma::daemon",
-                        event = audigma_log::DEVICE_LOCK,
-                        acquired = true,
-                        card = card_idx,
-                        name = res.well_known_name(),
-                        "device lock acquired via D-Bus org.freedesktop.ReserveDevice1"
-                    );
-                    Some(res)
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        target: "audigma::daemon",
-                        event = audigma_log::DEVICE_LOCK,
-                        acquired = false,
-                        card = card_idx,
-                        error = %e,
-                        "failed to acquire D-Bus reservation"
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-    // Real-time thread priority
-    #[cfg(feature = "dbus")]
-    {
-        match request_realtime_priority(10) {
-            Ok(acq) => tracing::info!(
-                target: "audigma::daemon",
-                event = audigma_log::RT_PRIORITY,
-                acquired = true,
-                priority = 10,
-                method = %acq,
-                "real-time priority acquired"
-            ),
-            Err(e) => tracing::warn!(
-                target: "audigma::daemon",
-                event = audigma_log::RT_PRIORITY,
-                acquired = false,
-                priority = 10,
-                error = %e,
-                "real-time priority request skipped/fallback"
-            ),
-        }
-    }
 
     // Set up Input Backend helper closure
     let out_buf_ms = out_cfg.buffer_ms.unwrap_or(40);
@@ -161,6 +109,7 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
                         input_rate.get(),
                         fallback_preset,
                         128,
+                        Some(pw_placement.clone()),
                     )
                     .map_err(|e| EngineError::AudioBackend {
                         backend: "pipewire",
@@ -240,6 +189,7 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
                     pw_rate,
                     channels as u32,
                     queue_depth,
+                    Some(pw_placement.clone()),
                 )
                 .map_err(|e| EngineError::AudioBackend {
                     backend: "pipewire",
@@ -300,32 +250,6 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
         "control socket bound"
     );
 
-    // Real-time thread priority hook for channel workers
-    #[cfg(feature = "dbus")]
-    let worker_rt_hook: Option<Arc<dyn Fn(usize) + Send + Sync>> =
-        Some(Arc::new(|ch: usize| match request_realtime_priority(10) {
-            Ok(acq) => tracing::info!(
-                target: "audigma::daemon",
-                event = audigma_log::RT_PRIORITY,
-                worker = ch,
-                acquired = true,
-                priority = 10,
-                method = %acq,
-                "worker acquired real-time priority"
-            ),
-            Err(e) => tracing::warn!(
-                target: "audigma::daemon",
-                event = audigma_log::RT_PRIORITY,
-                worker = ch,
-                acquired = false,
-                priority = 10,
-                error = %e,
-                "worker real-time priority request skipped/fallback"
-            ),
-        }));
-    #[cfg(not(feature = "dbus"))]
-    let worker_rt_hook: Option<Arc<dyn Fn(usize) + Send + Sync>> = None;
-
     // Set up and spawn audigma-rt-log drainer thread (§8.4)
     let mut rt_drainer = audigma_log::RtLogDrainer::new();
     if let Some(ref mut input) = input_driver {
@@ -341,392 +265,478 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
     }
     let mut _rt_drainer_handle = rt_drainer.spawn();
 
-    // Prepare and Run Live Pipeline
-    let mut pipeline =
-        LivePipeline::prepare_with_hook(settings.clone(), input_rate, worker_rt_hook.clone())?;
-    let mut current_input_rate = input_rate;
-    let mut current_target_spec = target_spec;
-    let mut generation: u64 = 1;
-
-    let target_device = out_cfg
-        .device
-        .clone()
-        .unwrap_or_else(|| "default".to_string());
-    let custom_mixer_control = out_cfg.mixer_control();
-    let vol_control_mode = out_cfg.volume_control();
-    let device_wait_ms = out_cfg.device_wait_ms();
-    let keep_audio_sink_ms = out_cfg.keep_audio_sink_ms();
-
-    let mut hw_mixer: Option<AlsaHardwareMixer> = if out_cfg.backend == OutputBackend::Alsa {
-        match AlsaHardwareMixer::open(&target_device, custom_mixer_control) {
-            Ok(m) => {
-                tracing::info!(
-                    target: "audigma::alsa",
-                    event = "hardware_mixer_bound",
-                    control = m.element_name(),
-                    "bound to ALSA mixer control"
+    // Daemon loop runs on its own `audigma-loop` thread; this thread stays SCHED_OTHER as supervisor.
+    let (startup_tx, startup_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    let loop_result: Result<(), CliError> = std::thread::scope(|scope| {
+        let handle = std::thread::Builder::new()
+            .name("audigma-loop".to_string())
+            .stack_size(8 * 1024 * 1024)
+            .spawn_scoped(scope, || -> Result<(), CliError> {
+                // Loop placement: housekeeping affinity (or `loop_cpu`) + RT `p`
+                // (RESET_ON_FORK: children start SCHED_OTHER)
+                let loop_fatal = crate::runtime::rt_failure_is_fatal(&placement, &placement.loop_);
+                let loop_rt = crate::runtime::apply_logged(
+                    "audigma-loop",
+                    None,
+                    &placement.loop_,
+                    loop_fatal,
                 );
-                Some(m)
-            }
-            Err(e) => {
-                tracing::info!(
-                    target: "audigma::alsa",
-                    event = audigma_log::HARDWARE_MIXER_UNAVAILABLE,
-                    device = %target_device,
-                    error = %e,
-                    "hardware mixer unavailable"
-                );
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    let active_vol_mode = match vol_control_mode {
-        audigma_settings::VolumeControlMode::HardwareSoftwareFallback => {
-            if hw_mixer.is_some() {
-                DaemonVolumeMode::Hardware
-            } else {
-                DaemonVolumeMode::Software
-            }
-        }
-        audigma_settings::VolumeControlMode::Hardware => {
-            if hw_mixer.is_none() {
-                tracing::warn!(
-                    target: "audigma::daemon",
-                    event = audigma_log::VOLUME_MODE,
-                    "hardware volume requested but no mixer element found; digital gain locked at 0 dBFS"
-                );
-            }
-            DaemonVolumeMode::Hardware
-        }
-        audigma_settings::VolumeControlMode::Software => DaemonVolumeMode::Software,
-        audigma_settings::VolumeControlMode::None => DaemonVolumeMode::None,
-    };
-    control.set_volume_mode(active_vol_mode);
-    tracing::info!(
-        target: "audigma::daemon",
-        event = audigma_log::VOLUME_MODE,
-        active = %active_vol_mode,
-        configured = ?vol_control_mode,
-        "volume mode configured"
-    );
-
-    let mut current_output: Option<Box<dyn AudioOutput>> = None;
-
-    // Resilient daemon loop
-    while control.is_running() {
-        // Step 1: Ensure output device is connected and opened
-        if current_output.is_none() {
-            if out_cfg.backend == OutputBackend::Alsa && !is_alsa_device_present(&target_device) {
-                if device_wait_ms == 0 {
-                    return Err(EngineError::DeviceDisconnected(format!(
-                        "target ALSA device '{target_device}' is not present at startup"
-                    ))
-                    .into());
+                let fatal = loop_fatal && loop_rt.is_err();
+                // Startup handshake: tell the supervisor whether placement succeeded.
+                let _ = startup_tx.send(loop_rt.clone());
+                if fatal {
+                    return Err(CliError::Realtime(loop_rt.unwrap_err()));
                 }
 
-                tracing::info!(
-                    target: "audigma::daemon",
-                    event = audigma_log::DEVICE_WAIT_TICK,
-                    device = %target_device,
-                    elapsed_s = 0,
-                    sink_active = true,
-                    device_wait_ms,
-                    keep_audio_sink_ms,
-                    "waiting for output device"
-                );
-                control.set_state(DaemonState::WaitingForDevice);
-                control.set_disconnect_info(Some(target_device.clone()), Some(0));
+                    // D-Bus device reservation if exclusive ALSA output is selected
+                    #[cfg(feature = "dbus")]
+                    let mut _reservation: Option<DeviceReservation> =
+                        if out_cfg.backend == OutputBackend::Alsa && out_cfg.reserve_device.unwrap_or(true) {
+                            let card_idx = out_cfg
+                                .device
+                                .as_deref()
+                                .and_then(resolve_card_index)
+                                .unwrap_or(0);
 
-                let wait_start = Instant::now();
-                let mut sink_dropped = false;
-                let mut last_log_secs = 0u64;
+                            match DeviceReservation::acquire(card_idx, "audigma", 100) {
+                                Ok(res) => {
+                                    tracing::info!(
+                                        target: "audigma::daemon",
+                                        event = audigma_log::DEVICE_LOCK,
+                                        acquired = true,
+                                        card = card_idx,
+                                        name = res.well_known_name(),
+                                        "device lock acquired via D-Bus org.freedesktop.ReserveDevice1"
+                                    );
+                                    Some(res)
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        target: "audigma::daemon",
+                                        event = audigma_log::DEVICE_LOCK,
+                                        acquired = false,
+                                        card = card_idx,
+                                        error = %e,
+                                        "failed to acquire D-Bus reservation"
+                                    );
+                                    None
+                                }
+                            }
+                        } else {
+                            None
+                        };
 
-                while control.is_running() {
-                    let elapsed_ms = wait_start.elapsed().as_millis() as u64;
-                    let elapsed_secs = elapsed_ms / 1000;
-                    control.set_disconnect_info(Some(target_device.clone()), Some(elapsed_ms));
+                    // Prepare and Run Live Pipeline
+                    let mut pipeline =
+                        LivePipeline::prepare_with_workers(settings.clone(), input_rate, Some(worker_setup.clone()))?;
+                    // Worker pool persists across rate switches and device reconnects.
+                    let mut dsp_session = DspSession::new();
+                    let mut current_input_rate = input_rate;
+                    let mut current_target_spec = target_spec;
+                    let mut generation: u64 = 1;
 
-                    // Periodic waiting heartbeat every 5 seconds
-                    if elapsed_secs >= last_log_secs + 5 {
-                        last_log_secs = elapsed_secs;
-                        tracing::info!(
-                            target: "audigma::daemon",
-                            event = audigma_log::DEVICE_WAIT_TICK,
-                            device = %target_device,
-                            elapsed_s = elapsed_secs,
-                            sink_active = !sink_dropped,
-                            "still waiting for output device"
-                        );
-                    }
+                    let target_device = out_cfg
+                        .device
+                        .clone()
+                        .unwrap_or_else(|| "default".to_string());
+                    let custom_mixer_control = out_cfg.mixer_control();
+                    let vol_control_mode = out_cfg.volume_control();
+                    let device_wait_ms = out_cfg.device_wait_ms();
+                    let keep_audio_sink_ms = out_cfg.keep_audio_sink_ms();
 
-                    // Check device_wait_ms timeout
-                    if device_wait_ms > 0 && elapsed_ms >= device_wait_ms as u64 {
-                        tracing::error!(
-                            target: "audigma::daemon",
-                            event = "device_wait_timeout",
-                            device = %target_device,
-                            elapsed_ms,
-                            timeout_ms = device_wait_ms,
-                            "device_wait_ms timeout reached; exiting"
-                        );
-                        return Err(EngineError::DeviceDisconnected(format!(
-                            "timed out waiting for device '{target_device}' after {device_wait_ms} ms"
-                        )).into());
-                    }
+                    let mut hw_mixer: Option<AlsaHardwareMixer> = if out_cfg.backend == OutputBackend::Alsa {
+                        match AlsaHardwareMixer::open(&target_device, custom_mixer_control) {
+                            Ok(m) => {
+                                tracing::info!(
+                                    target: "audigma::alsa",
+                                    event = "hardware_mixer_bound",
+                                    control = m.element_name(),
+                                    "bound to ALSA mixer control"
+                                );
+                                Some(m)
+                            }
+                            Err(e) => {
+                                tracing::info!(
+                                    target: "audigma::alsa",
+                                    event = audigma_log::HARDWARE_MIXER_UNAVAILABLE,
+                                    device = %target_device,
+                                    error = %e,
+                                    "hardware mixer unavailable"
+                                );
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
 
-                    // Check keep_audio_sink_ms grace period
-                    if !sink_dropped
-                        && keep_audio_sink_ms >= 0
-                        && elapsed_ms >= keep_audio_sink_ms as u64
-                    {
-                        tracing::warn!(
-                            target: "audigma::daemon",
-                            event = "keep_audio_sink_expired",
-                            device = %target_device,
-                            keep_audio_sink_ms,
-                            "keep_audio_sink_ms expired; unregistering virtual sink from PipeWire graph"
-                        );
-                        input_driver = None; // Drop virtual sink to unregister from PipeWire
-                        sink_dropped = true;
-                    }
-
-                    // If virtual sink is still registered, bit-bucket drain incoming frames pacingly
-                    if let Some(ref mut input) = input_driver {
-                        let mut drain_left = [0.0; 256];
-                        let mut drain_right = [0.0; 256];
-                        let _ = input.read_stereo(&mut drain_left, &mut drain_right);
-                    }
-
-                    // Wait for inotify event or slice
-                    if wait_for_alsa_device(&target_device, 200, &control.running).unwrap_or(false)
-                    {
-                        tracing::info!(
-                            target: "audigma::daemon",
-                            event = "hotplug_event_detected",
-                            device = %target_device,
-                            "hotplug event detected: output device is present"
-                        );
-                        break;
-                    }
-                }
-
-                if !control.is_running() {
-                    break;
-                }
-
-                // Re-register input virtual sink if it was dropped
-                if input_driver.is_none() {
+                    let active_vol_mode = match vol_control_mode {
+                        audigma_settings::VolumeControlMode::HardwareSoftwareFallback => {
+                            if hw_mixer.is_some() {
+                                DaemonVolumeMode::Hardware
+                            } else {
+                                DaemonVolumeMode::Software
+                            }
+                        }
+                        audigma_settings::VolumeControlMode::Hardware => {
+                            if hw_mixer.is_none() {
+                                tracing::warn!(
+                                    target: "audigma::daemon",
+                                    event = audigma_log::VOLUME_MODE,
+                                    "hardware volume requested but no mixer element found; digital gain locked at 0 dBFS"
+                                );
+                            }
+                            DaemonVolumeMode::Hardware
+                        }
+                        audigma_settings::VolumeControlMode::Software => DaemonVolumeMode::Software,
+                        audigma_settings::VolumeControlMode::None => DaemonVolumeMode::None,
+                    };
+                    control.set_volume_mode(active_vol_mode);
                     tracing::info!(
                         target: "audigma::daemon",
-                        event = "input_sink_rebind",
-                        "re-registering virtual sink in PipeWire graph"
+                        event = audigma_log::VOLUME_MODE,
+                        active = %active_vol_mode,
+                        configured = ?vol_control_mode,
+                        "volume mode configured"
                     );
-                    input_driver = Some(create_input_driver(in_cfg)?);
-                }
 
-                // Re-acquire D-Bus device reservation if needed
-                #[cfg(feature = "dbus")]
-                if out_cfg.reserve_device.unwrap_or(true) {
-                    let card_idx = resolve_card_index(&target_device).unwrap_or(0);
-                    match DeviceReservation::acquire(card_idx, "audigma", 100) {
-                        Ok(res) => {
-                            tracing::info!(
-                                target: "audigma::daemon",
-                                event = audigma_log::DEVICE_LOCK,
-                                acquired = true,
-                                card = card_idx,
-                                name = res.well_known_name(),
-                                "re-acquired D-Bus device reservation"
-                            );
-                            _reservation = Some(res);
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                target: "audigma::daemon",
-                                event = audigma_log::DEVICE_LOCK,
-                                acquired = false,
-                                card = card_idx,
-                                error = %e,
-                                "failed to re-acquire D-Bus reservation"
-                            );
-                        }
-                    }
-                }
-            }
+                    let mut current_output: Option<Box<dyn AudioOutput>> = None;
+                let mut drain_bufs: Vec<Vec<f64>> = vec![vec![0.0; 256]; channels as usize];
 
-            // Open output device
-            match create_output_driver(out_cfg, &current_target_spec) {
-                Ok(out) => {
-                    tracing::info!(
-                        target: "audigma::alsa",
-                        event = audigma_log::OUTPUT_DEVICE_OPENED,
-                        device = %target_device,
-                        backend = ?out_cfg.backend,
-                        "opened output device; resuming streaming"
-                    );
-                    current_output = Some(out);
-                    control.set_disconnect_info(None, None);
+                    // Resilient daemon loop
+                    while control.is_running() {
+                        // Step 1: Ensure output device is connected and opened
+                        if current_output.is_none() {
+                            if out_cfg.backend == OutputBackend::Alsa && !is_alsa_device_present(&target_device) {
+                                if device_wait_ms == 0 {
+                                    return Err(EngineError::DeviceDisconnected(format!(
+                                        "target ALSA device '{target_device}' is not present at startup"
+                                    ))
+                                    .into());
+                                }
 
-                    // Re-bind ALSA hardware mixer if applicable
-                    if out_cfg.backend == OutputBackend::Alsa {
-                        hw_mixer =
-                            match AlsaHardwareMixer::open(&target_device, custom_mixer_control) {
-                                Ok(mut m) => {
+                                tracing::info!(
+                                    target: "audigma::daemon",
+                                    event = audigma_log::DEVICE_WAIT_TICK,
+                                    device = %target_device,
+                                    elapsed_s = 0,
+                                    sink_active = true,
+                                    device_wait_ms,
+                                    keep_audio_sink_ms,
+                                    "waiting for output device"
+                                );
+                                control.set_state(DaemonState::WaitingForDevice);
+                                control.set_disconnect_info(Some(target_device.clone()), Some(0));
+
+                                let wait_start = Instant::now();
+                                let mut sink_dropped = false;
+                                let mut last_log_secs = 0u64;
+
+                                while control.is_running() {
+                                    let elapsed_ms = wait_start.elapsed().as_millis() as u64;
+                                    let elapsed_secs = elapsed_ms / 1000;
+                                    control.set_disconnect_info(Some(target_device.clone()), Some(elapsed_ms));
+
+                                    // Periodic waiting heartbeat every 5 seconds
+                                    if elapsed_secs >= last_log_secs + 5 {
+                                        last_log_secs = elapsed_secs;
+                                        tracing::info!(
+                                            target: "audigma::daemon",
+                                            event = audigma_log::DEVICE_WAIT_TICK,
+                                            device = %target_device,
+                                            elapsed_s = elapsed_secs,
+                                            sink_active = !sink_dropped,
+                                            "still waiting for output device"
+                                        );
+                                    }
+
+                                    // Check device_wait_ms timeout
+                                    if device_wait_ms > 0 && elapsed_ms >= device_wait_ms as u64 {
+                                        tracing::error!(
+                                            target: "audigma::daemon",
+                                            event = "device_wait_timeout",
+                                            device = %target_device,
+                                            elapsed_ms,
+                                            timeout_ms = device_wait_ms,
+                                            "device_wait_ms timeout reached; exiting"
+                                        );
+                                        return Err(EngineError::DeviceDisconnected(format!(
+                                            "timed out waiting for device '{target_device}' after {device_wait_ms} ms"
+                                        )).into());
+                                    }
+
+                                    // Check keep_audio_sink_ms grace period
+                                    if !sink_dropped
+                                        && keep_audio_sink_ms >= 0
+                                        && elapsed_ms >= keep_audio_sink_ms as u64
+                                    {
+                                        tracing::warn!(
+                                            target: "audigma::daemon",
+                                            event = "keep_audio_sink_expired",
+                                            device = %target_device,
+                                            keep_audio_sink_ms,
+                                            "keep_audio_sink_ms expired; unregistering virtual sink from PipeWire graph"
+                                        );
+                                        input_driver = None; // Drop virtual sink to unregister from PipeWire
+                                        sink_dropped = true;
+                                    }
+
+                                    // If virtual sink is still registered, bit-bucket drain incoming frames pacingly
+                                    if let Some(ref mut input) = input_driver {
+                                        for buf in drain_bufs.iter_mut() {
+                                buf.fill(0.0);
+                            }
+                            let mut refs: Vec<&mut [f64]> =
+                                drain_bufs.iter_mut().map(|b| b.as_mut_slice()).collect();
+                            let _ = input.read_channels(&mut refs);
+                                    }
+
+                                    // Wait for inotify event or slice
+                                    if wait_for_alsa_device(&target_device, 200, &control.running).unwrap_or(false)
+                                    {
+                                        tracing::info!(
+                                            target: "audigma::daemon",
+                                            event = "hotplug_event_detected",
+                                            device = %target_device,
+                                            "hotplug event detected: output device is present"
+                                        );
+                                        break;
+                                    }
+                                }
+
+                                if !control.is_running() {
+                                    break;
+                                }
+
+                                // Re-register input virtual sink if it was dropped
+                                if input_driver.is_none() {
+                                    tracing::info!(
+                                        target: "audigma::daemon",
+                                        event = "input_sink_rebind",
+                                        "re-registering virtual sink in PipeWire graph"
+                                    );
+                                    input_driver = Some(create_input_driver(in_cfg)?);
+                                }
+
+                                // Re-acquire D-Bus device reservation if needed
+                                #[cfg(feature = "dbus")]
+                                if out_cfg.reserve_device.unwrap_or(true) {
+                                    let card_idx = resolve_card_index(&target_device).unwrap_or(0);
+                                    match DeviceReservation::acquire(card_idx, "audigma", 100) {
+                                        Ok(res) => {
+                                            tracing::info!(
+                                                target: "audigma::daemon",
+                                                event = audigma_log::DEVICE_LOCK,
+                                                acquired = true,
+                                                card = card_idx,
+                                                name = res.well_known_name(),
+                                                "re-acquired D-Bus device reservation"
+                                            );
+                                            _reservation = Some(res);
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                target: "audigma::daemon",
+                                                event = audigma_log::DEVICE_LOCK,
+                                                acquired = false,
+                                                card = card_idx,
+                                                error = %e,
+                                                "failed to re-acquire D-Bus reservation"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Open output device
+                            match create_output_driver(out_cfg, &current_target_spec) {
+                                Ok(out) => {
                                     tracing::info!(
                                         target: "audigma::alsa",
-                                        event = "hardware_mixer_rebound",
-                                        control = m.element_name(),
-                                        "re-bound ALSA hardware mixer"
+                                        event = audigma_log::OUTPUT_DEVICE_OPENED,
+                                        device = %target_device,
+                                        backend = ?out_cfg.backend,
+                                        "opened output device; resuming streaming"
                                     );
-                                    let cur_vol = control.get_volume();
-                                    let is_muted = control.is_muted();
-                                    let _ = m.set_volume_db(cur_vol);
-                                    let _ = m.set_mute(is_muted);
-                                    Some(m)
+                                    current_output = Some(out);
+                                    control.set_disconnect_info(None, None);
+
+                                    // Re-bind ALSA hardware mixer if applicable
+                                    if out_cfg.backend == OutputBackend::Alsa {
+                                        hw_mixer =
+                                            match AlsaHardwareMixer::open(&target_device, custom_mixer_control) {
+                                                Ok(mut m) => {
+                                                    tracing::info!(
+                                                        target: "audigma::alsa",
+                                                        event = "hardware_mixer_rebound",
+                                                        control = m.element_name(),
+                                                        "re-bound ALSA hardware mixer"
+                                                    );
+                                                    let cur_vol = control.get_volume();
+                                                    let is_muted = control.is_muted();
+                                                    let _ = m.set_volume_db(cur_vol);
+                                                    let _ = m.set_mute(is_muted);
+                                                    Some(m)
+                                                }
+                                                Err(_) => None,
+                                            };
+                                    }
                                 }
-                                Err(_) => None,
-                            };
+                                Err(e) => {
+                                    tracing::warn!(
+                                        target: "audigma::alsa",
+                                        event = "output_open_retry",
+                                        device = %target_device,
+                                        error = %e,
+                                        "failed to open output device; retrying in 500ms"
+                                    );
+                                    std::thread::sleep(Duration::from_millis(500));
+                                    continue;
+                                }
+                            }
+                        }
+
+                        // Ensure input driver is active
+                        if input_driver.is_none() {
+                            input_driver = Some(create_input_driver(in_cfg)?);
+                        }
+
+                        let input = input_driver.as_mut().unwrap();
+                        let output = current_output.as_mut().unwrap();
+
+                        // Run streaming loop
+                        match pipeline.run_streaming_with_session(
+                            &mut dsp_session,
+                            &mut **input,
+                            &mut **output,
+                            control.clone(),
+                            hw_mixer
+                                .as_mut()
+                                .map(|m| m as &mut dyn audigma_engine::HardwareVolumeBridge),
+                        ) {
+                            Ok(StreamExitReason::Stopped) => break,
+                            Ok(StreamExitReason::RateChanged {
+                                new_rate,
+                                channels: _,
+                            }) => {
+                                let new_plan = settings.explain_for_input_rate(new_rate)?;
+                                let new_target_spec = new_plan.stream_spec.target;
+
+                                let need_reopen_output = match (current_target_spec, new_target_spec) {
+                                    (
+                                        TargetRateSpec::Dsd { bit_rate: old_br },
+                                        TargetRateSpec::Dsd { bit_rate: new_br },
+                                    ) => old_br != new_br,
+                                    (
+                                        TargetRateSpec::Pcm { rate: old_r, .. },
+                                        TargetRateSpec::Pcm { rate: new_r, .. },
+                                    ) => old_r != new_r,
+                                    _ => true,
+                                };
+
+                                let (output_format, output_rate_hz) = match new_target_spec {
+                                    TargetRateSpec::Dsd { bit_rate } => (DaemonOutputFormat::Dsd, bit_rate.get()),
+                                    TargetRateSpec::Pcm { rate, .. } => (DaemonOutputFormat::Pcm, rate.get()),
+                                };
+
+                                tracing::info!(
+                                    target: "audigma::clock",
+                                    event = audigma_log::RATE_SWITCH,
+                                    from_hz = current_input_rate.get(),
+                                    to_hz = new_rate.get(),
+                                    generation = generation + 1,
+                                    reopened_output = need_reopen_output,
+                                    target_format = ?output_format,
+                                    "dynamic sample rate switch detected"
+                                );
+                                current_input_rate = new_rate;
+
+                                if need_reopen_output {
+                                    tracing::info!(
+                                        target: "audigma::output",
+                                        event = audigma_log::OUTPUT_REOPENED,
+                                        device = %target_device,
+                                        reason = "rate_switch",
+                                        "re-opening output stream for new target rate"
+                                    );
+                                    current_output = None;
+                                }
+
+                                // Re-prepare the LivePipeline for the new input rate
+                                pipeline = LivePipeline::prepare_with_workers(
+                                    settings.clone(),
+                                    new_rate,
+                                    Some(worker_setup.clone()),
+                                )?;
+                                current_target_spec = new_target_spec;
+
+                                // Bump generation and update active rate on virtual sink
+                                generation += 1;
+                                control.generation.store(generation, Ordering::SeqCst);
+                                control.inc_rate_switch();
+                                input.set_generation(generation);
+                                input.set_active_rate(new_rate);
+                                input.set_preroll_secs(target_preroll_secs);
+
+                                // Update telemetry
+                                control.set_stream_config(new_rate.get(), output_format, output_rate_hz);
+
+                                continue;
+                            }
+                            Err(EngineError::DeviceDisconnected(reason)) => {
+                                tracing::warn!(
+                                    target: "audigma::alsa",
+                                    event = audigma_log::OUTPUT_DEVICE_DISCONNECTED,
+                                    device = %target_device,
+                                    error = %reason,
+                                    "output device disconnected"
+                                );
+                                current_output = None; // Force output driver teardown
+                                hw_mixer = None;
+                                #[cfg(feature = "dbus")]
+                                {
+                                    tracing::info!(
+                                        target: "audigma::daemon",
+                                        event = audigma_log::DEVICE_LOCK,
+                                        acquired = false,
+                                        "releasing D-Bus reservation for disconnected device"
+                                    );
+                                    _reservation = None; // Release D-Bus reservation while device is gone
+                                }
+                                control.set_state(DaemonState::WaitingForDevice);
+                                control.set_disconnect_info(Some(target_device.clone()), Some(0));
+                            }
+
+                            Err(e) => {
+                                tracing::error!(
+                                    target: "audigma::live",
+                                    event = audigma_log::STREAMING_ERROR,
+                                    error = %e,
+                                    error_kind = "runtime",
+                                    "runtime streaming error"
+                                );
+                                return Err(e.into());
+                            }
+                        }
                     }
+
+                Ok(())
+            })?;
+        if let Ok(startup) = startup_rx.recv() {
+            match startup {
+                Ok(()) => {
+                    tracing::debug!(target: "audigma::daemon", "audigma-loop placement ready")
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        target: "audigma::alsa",
-                        event = "output_open_retry",
-                        device = %target_device,
-                        error = %e,
-                        "failed to open output device; retrying in 500ms"
-                    );
-                    std::thread::sleep(Duration::from_millis(500));
-                    continue;
+                    tracing::debug!(target: "audigma::daemon", error = %e, "audigma-loop placement failed")
                 }
             }
         }
-
-        // Ensure input driver is active
-        if input_driver.is_none() {
-            input_driver = Some(create_input_driver(in_cfg)?);
+        match handle.join() {
+            Ok(res) => res,
+            Err(panic) => std::panic::resume_unwind(panic),
         }
-
-        let input = input_driver.as_mut().unwrap();
-        let output = current_output.as_mut().unwrap();
-
-        // Run streaming loop
-        match pipeline.run_streaming_with_bridge(
-            &mut **input,
-            &mut **output,
-            control.clone(),
-            hw_mixer
-                .as_mut()
-                .map(|m| m as &mut dyn audigma_engine::HardwareVolumeBridge),
-        ) {
-            Ok(StreamExitReason::Stopped) => break,
-            Ok(StreamExitReason::RateChanged {
-                new_rate,
-                channels: _,
-            }) => {
-                let new_plan = settings.explain_for_input_rate(new_rate)?;
-                let new_target_spec = new_plan.stream_spec.target;
-
-                let need_reopen_output = match (current_target_spec, new_target_spec) {
-                    (
-                        TargetRateSpec::Dsd { bit_rate: old_br },
-                        TargetRateSpec::Dsd { bit_rate: new_br },
-                    ) => old_br != new_br,
-                    (
-                        TargetRateSpec::Pcm { rate: old_r, .. },
-                        TargetRateSpec::Pcm { rate: new_r, .. },
-                    ) => old_r != new_r,
-                    _ => true,
-                };
-
-                let (output_format, output_rate_hz) = match new_target_spec {
-                    TargetRateSpec::Dsd { bit_rate } => (DaemonOutputFormat::Dsd, bit_rate.get()),
-                    TargetRateSpec::Pcm { rate, .. } => (DaemonOutputFormat::Pcm, rate.get()),
-                };
-
-                tracing::info!(
-                    target: "audigma::clock",
-                    event = audigma_log::RATE_SWITCH,
-                    from_hz = current_input_rate.get(),
-                    to_hz = new_rate.get(),
-                    generation = generation + 1,
-                    reopened_output = need_reopen_output,
-                    target_format = ?output_format,
-                    "dynamic sample rate switch detected"
-                );
-                current_input_rate = new_rate;
-
-                if need_reopen_output {
-                    tracing::info!(
-                        target: "audigma::output",
-                        event = audigma_log::OUTPUT_REOPENED,
-                        device = %target_device,
-                        reason = "rate_switch",
-                        "re-opening output stream for new target rate"
-                    );
-                    current_output = None;
-                }
-
-                // Re-prepare the LivePipeline for the new input rate
-                pipeline = LivePipeline::prepare_with_hook(
-                    settings.clone(),
-                    new_rate,
-                    worker_rt_hook.clone(),
-                )?;
-                current_target_spec = new_target_spec;
-
-                // Bump generation and update active rate on virtual sink
-                generation += 1;
-                control.generation.store(generation, Ordering::SeqCst);
-                control.inc_rate_switch();
-                input.set_generation(generation);
-                input.set_active_rate(new_rate);
-                input.set_preroll_secs(target_preroll_secs);
-
-                // Update telemetry
-                control.set_stream_config(new_rate.get(), output_format, output_rate_hz);
-
-                continue;
-            }
-            Err(EngineError::DeviceDisconnected(reason)) => {
-                tracing::warn!(
-                    target: "audigma::alsa",
-                    event = audigma_log::OUTPUT_DEVICE_DISCONNECTED,
-                    device = %target_device,
-                    error = %reason,
-                    "output device disconnected"
-                );
-                current_output = None; // Force output driver teardown
-                hw_mixer = None;
-                #[cfg(feature = "dbus")]
-                {
-                    tracing::info!(
-                        target: "audigma::daemon",
-                        event = audigma_log::DEVICE_LOCK,
-                        acquired = false,
-                        "releasing D-Bus reservation for disconnected device"
-                    );
-                    _reservation = None; // Release D-Bus reservation while device is gone
-                }
-                control.set_state(DaemonState::WaitingForDevice);
-                control.set_disconnect_info(Some(target_device.clone()), Some(0));
-            }
-
-            Err(e) => {
-                tracing::error!(
-                    target: "audigma::live",
-                    event = audigma_log::STREAMING_ERROR,
-                    error = %e,
-                    error_kind = "runtime",
-                    "runtime streaming error"
-                );
-                return Err(e.into());
-            }
-        }
-    }
+    });
 
     // Unregister signal handler
     DAEMON_RUNNING_PTR.store(std::ptr::null_mut(), Ordering::SeqCst);
@@ -734,6 +744,8 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
         libc::signal(libc::SIGINT, libc::SIG_DFL);
         libc::signal(libc::SIGTERM, libc::SIG_DFL);
     }
+
+    loop_result?;
 
     tracing::info!(
         target: "audigma::daemon",

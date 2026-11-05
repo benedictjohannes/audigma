@@ -4,6 +4,7 @@
 //! non-real-time thread (`audigma-late`) polls that telemetry, maintains the episode
 //! state machine, and emits structured records through `tracing`.
 
+use crate::timing::{MaxSlot, PoolTimings, TimingReport, TimingTracker};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::JoinHandle;
@@ -330,6 +331,8 @@ pub enum LateRecord {
         fill_max_ms: f64,
         partial_tiles: u64,
         counters_delta: LateCounters,
+        /// Worker/dispatch timing over this slice, when the pool exposes histograms.
+        timing: Option<TimingReport>,
     },
     End {
         episode_id: u64,
@@ -382,7 +385,9 @@ impl LateRecord {
                 fill_max_ms,
                 partial_tiles,
                 counters_delta,
+                timing,
             } => {
+                let timing = timing.as_ref();
                 tracing::warn!(
                     target: audigma_log::LATE_TARGET,
                     event = audigma_log::LATE_SLICE,
@@ -402,6 +407,15 @@ impl LateRecord {
                     empty_polls_delta = counters_delta.empty_polls,
                     dropped_chunks_delta = counters_delta.dropped_chunks,
                     processed_chunks_delta = counters_delta.processed_chunks,
+                    worker_exec_mean_us = timing.map(|t| t.worker.mean_us),
+                    worker_exec_p50_us = timing.map(|t| t.worker.p50_us),
+                    worker_exec_p99_us = timing.map(|t| t.worker.p99_us),
+                    worker_exec_max_us = timing.map(|t| t.worker.max_us),
+                    worker_p99_us = timing.map(|t| t.per_worker_list(|s| s.p99_us)),
+                    worker_max_us = timing.map(|t| t.per_worker_list(|s| s.max_us)),
+                    dispatch_p50_us = timing.map(|t| t.dispatch.p50_us),
+                    dispatch_p99_us = timing.map(|t| t.dispatch.p99_us),
+                    dispatch_max_us = timing.map(|t| t.dispatch.max_us),
                     "dsp deadline miss interval slice"
                 );
             }
@@ -505,6 +519,7 @@ pub struct LateEpisodeAggregator {
     last_counters: LateCounters,
     next_boundary_ns: u64,
     episode: Option<Episode>,
+    timing: Option<TimingTracker>,
 }
 
 impl LateEpisodeAggregator {
@@ -523,7 +538,14 @@ impl LateEpisodeAggregator {
             last_counters,
             next_boundary_ns: 0,
             episode: None,
+            timing: None,
         }
+    }
+
+    /// Adds worker/dispatch timing to `late_slice` records.
+    pub fn with_timings(mut self, timings: Arc<PoolTimings>) -> Self {
+        self.timing = Some(TimingTracker::new(timings, MaxSlot::Late));
+        self
     }
 
     /// Advances the state machine to `mono_now_ns` and returns records to emit.
@@ -571,12 +593,14 @@ impl LateEpisodeAggregator {
             self.last_counters = counters;
 
             episode.totals.add_interval(&episode.pending);
+            let timing = self.timing.as_mut().map(TimingTracker::window);
             records.push(Self::make_slice(
                 self.telemetry.as_ref(),
                 episode,
                 mono_now_ns,
                 wall_now,
                 delta,
+                timing,
             ));
 
             episode.pending = IntervalSnapshot::default();
@@ -677,6 +701,9 @@ impl LateEpisodeAggregator {
         self.last_counters = (self.counters)();
         self.last_seen_late_total = total_late;
         self.episode = Some(episode);
+        if let Some(tracker) = self.timing.as_mut() {
+            tracker.mark();
+        }
     }
 
     fn make_slice(
@@ -685,6 +712,7 @@ impl LateEpisodeAggregator {
         mono_now_ns: u64,
         wall_now: SystemTime,
         delta: LateCounters,
+        timing: Option<TimingReport>,
     ) -> LateRecord {
         let end_mono = episode.pending.last_late_mono_ns.max(episode.start_mono_ns);
         LateRecord::Slice {
@@ -699,6 +727,7 @@ impl LateEpisodeAggregator {
             fill_max_ms: episode.interval_fill_max.unwrap_or(0.0),
             partial_tiles: episode.pending.partial,
             counters_delta: delta,
+            timing,
         }
     }
 
@@ -765,6 +794,7 @@ impl LateTileMonitor {
         telemetry: Arc<LateTileTelemetry>,
         counters: LateCounterSource,
         interval: Duration,
+        timings: Option<Arc<PoolTimings>>,
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = Arc::clone(&stop);
@@ -773,6 +803,9 @@ impl LateTileMonitor {
             .spawn(move || {
                 let mut aggregator =
                     LateEpisodeAggregator::new(Arc::clone(&telemetry), counters, interval);
+                if let Some(timings) = timings {
+                    aggregator = aggregator.with_timings(timings);
+                }
                 loop {
                     let mono_now = telemetry.mono_ns();
                     let wall_now = SystemTime::now();

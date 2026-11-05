@@ -85,12 +85,12 @@ examples/                 # Ready-to-use TOML configs, MPD snippets, and WirePlu
 ### Layer Responsibilities
 - **`audigma-dsp`**: Pure numerical processing (`no_std`-friendly core logic, zero OS/file/network I/O). Implements domain rate/format types (`PcmRateHz`, `DsdBitRateHz`, `TransportFrameRateHz`), `DspConfiguration`, built-in verified filter and modulator coefficient tables (`presets.rs`: `PRESET_BALANCED`, `PRESET_REFERENCE`, `PRESET_LOW_LATENCY`), polyphase & half-band FIR interpolation, state-space / CRFB delta-sigma modulators, TPDF dither, overload guards, and thread-level hardware subnormal flushing (FTZ/DAZ). Portable across any operating system.
 - **`audigma-format`**: Audio container decoding/encoding (`WAV`, `FLAC`, Sony `DSF`) and hardware frame bit-packers (`DSD_U32_BE`, `DoP` across `s32le`/`s24le`/`s24_3le`). Zero OS dependencies.
-- **`audigma-settings`**: The `Schema v1` TOML configuration structs (`Settings`), `config check` validation, and `config explain` resolution (mapping user settings and preset names like `"reference"` into concrete `audigma-dsp::DspConfiguration` and transport parameters). Zero OS dependencies.
-- **`audigma-engine`**: Pure Rust orchestration connecting `dsp`, `format`, and `settings` into prepared pipelines (`prepare`, `process`, `drain`), lock-free real-time SPSC queues (`rtrb`), generation tags, the PI-controlled ASRC drift loop, lifecycle state machine, and abstract `AudioInput`/`AudioOutput` backend traits. Zero C-FFI or OS audio library dependencies, allowing instant unit testing with mock clocks/streams on any host.
-- **`audigma-io`**: Feature-gated concrete implementations of the `audigma-engine` I/O traits (`alsa`, `pipewire`, `file`, `stdio`, plus future platform backends like `coreaudio` or `asio`). Houses ALSA hardware capability probing, PipeWire virtual sink (`audigma_sink`) registration, and dynamic D-Bus device reservation (`org.freedesktop.ReserveDevice1`).
+- **`audigma-settings`**: The `Schema v1` TOML configuration structs (`Settings`, including the `[runtime]` section and its cross-field validation), `config check` validation, and `config explain` resolution (mapping user settings and preset names like `"reference"` into concrete `audigma-dsp::DspConfiguration` and transport parameters). Zero OS dependencies.
+- **`audigma-engine`**: Pure Rust orchestration connecting `dsp`, `format`, and `settings` into prepared pipelines (`prepare`, `process`, `drain`), lock-free real-time SPSC queues (`rtrb`), generation tags, the PI-controlled ASRC drift loop, lifecycle state machine, abstract `AudioInput`/`AudioOutput` backend traits, the persistent channel worker pool with its timing histograms (`worker.rs`, `timing.rs`), and the pure CPU placement types and resolver (`cpu.rs`: `ThreadPlacement`, `CpuTopology`, `Placement`, `resolve`). The engine makes no scheduling syscalls. Zero C-FFI or OS audio library dependencies, allowing instant unit testing with mock clocks/streams on any host.
+- **`audigma-io`**: Feature-gated concrete implementations of the `audigma-engine` I/O traits (`alsa`, `pipewire`, `file`, `stdio`, plus future platform backends like `coreaudio` or `asio`). Houses ALSA hardware capability probing, PipeWire virtual sink (`audigma_sink`) registration, and dynamic D-Bus device reservation (`org.freedesktop.ReserveDevice1`). Also houses the Linux scheduling side of runtime placement: the sysfs CPU topology reader (`cpu_topology.rs`) and `apply(&ThreadPlacement)` (`sched.rs`: `sched_setaffinity` plus `sched_setattr` with `SCHED_FLAG_RESET_ON_FORK`, falling back to RTKit with a finite `RLIMIT_RTTIME`). On non-Linux platforms topology discovery reports nothing and `apply` is a no-op, so threads stay unpinned at normal priority.
 - **`audigma-configurator`**: Isolates UI/terminal (`ratatui`/`crossterm`) and optional localhost one-shot Web wizard dependencies so they never bloat the core DSP or engine crates. Calls into `audigma-settings`, `audigma-engine`, and `audigma-io` to probe DACs, benchmark presets, and write `config.toml`.
 - **`audigma-doctor`**: Isolates host OS-level diagnostic and repair logic behind a platform abstraction trait (`DiagnosticProvider`). On Linux, inspects PipeWire graph clock configuration (`clock.allowed-rates`), probes ALSA device locks (`/dev/snd/pcm*`), handles interactive `--fix` (calling `wpctl set-profile <id> 0`, terminating conflicting processes with optional `sudo` escalation, or generating persistent WirePlumber drop-ins). Keeps OS-specific plumbing completely segregated from the cross-platform core and configurator.
-- **`audigma-cli`**: The `audigma` executable entry point, CLI subcommand router (`clap`), Unix-domain control socket server/client (`$XDG_RUNTIME_DIR/audigma/`), and foreground service runner.
+- **`audigma-cli`**: The `audigma` executable entry point, CLI subcommand router (`clap`), Unix-domain control socket server/client (`$XDG_RUNTIME_DIR/audigma/`), and foreground service runner. Wires runtime placement (`runtime.rs`): reads the topology, resolves `[runtime]`, and applies the result to the supervisor, `audigma-loop`, DSP workers and `pw-in`/`pw-out`.
 
 ---
 
@@ -161,15 +161,20 @@ decode / unpack / DSD decimation
     - `8` $\to$ `[ "FL", "FR", "FC", "LFE", "RL", "RR", "SL", "SR" ]` (7.1 surround)
   - Both PipeWire adapter node properties (`audio.channels`, `audio.position`) and SPA `AudioInfoRaw` channel arrays are constructed dynamically from the resolved `channel_positions`.
 
-- **Persistent Real-Time Channel Worker Pool (1 Thread Per Channel):**
-  - Spawns $N$ dedicated worker threads (one per channel) upon pipeline preparation, persisting across the stream lifecycle.
-  - Workers acquire real-time priority (`SCHED_FIFO` via RTKit / `RLIMIT_RTPRIO`) and pin their thread contexts to minimize scheduling jitter.
-  - Master and worker threads synchronize via a lock-free, cache-line aligned atomic barrier / futex (~20 ns).
-  - **Zero Copies & Zero Heap Allocation:** Workers process non-overlapping slices of preallocated shared-memory block buffers with zero heap allocations and zero lock contention during real-time processing.
-  - **Cache Locality:** Filter delay lines and modulator integrator states remain strictly thread-local (preventing CPU cache bouncing), while filter coefficient tables are read concurrently from shared static memory.
-  - **Unified Offline & Live Acceleration:** The same worker pool architecture powers both live playback and offline conversion (`audigma convert` & `benchmark`), delivering $\sim 1.8\times$ throughput speedup on stereo and scaling linearly across multi-channel audio.
+- **Persistent Real-Time Channel Worker Pool (`[runtime] dsp_threads`):**
+  - The pool is created once per daemon (on the first stream, inside the `audigma-loop` thread) and survives rate switches, format changes and device reconnects. A rate or preset change builds fresh per-channel state (cascade, modulator, input processor, buffers) off the hot path and hands it to the running workers (`reconfigure`); thread count, placement and RT requests are unchanged. The channel count is fixed for the daemon's life.
+  - **Worker count is decoupled from channel count.** Channel `c` runs on worker `c % workers`; a worker processes its channels sequentially. `dsp_threads = "auto"` (default) uses `min(channels, max(1, usable physical cores - 1))`, i.e. one worker per channel for stereo on 4+ cores. An integer fixes the count (capped at the channel count). `"inline"` creates no worker threads: all channels run sequentially on the `audigma-loop` thread through the same per-channel code (bit-identical output, no futex hand-off). `auto` never chooses inline or a single worker because PCM load is unmeasured. A single worker or inline needs roughly twice the time of a stereo pair of workers, so it suits small CPUs and light targets only (on the reference machine, up to about DSD256).
+  - **Thread structure and priorities.** The supervisor (main) thread owns startup, IPC and shutdown. `audigma-loop` runs the feed loop; `audigma-dsp-N` are the workers; `audigma-pw-in`/`audigma-pw-out` are the PipeWire threads. With `realtime_priority = p` (default 20, range 3-99): loop `p`, `pw-in`/`pw-out` `p-1`, workers `p-2`; every other thread (IPC, rt-log, late, health, D-Bus) stays `SCHED_OTHER`. RT is `SCHED_FIFO` with `SCHED_RESET_ON_FORK`; when only RTKit can grant it, the same ladder lands as `SCHED_RR`. PipeWire's own data loop is not ours (rtkit assigns it).
+  - **Affinity.** DSP workers get one exclusive core each, chosen by `core_selection` (`performance` fast cores first, `efficient` slow first, `os` no automatic pinning) and `smt_siblings` (`avoid` uses SMT siblings only after all physical cores; `never` fails at startup instead). Cores are ranked by the first metric every allowed core exposes (`highest_perf`, `cpuinfo_max_freq`, `cpu_capacity`) and clustered into performance classes; if no metric exists the workers are left unpinned. Everything else (loop, `pw-*`, IPC, logs, health) runs in the *housekeeping set*: the allowed CPUs minus the DSP cores and their SMT siblings. `loop_cpu` and `dsp_cpus` override the automatic choice. Affinity is inherited by threads a thread spawns, so the supervisor narrows itself first and threads needing a specific placement apply it on entry.
+  - **Spin rule.** A worker busy-spins (up to 2048 iterations) before sleeping on a futex only when it owns its physical core and no other audigma thread shares an SMT sibling. Otherwise it sleeps immediately. The dispatcher spins at the barrier only if every worker may.
+  - **Startup handshake.** Workers report their placement result to the pool constructor and the loop reports to the supervisor. With `realtime = "required"` any failure at startup aborts; with `"auto"` it logs an `rt_priority` event and continues at normal priority; `"off"` never requests RT. After startup, `pw-in`/`pw-out` re-request RT when re-created on reconnect; a failure there is never fatal (warn, `rt_priority` event, continue).
+  - Synchronization between loop and workers is a lock-free, cache-line aligned generation barrier with futex fallback. Workers process non-overlapping slices of preallocated shared buffers; hot buffers are pre-touched in `prepare` so first-touch page faults do not land in the hot loop (`mlockall` is deliberately not used: under a finite `RLIMIT_MEMLOCK` it would break arena creation).
+  - **Zero Copies & Zero Heap Allocation:** no heap allocation or lock contention in steady state.
+  - **Cache Locality:** Filter delay lines and modulator integrator states remain strictly thread-local to the worker that owns the channel, while filter coefficient tables are read concurrently from shared static memory.
+  - **Offline commands** (`convert`, `play`, `benchmark`) use the same pool and the same `dsp_threads`, `core_selection`, `smt_siblings` and `dsp_cpus` settings, resolved for two channels (offline is stereo). They never request RT, regardless of `realtime`.
+  - **Telemetry.** Each worker times its own execution (excluding wake-up and barrier wait) into a fixed-bucket histogram (one relaxed atomic increment per tile); the loop times the whole dispatch (wake-up plus barrier) separately. `audigma-health` only reads these, and reports mean, p50, p99 and max per 10 s window plus cumulative p99.9 in `loop_health` and `late_slice` (`worker_exec_*`, `worker_p99_us` per worker, `dispatch_*`). In inline mode there is a single timing entry. `loop_stall` records carry a `cause` (`input_empty`, `dsp_slow`, `emit_slow`, `read_slow`, `prep_slow`, `unknown`).
 
-- **Zero Allocation & Generation Tags in Real-Time:** `prepare(spec, config)` resolves all filter stages, coefficients, channel worker threads, and preallocated `rtrb` SPSC ring buffers off the audio thread. `process(input, output)` never allocates on the heap, locks mutexes, or performs I/O. SPSC queue chunks carry a monotonic **generation tag** (`u64`) incremented on every pipeline/format reconfiguration so stale-format blocks in flight are immediately discarded and can never reach a newly configured audio endpoint.
+- **Zero Allocation & Generation Tags in Real-Time:** `prepare(spec, config)` resolves all filter stages, coefficients, the worker pool, and preallocated `rtrb` SPSC ring buffers off the audio thread. `process(input, output)` never allocates on the heap, locks mutexes, or performs I/O. SPSC queue chunks carry a monotonic **generation tag** (`u64`) incremented on every pipeline/format reconfiguration so stale-format blocks in flight are immediately discarded and can never reach a newly configured audio endpoint.
 - **Bounded Tile Streaming:** Upsampling to `DSD256` ($256\times$) and `DSD512` ($512\times$) expands baseband frames into large intermediate buffers. DSD-configured channel workers split each externally scheduled tile into internal subtiles targeting at most 16,384 expanded samples (32 baseband frames at $512\times$, 64 at $256\times$). Each subtile passes through the full FIR cascade and is immediately modulated, without additional worker synchronization or a change to the outer audio deadline. Ping-pong scratch buffers hold only the largest intermediates of one subtile. The full interpolated PCM output remains available through `channel_pcm()` for compatibility; this is subtile streaming, not a fused FIR/modulator kernel or a guarantee of L1 residency. PCM-only workers retain their existing tile sizes.
 
 ---
@@ -282,6 +287,26 @@ dsd_rate = "dsd256"
 [resampler]
 preset = "reference"
 ```
+
+### 6.1.1 `[runtime]` Threading, Placement & Real-Time Scheduling
+Optional; every key has a default and the section may be omitted. It applies to live and offline commands (offline never requests RT).
+
+```toml
+[runtime]
+dsp_threads = "auto"             # "auto" | "inline" | integer >= 1
+realtime = "auto"                # "auto" | "required" | "off"
+realtime_priority = 20           # 3-99; loop gets this, pw-* get -1, DSP workers -2
+core_selection = "performance"   # "performance" | "efficient" | "os"
+smt_siblings = "avoid"           # "avoid" | "never"
+# loop_cpu = 4                   # pin audigma-loop (default: housekeeping set)
+# dsp_cpus = [0, 2]              # explicit pins, one per worker
+```
+
+- `dsp_threads`: see §3.4. `dsp_cpus` with `"auto"` sets the worker count to its length (capped at the channel count); with an integer its length must match; `dsp_cpus` cannot be combined with `"inline"`.
+- `realtime`: `auto` tries RT and continues at normal priority on failure (with a warning); `required` makes any startup RT failure fatal; `off` never requests RT.
+- `core_selection = "os"` disables automatic pinning and spinning (explicit `dsp_cpus` still applies). `smt_siblings = "never"` fails at startup if workers exceed the allowed physical cores.
+- Validated by `config check`: priority range, non-empty and duplicate-free `dsp_cpus`, count/pin agreement, `loop_cpu` not in `dsp_cpus`. Checks that need the machine (CPU exists and is allowed, pins that are SMT siblings) happen at startup and are errors or warnings as described.
+- More than two channels is supported by the placement code but untested.
 
 ### 6.2 Reference Configuration Fixtures
 
@@ -508,7 +533,7 @@ audigma doctor [--fix] [--json]
 - **`audigma doctor [--fix]` (`audigma-doctor`):** Inspects the host OS audio stack and diagnoses runtime issues:
   1. *ALSA Device Lockouts:* Inspects `/dev/snd/pcmC*D*p` file descriptor holders. If held by WirePlumber/PipeWire, `--fix` can dynamically invoke `wpctl set-profile <id> 0` or offer to write a permanent WirePlumber drop-in rule in `~/.config/wireplumber/`. If held by a foreign user or daemon (such as MPD), `--fix` interactively prompts the user before terminating the process, escalating to `sudo` if permissions are insufficient, or printing the exact command required.
   2. *PipeWire Multi-Rate Configuration:* Checks `default.clock.allowed-rates` in PipeWire when `rate_family = "source"` is active on a PipeWire virtual sink, warning and offering to install the required multi-rate configuration drop-in if the graph is pinned to a single rate (e.g. `48000`).
-  3. *Real-Time Scheduling Limits:* Verifies `RLIMIT_RTPRIO` / RTKit availability for real-time DSP threads.
+  3. *Real-Time Scheduling Limits:* Verifies `RLIMIT_RTPRIO` / RTKit availability for the real-time loop, PipeWire and DSP threads (the daemon itself reports the outcome per thread as `rt_priority` events at startup).
 - **Control Socket & Telemetry Protocol (`audigma status`):** Operates over a local Unix domain socket at `$XDG_RUNTIME_DIR/audigma/control.sock`. Runtime telemetry exported via `status [--watch] [--json]` exposes:
   - Input negotiated format/rate, PipeWire graph rate, and active channel positions.
   - Output bit/sample/transport rate and active physical device/endpoint.
@@ -518,7 +543,7 @@ audigma doctor [--fix] [--json]
   - Measured true peaks and modulator integrator operating envelope.
   - Latency breakdown (graph + queue + filter group delay + backend buffer).
   - SPSC queue fill percentage and estimated ASRC clock drift ($\delta_{\text{ppm}}$).
-  - Hardware XRun counters, fault/recovery event counts, and per-channel worker execution timing.
+  - Hardware XRun counters, fault/recovery event counts, and per-worker execution and dispatch timing (mean, p50, p99, max, cumulative p99.9) with the stall cause.
 
 ---
 

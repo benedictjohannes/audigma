@@ -11,9 +11,9 @@
 
 use crate::decimator::ChannelDecimatorPool;
 use crate::peak::measure_true_peak_pass1;
+use crate::pipeline_topology::PipelineTopology;
 use crate::processor::TileProcessor;
 use crate::tail::TailManager;
-use crate::topology::PipelineTopology;
 use crate::traits::{AudioInput, AudioOutput, EngineError};
 use crate::transport::{is_dsd_passthrough_eligible, transfer_offline_dsd_passthrough};
 use audigma_dsp::DSD_IDLE_BYTE;
@@ -480,6 +480,16 @@ pub struct OfflinePipeline {
 impl OfflinePipeline {
     /// Prepares a new offline pipeline for the given input sample rate and settings.
     pub fn prepare(settings: Settings, input_rate: PcmRateHz) -> Result<Self, EngineError> {
+        Self::prepare_with_workers(settings, input_rate, None)
+    }
+
+    /// Like [`prepare`](Self::prepare), with explicit placement for the DSP workers
+    /// (`[runtime]`; offline callers must not request real-time priority).
+    pub fn prepare_with_workers(
+        settings: Settings,
+        input_rate: PcmRateHz,
+        worker_setup: Option<crate::worker::WorkerSetup>,
+    ) -> Result<Self, EngineError> {
         let plan = settings.explain_for_input_rate(input_rate)?;
         let preset = plan.dsp_config.preset;
 
@@ -519,7 +529,7 @@ impl OfflinePipeline {
             TILE_BASEBAND_FRAMES,
             target_dsd,
             false,
-            None,
+            worker_setup,
         )?;
         let mult = processor.rate_multiplier();
 

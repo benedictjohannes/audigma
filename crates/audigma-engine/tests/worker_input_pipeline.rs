@@ -8,12 +8,13 @@ use audigma_dsp::{
 };
 use audigma_engine::decimator::ChannelDecimatorPool;
 use audigma_engine::lifecycle::FrameGain;
+use audigma_engine::pipeline_topology::PipelineTopology;
 use audigma_engine::processor::TileProcessor;
-use audigma_engine::topology::PipelineTopology;
 use audigma_engine::traits::DsdDecodeConfig;
 use audigma_engine::worker::{
     ChannelWorkerPool, InputDspConfig, InputResampling, InputTileControls, TargetDsdConfig,
 };
+use audigma_engine::{ThreadInitHook, WorkerSetup};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -742,12 +743,13 @@ fn modulation_errors_still_account_for_consumed_input_residue() {
 fn early_dispatch_reuses_exactly_one_thread_per_channel() {
     let workers = Arc::new(AtomicUsize::new(0));
     let observed = workers.clone();
-    let hook = Arc::new(move |channel| {
+    let hook: ThreadInitHook = Arc::new(move |channel, _placement| {
         assert_eq!(
             std::thread::current().name().unwrap(),
-            format!("audigma-ch{channel}")
+            format!("audigma-dsp-{channel}")
         );
         observed.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     });
     let config = InputDspConfig {
         pcm_decimation_stages: 0,
@@ -763,7 +765,11 @@ fn early_dispatch_reuses_exactly_one_thread_per_channel() {
         FRAMES,
         None,
         Some(config),
-        Some(hook),
+        Some(WorkerSetup {
+            placements: Vec::new(),
+            hook: Some(hook),
+            ..Default::default()
+        }),
     )
     .unwrap();
     let input = [0.1; FRAMES];
@@ -785,9 +791,10 @@ fn early_dispatch_reuses_exactly_one_thread_per_channel() {
 fn worker_termination_completes_surviving_jobs_and_rejects_reuse() {
     let workers = Arc::new(AtomicUsize::new(0));
     let observed = workers.clone();
-    let hook = Arc::new(move |channel| {
+    let hook: ThreadInitHook = Arc::new(move |channel, _placement| {
         assert_ne!(channel, 0, "simulate a terminated worker");
         observed.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     });
     let mut pool = ChannelWorkerPool::new_with_input(
         2,
@@ -802,7 +809,11 @@ fn worker_termination_completes_surviving_jobs_and_rejects_reuse() {
             dsd: None,
             resampling: InputResampling::None,
         }),
-        Some(hook),
+        Some(WorkerSetup {
+            placements: Vec::new(),
+            hook: Some(hook),
+            ..Default::default()
+        }),
     )
     .unwrap();
     let input = [0.1; FRAMES];

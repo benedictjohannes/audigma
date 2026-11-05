@@ -10,6 +10,7 @@
 //! - Deterministic seeding, gapless `trim-to-duration` phase-alignment, and `preserve-tail` flushing.
 
 pub mod asrc;
+pub mod cpu;
 pub mod decimator;
 pub mod late;
 pub mod lifecycle;
@@ -17,15 +18,19 @@ pub mod live_pipeline;
 pub mod loop_timing;
 pub mod offline_pipeline;
 pub mod peak;
+pub mod pipeline_topology;
 pub mod processor;
 pub mod queue;
 pub mod tail;
-pub mod topology;
+pub mod timing;
 pub mod traits;
 pub mod transport;
 pub mod worker;
 
 pub use asrc::{AdaptiveClockDriftController, ClockDriftConfig, ClockDriftError};
+pub use cpu::{
+    CpuInfo, CpuTopology, Placement, PlacementError, ThreadPlacement, resolve as resolve_placement,
+};
 pub use decimator::ChannelDecimatorPool;
 pub use late::{
     LateCounterSource, LateCounters, LateEpisodeAggregator, LateRecord, LateTileMonitor,
@@ -36,14 +41,15 @@ pub use lifecycle::{
 };
 pub use live_pipeline::{
     DaemonControlHandle, DaemonOutputFormat, DaemonState, DaemonTelemetry, DaemonVolumeMode,
-    LivePipeline, StreamExitReason,
+    DspSession, LivePipeline, StreamExitReason,
 };
 pub use offline_pipeline::{OfflinePipeline, OfflineReport};
 pub use peak::{Pass1PeakResult, measure_true_peak_pass1};
+pub use pipeline_topology::PipelineTopology;
 pub use processor::TileProcessor;
 pub use queue::{AudioSpscQueue, DEFAULT_CHUNK_SAMPLES, TaggedChunk};
 pub use tail::TailManager;
-pub use topology::PipelineTopology;
+pub use timing::{PoolTimings, StageStats, TimingReport, TimingTracker};
 pub use traits::{
     AudioInput, AudioOutput, DecoderInput, DsdDecodeConfig, EngineError, HardwareVolumeBridge,
     MockAudioInput, SeekableSink, StreamSink, VolumeUpdate,
@@ -54,4 +60,5 @@ pub use transport::{
 };
 pub use worker::{
     ChannelWorkerPool, InputDspConfig, InputResampling, InputTileControls, TargetDsdConfig,
+    ThreadInitHook, WorkerSetup,
 };

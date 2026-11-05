@@ -55,7 +55,12 @@ fn monitor_flushes_open_episode_on_shutdown() {
     telemetry.record_tile(true, 1_567, true, Some(1_000_000));
 
     let counters: Arc<dyn Fn() -> LateCounters + Send + Sync> = Arc::new(LateCounters::default);
-    let monitor = LateTileMonitor::spawn(Arc::clone(&telemetry), counters, Duration::from_secs(10));
+    let monitor = LateTileMonitor::spawn(
+        Arc::clone(&telemetry),
+        counters,
+        Duration::from_secs(10),
+        None,
+    );
 
     // Allow the 100 ms poll loop to observe the late tile and emit late_start.
     std::thread::sleep(Duration::from_millis(250));

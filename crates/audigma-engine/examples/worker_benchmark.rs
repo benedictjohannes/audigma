@@ -135,8 +135,16 @@ fn main() {
     let mut pcm;
     let mut dsd;
     let mut process: Box<dyn FnMut()> = if mode == "worker" {
-        let hook: Option<Arc<dyn Fn(usize) + Send + Sync>> = worker_cpus.clone().map(|cpus| {
-            Arc::new(move |ch: usize| pin_to_cpu(cpus[ch])) as Arc<dyn Fn(usize) + Send + Sync>
+        // The engine crate has no OS layer, so this example keeps its own affinity helper.
+        let setup = worker_cpus.clone().map(|cpus| audigma_engine::WorkerSetup {
+            placements: Vec::new(),
+            hook: Some(Arc::new(
+                move |ch: usize, _p: &audigma_engine::ThreadPlacement| {
+                    pin_to_cpu(cpus[ch]);
+                    Ok(())
+                },
+            )),
+            ..Default::default()
         });
         pool = ChannelWorkerPool::new(
             channels,
@@ -146,7 +154,7 @@ fn main() {
             stages,
             frames,
             Some(config.clone()),
-            hook,
+            setup,
         )
         .unwrap();
         Box::new(|| {

@@ -1,5 +1,5 @@
 #[cfg(feature = "dbus")]
-use audigma_io::dbus::{DeviceReservation, request_realtime_priority};
+use audigma_io::dbus::DeviceReservation;
 
 #[test]
 #[cfg(feature = "dbus")]
@@ -27,21 +27,23 @@ fn test_dbus_device_reservation_name_formatting() {
 }
 
 #[test]
-#[cfg(feature = "dbus")]
-fn test_dbus_realtime_kit_graceful_fallback() {
-    // Requesting RT priority for an arbitrary thread id
-    // May succeed if system RTKit is running, or return a clear error if unavailable.
-    // In either case, it must not panic.
-    let result = request_realtime_priority(10);
-    match result {
-        Ok(acq) => {
-            let msg = format!("{acq}");
-            assert!(!msg.is_empty());
+#[cfg(target_os = "linux")]
+fn test_apply_realtime_graceful_and_reset_on_fork() {
+    // Runs on a throwaway thread so the test harness thread is never elevated.
+    std::thread::spawn(|| {
+        let placement = audigma_engine::ThreadPlacement::realtime(10);
+        match audigma_io::apply(&placement) {
+            Ok(applied) => {
+                assert!(applied.realtime.is_some());
+                // Threads spawned by an RT thread must start SCHED_OTHER.
+                let child_policy = std::thread::spawn(|| unsafe { libc::sched_getscheduler(0) })
+                    .join()
+                    .unwrap();
+                assert_eq!(child_policy, libc::SCHED_OTHER);
+            }
+            Err(e) => assert!(!format!("{e}").is_empty()),
         }
-        Err(e) => {
-            // Descriptive error without crashing
-            let msg = format!("{e}");
-            assert!(!msg.is_empty());
-        }
-    }
+    })
+    .join()
+    .unwrap();
 }

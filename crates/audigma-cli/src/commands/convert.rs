@@ -119,7 +119,15 @@ pub fn run_convert(args: ConvertArgs) -> Result<(), CliError> {
         .as_ref()
         .and_then(|o| o.write_report)
         .unwrap_or(false);
-    let pipeline = OfflinePipeline::prepare(settings, input_rate)?;
+    let pipeline = {
+        let placement = crate::runtime::resolve(&settings, 2, true)?;
+        crate::runtime::apply_housekeeping(&placement);
+        OfflinePipeline::prepare_with_workers(
+            settings,
+            input_rate,
+            Some(crate::runtime::worker_setup(&placement)),
+        )?
+    };
     let report = pipeline.run(&mut *input, output)?;
 
     // 5. Output Report
