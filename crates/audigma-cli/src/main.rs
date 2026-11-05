@@ -18,6 +18,16 @@ fn main() -> ExitCode {
     let _ftz = audigma_dsp::ScopedFtzDaz::new();
     let cli = Cli::parse();
 
+    // Rust ignores SIGPIPE by default, which makes `println!` panic on `audigma status | head`.
+    // Short-lived commands restore the default so they exit quietly like other Unix CLIs. The
+    // daemon keeps it ignored: a client or log pipe closing must stay an ordinary EPIPE error.
+    if !matches!(cli.command, Commands::Run(_)) {
+        // SAFETY: resetting a signal disposition at startup, before any thread is spawned.
+        unsafe {
+            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        }
+    }
+
     // 1. Determine command default log level: info for run, warn for short-lived commands (§6.1)
     let default_level = match &cli.command {
         Commands::Run(_) => audigma_log::LogLevel::Info,
