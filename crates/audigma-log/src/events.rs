@@ -13,6 +13,7 @@ pub const VOLUME_MODE: &str = "volume_mode";
 pub const PW_VOLUME_EVENT: &str = "pw_volume_event";
 pub const PW_FORMAT_NEGOTIATED: &str = "pw_format_negotiated";
 pub const RATE_SWITCH: &str = "rate_switch";
+pub const DRIFT_MODE: &str = "drift_mode";
 pub const OUTPUT_REOPENED: &str = "output_reopened";
 pub const STREAMING_ERROR: &str = "streaming_error";
 pub const DECIMATION_ERROR_SUMMARY: &str = "decimation_error_summary";

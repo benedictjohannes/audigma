@@ -14,7 +14,7 @@
 //! - Real-time thread priority acquisition with graceful fallback.
 //! - Monitored live telemetry exported via shared state.
 
-use crate::asrc::{AdaptiveClockDriftController, ClockDriftConfig, ClockDriftError};
+use crate::asrc::{ClockDriftConfig, ClockDriftController, ClockDriftError, DriftMode};
 use crate::late::{LateCounterSource, LateCounters, LateTileMonitor};
 use crate::lifecycle::{
     BlockAction, FrameGain, IdleCarrierFormat, LifecycleController, LifecycleState,
@@ -227,7 +227,15 @@ pub struct DaemonTelemetry {
     pub queue_fill_pct: f64,
     #[serde(default)]
     pub buffer_fill_ms: f64,
-    pub drift_ppm: f64,
+    /// Drift handling resolved for the current stream (`Design.md §1.5`).
+    #[serde(default)]
+    pub asrc_mode: DriftMode,
+    /// Correction applied by the ASRC in ppm (0 unless `asrc_mode` is `correct`).
+    #[serde(default)]
+    pub asrc_correction_ppm: f64,
+    /// Measured clock offset in ppm, once the estimator window is valid.
+    #[serde(default)]
+    pub drift_estimate_ppm: Option<f64>,
     pub overload_count: u64,
     pub xrun_count: u64,
     pub generation: u64,
@@ -278,7 +286,10 @@ struct TelemetryState {
     total_output_frames: AtomicU64,
     queue_fill_pct: AtomicU64,
     buffer_fill_ms: AtomicU64,
-    drift_ppm: AtomicU64,
+    asrc_mode: AtomicU8,
+    asrc_correction_ppm: AtomicU64,
+    /// NaN encodes "no estimate".
+    drift_estimate_ppm: AtomicU64,
     overload_count: AtomicU64,
     xrun_count: AtomicU64,
     uptime_secs: AtomicU64,
@@ -330,7 +341,9 @@ impl DaemonControlHandle {
             total_output_frames: AtomicU64::new(0),
             queue_fill_pct: AtomicU64::new(0.0f64.to_bits()),
             buffer_fill_ms: AtomicU64::new(0.0f64.to_bits()),
-            drift_ppm: AtomicU64::new(0.0f64.to_bits()),
+            asrc_mode: AtomicU8::new(0),
+            asrc_correction_ppm: AtomicU64::new(0.0f64.to_bits()),
+            drift_estimate_ppm: AtomicU64::new(f64::NAN.to_bits()),
             overload_count: AtomicU64::new(0),
             xrun_count: AtomicU64::new(0),
             uptime_secs: AtomicU64::new(0),
@@ -480,7 +493,14 @@ impl DaemonControlHandle {
             total_output_frames: self.telemetry.total_output_frames.load(Ordering::Relaxed),
             queue_fill_pct: load_f64(&self.telemetry.queue_fill_pct),
             buffer_fill_ms: load_f64(&self.telemetry.buffer_fill_ms),
-            drift_ppm: load_f64(&self.telemetry.drift_ppm),
+            asrc_mode: match self.telemetry.asrc_mode.load(Ordering::Relaxed) {
+                1 => DriftMode::Observe,
+                2 => DriftMode::Correct,
+                _ => DriftMode::Off,
+            },
+            asrc_correction_ppm: load_f64(&self.telemetry.asrc_correction_ppm),
+            drift_estimate_ppm: Some(load_f64(&self.telemetry.drift_estimate_ppm))
+                .filter(|v| !v.is_nan()),
             overload_count: self.telemetry.overload_count.load(Ordering::Relaxed),
             xrun_count: self.telemetry.xrun_count.load(Ordering::Relaxed),
             generation: self.generation.load(Ordering::Relaxed),
@@ -559,7 +579,9 @@ impl DaemonControlHandle {
         overload_count: u64,
         queue_fill_pct: Option<f64>,
         buffer_fill_ms: Option<f64>,
-        drift_ppm: f64,
+        asrc_mode: DriftMode,
+        asrc_correction_ppm: f64,
+        drift_estimate_ppm: Option<f64>,
         xrun_count: u64,
         empty_polls: u64,
         idle_entries: u64,
@@ -588,7 +610,19 @@ impl DaemonControlHandle {
         if let Some(ms) = buffer_fill_ms {
             store_f64(&self.telemetry.buffer_fill_ms, ms);
         }
-        store_f64(&self.telemetry.drift_ppm, drift_ppm);
+        self.telemetry.asrc_mode.store(
+            match asrc_mode {
+                DriftMode::Off => 0,
+                DriftMode::Observe => 1,
+                DriftMode::Correct => 2,
+            },
+            Ordering::Relaxed,
+        );
+        store_f64(&self.telemetry.asrc_correction_ppm, asrc_correction_ppm);
+        store_f64(
+            &self.telemetry.drift_estimate_ppm,
+            drift_estimate_ppm.unwrap_or(f64::NAN),
+        );
         self.telemetry
             .xrun_count
             .store(xrun_count, Ordering::Relaxed);
@@ -810,7 +844,21 @@ impl LivePipeline {
         let is_dsd = self.topology.is_dsd();
         let target_dsd = self.topology.target_dsd_config(&self.plan.dsp_config);
 
-        let is_adaptive = self.settings.drift_correction_enabled();
+        let drift_mode = DriftMode::resolve(
+            self.settings.drift_correction(),
+            self.settings.output_backend() == Some(audigma_settings::OutputBackend::Alsa),
+            input.input_clock(),
+        );
+        tracing::info!(
+            target: "audigma::engine",
+            event = audigma_log::DRIFT_MODE,
+            setting = ?self.settings.drift_correction(),
+            input_clock = ?input.input_clock(),
+            mode = drift_mode.as_str(),
+            "drift handling resolved"
+        );
+        // Only `Correct` puts the ASRC in the audio path; `Observe` measures with 0 ppm applied.
+        let is_adaptive = drift_mode == DriftMode::Correct;
         let max_ppm = f64::from(self.settings.resolved_max_clock_drift_ppm());
         let asrc_in_rate = if self.topology.decimation_stages > 0 {
             self.topology.intermediate_rate
@@ -897,12 +945,15 @@ impl LivePipeline {
         } else {
             Vec::new()
         };
-        // The clock controller is shared; workers only apply its common ratio.
-        let mut asrc_drift_ctrl = is_adaptive.then(|| {
-            AdaptiveClockDriftController::new(ClockDriftConfig {
-                max_correction_ppm: max_ppm,
-                ..Default::default()
-            })
+        // The drift controller is shared; workers only apply its common ratio.
+        let mut asrc_drift_ctrl = (drift_mode != DriftMode::Off).then(|| {
+            ClockDriftController::new(
+                ClockDriftConfig {
+                    max_correction_ppm: max_ppm,
+                    ..Default::default()
+                },
+                is_adaptive,
+            )
         });
 
         let mut dop_packer = match self.carrier {
@@ -993,7 +1044,9 @@ impl LivePipeline {
                         overload_events,
                         q_pct,
                         b_ms,
+                        drift_mode,
                         current_drift_ppm,
+                        asrc_drift_ctrl.as_ref().and_then(|c| c.estimate_ppm()),
                         output.xrun_count(),
                         empty_polls_total,
                         idle_entries_total,
@@ -1205,9 +1258,13 @@ impl LivePipeline {
                     is_idle = true;
                     idle_entries_total = idle_entries_total.saturating_add(1);
                     // The ASRC is not updated while idle; clear the latched fault
-                    // state so status does not report a stale [FAULT ACTIVE].
+                    // state so status does not report a stale [FAULT ACTIVE], and restart
+                    // the drift measurement (the estimate is kept).
                     asrc_in_starvation = false;
                     asrc_in_overrun = false;
+                    if let Some(ref mut drift_ctrl) = asrc_drift_ctrl {
+                        current_drift_ppm = drift_ctrl.on_idle();
+                    }
                 }
                 sync_telemetry!(false);
                 let chunk_dur = Duration::from_secs_f64(
@@ -1254,9 +1311,11 @@ impl LivePipeline {
                 }
             }
 
-            // Update the shared drift controller once BEFORE worker SRC execution.
-            if baseband_frames > 0 {
-                let dt = baseband_frames as f64 / self.topology.intermediate_rate.get() as f64;
+            // Update the shared drift controller once BEFORE worker SRC execution. Drain
+            // tiles are synthesized zeros and say nothing about the producer's clock.
+            if baseband_frames > 0 && !draining_input {
+                // Baseband frames enter the SRC stage at `asrc_in_rate`.
+                let dt = baseband_frames as f64 / asrc_in_rate.get() as f64;
                 if let Some(ref mut drift_ctrl) = asrc_drift_ctrl {
                     // Only control the ASRC when the input can report a real
                     // buffered duration. A slot-count fallback would assume a
@@ -1275,7 +1334,7 @@ impl LivePipeline {
                                         asrc_starvations_total.saturating_add(1);
                                 }
                                 asrc_in_overrun = false;
-                                drift_ctrl.last_drift_ppm()
+                                drift_ctrl.applied_ppm()
                             }
                             Err(ClockDriftError::Overrun { .. }) => {
                                 if !asrc_in_overrun {
@@ -1283,7 +1342,7 @@ impl LivePipeline {
                                     asrc_overruns_total = asrc_overruns_total.saturating_add(1);
                                 }
                                 asrc_in_starvation = false;
-                                drift_ctrl.last_drift_ppm()
+                                drift_ctrl.applied_ppm()
                             }
                         };
                         current_drift_ppm = ppm;

@@ -27,7 +27,7 @@ pub mod traits;
 pub mod transport;
 pub mod worker;
 
-pub use asrc::{AdaptiveClockDriftController, ClockDriftConfig, ClockDriftError};
+pub use asrc::{ClockDriftConfig, ClockDriftController, ClockDriftError, DriftMode};
 pub use cpu::{
     CpuInfo, CpuTopology, Placement, PlacementError, ThreadPlacement, resolve as resolve_placement,
 };

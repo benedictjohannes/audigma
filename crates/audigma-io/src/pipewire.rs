@@ -1914,6 +1914,11 @@ impl AudioInput for PipeWireVirtualSink {
         self.processed_chunks.load(Ordering::Relaxed)
     }
 
+    fn input_clock(&self) -> audigma_engine::traits::InputClock {
+        // Always its own driver, pulled by the demand gate against the preroll cushion.
+        audigma_engine::traits::InputClock::DemandDriven
+    }
+
     fn set_preroll_secs(&mut self, secs: f64) {
         PipeWireVirtualSink::set_preroll_secs(self, secs);
     }

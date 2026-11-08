@@ -74,15 +74,14 @@ fn test_cli_config_check_prints_warnings() {
 schema_version = 1
 
 [output]
-backend = "alsa"
-device = "hw:0,0"
+backend = "pipewire"
 
 [target]
 format = "pcm"
 pcm_rate_hz = 192000
 
 [resampler]
-drift_correction = "off"
+drift_correction = "on"
 "#;
     File::create(&cfg_path)
         .unwrap()

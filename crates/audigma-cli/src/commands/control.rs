@@ -104,8 +104,14 @@ fn print_telemetry(telem: &audigma_engine::DaemonTelemetry) {
         ""
     };
     println!(
-        "  ASRC Clock Drift:    {:.1} ppm (starvations: {}, overruns: {}){fault_str}",
-        telem.drift_ppm, telem.asrc_starvations, telem.asrc_overruns
+        "  ASRC:                {}, correction {:+.1} ppm, estimated drift {} (starvations: {}, overruns: {}){fault_str}",
+        telem.asrc_mode.as_str(),
+        telem.asrc_correction_ppm,
+        telem
+            .drift_estimate_ppm
+            .map_or_else(|| "n/a".to_string(), |ppm| format!("{ppm:+.1} ppm")),
+        telem.asrc_starvations,
+        telem.asrc_overruns
     );
     println!(
         "  Pipeline Health:     {} empty polls, {} idle entries ({} tiles)",

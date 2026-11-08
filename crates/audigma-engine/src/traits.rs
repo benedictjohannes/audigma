@@ -151,9 +151,14 @@ pub trait AudioInput: Send {
 
     /// Returns the currently buffered input duration in seconds, if supported.
     ///
-    /// This is the authoritative fill signal for the adaptive clock drift
-    /// controller: unlike chunk-slot counts it is independent of the PipeWire
-    /// quantum and input sample rate.
+    /// This is the fill signal for the clock drift estimator: unlike chunk-slot counts it is
+    /// independent of the PipeWire quantum and input sample rate.
+    ///
+    /// A [`InputClock::FreeRunning`] input must report it *continuously*: queued frames plus
+    /// the producer's progress since the last chunk arrival at the nominal rate, capped at one
+    /// chunk. Queued frames alone step only when the producer has gained a whole read tile
+    /// (chunk and tile are commensurate), which hides drift from any window shorter than tens
+    /// of minutes (`Design.md §1.5`).
     fn buffer_fill_secs(&self) -> Option<f64> {
         None
     }
@@ -166,6 +171,12 @@ pub trait AudioInput: Send {
     /// Number of input buffers/chunks received from the producer.
     fn processed_chunks(&self) -> u64 {
         0
+    }
+
+    /// Which clock paces the producer (`Design.md §1.5`). Decides whether drift correction can
+    /// act at all: a demand-driven producer shares the output clock, so there is no drift.
+    fn input_clock(&self) -> InputClock {
+        InputClock::FreeRunning
     }
 
     /// Sets the target preroll cushion duration in seconds before playback begins or resumes.
@@ -185,6 +196,17 @@ pub trait AudioInput: Send {
     fn decimation_recorder(&self) -> Option<std::sync::Arc<audigma_log::DecimationErrorRecorder>> {
         None
     }
+}
+
+/// Clock domain of an input's producer (`Design.md §1.5`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputClock {
+    /// The producer is paced by audigma's consumption (e.g. a driver sink pulled against a
+    /// cushion), so it follows the output clock and has no drift of its own.
+    DemandDriven,
+    /// The producer runs on its own clock; its rate differs from the output clock by a drift.
+    /// Requires a continuous [`AudioInput::buffer_fill_secs`].
+    FreeRunning,
 }
 
 /// Abstract hardware volume bridge for synchronized analog attenuation (`Design.md §1.8`).

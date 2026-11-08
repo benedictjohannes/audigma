@@ -146,9 +146,10 @@ pub enum PeakAnalysisMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DriftCorrection {
-    /// On for ALSA output (the DAC clock is master), off for PipeWire output.
+    /// Correct a free-running input on ALSA output (the DAC clock is master); otherwise off.
     #[default]
     Auto,
+    /// Correct a free-running input; observe (estimate only) a demand-driven one.
     On,
     Off,
 }
@@ -424,7 +425,7 @@ pub struct ResamplerConfig {
     pub apodization: Apodization,
     #[serde(default = "default_modulator_order")]
     pub modulator_order: u8,
-    /// Input-side drift correction against the output clock (`auto` follows `[output] backend`).
+    /// Input-side drift correction against the output clock (`Design.md §1.5`).
     #[serde(default)]
     pub drift_correction: DriftCorrection,
     /// Largest drift correction in ppm (default 500); only used while drift correction is active.
@@ -1134,36 +1135,27 @@ impl Settings {
                 ));
             }
         }
-        match (self.drift_correction_setting(), self.output_backend()) {
-            (DriftCorrection::Off, Some(OutputBackend::Alsa)) => warnings.push(
-                "[resampler] drift_correction = \"off\" with an ALSA output is unsupported: the DAC clock and the input are not locked, so expect dropouts or clicks over long playback".to_string(),
-            ),
-            (DriftCorrection::On, Some(OutputBackend::Pipewire)) => warnings.push(
-                "[resampler] drift_correction = \"on\" with a PipeWire output adds a drift resampler on a rate-matched stream; no benefit expected".to_string(),
-            ),
-            _ => {}
+        if self.drift_correction() == DriftCorrection::On
+            && self.output_backend() == Some(OutputBackend::Pipewire)
+        {
+            warnings.push(
+                "[resampler] drift_correction = \"on\" with a PipeWire output adds drift handling to a rate-matched stream; no benefit expected".to_string(),
+            );
         }
         warnings
     }
 
-    fn output_backend(&self) -> Option<OutputBackend> {
+    /// The configured `[output] backend`, if any.
+    pub fn output_backend(&self) -> Option<OutputBackend> {
         self.output.as_ref().and_then(|o| o.backend)
     }
 
-    fn drift_correction_setting(&self) -> DriftCorrection {
+    /// `[resampler] drift_correction` (default `auto`). The engine resolves it per stream against
+    /// the output backend and the input clock (`DriftMode::resolve`, `Design.md §1.5`).
+    pub fn drift_correction(&self) -> DriftCorrection {
         self.resampler
             .as_ref()
             .map_or(DriftCorrection::Auto, |r| r.drift_correction)
-    }
-
-    /// Whether the input is resampled against the output clock: `[resampler] drift_correction`
-    /// with `auto` resolved from `[output] backend` (on for ALSA, off otherwise).
-    pub fn drift_correction_enabled(&self) -> bool {
-        match self.drift_correction_setting() {
-            DriftCorrection::On => true,
-            DriftCorrection::Off => false,
-            DriftCorrection::Auto => self.output_backend() == Some(OutputBackend::Alsa),
-        }
     }
 
     /// Drift correction limit in ppm (default 500); only used while drift correction is active.
@@ -1271,7 +1263,7 @@ mod tests {
     }
 
     #[test]
-    fn test_drift_correction_auto_resolves_from_backend() {
+    fn test_drift_correction_setting_and_warnings() {
         let base = |out: &str, resampler: &str| {
             Settings::from_toml_str(&format!(
                 "schema_version = 1\n[output]\n{out}\n[target]\nformat = \"pcm\"\npcm_rate_hz = 192000\n{resampler}"
@@ -1279,8 +1271,10 @@ mod tests {
         };
         let alsa = "backend = \"alsa\"\ndevice = \"hw:0,0\"";
         let pw = "backend = \"pipewire\"";
-        assert!(base(alsa, "").unwrap().drift_correction_enabled());
-        assert!(!base(pw, "[resampler]\ndrift_correction = \"auto\"").unwrap().drift_correction_enabled());
+        assert_eq!(
+            base(alsa, "").unwrap().drift_correction(),
+            DriftCorrection::Auto
+        );
         assert_eq!(
             base(alsa, "[resampler]\nmax_clock_drift_ppm = 200")
                 .unwrap()
@@ -1288,14 +1282,20 @@ mod tests {
             200
         );
         assert_eq!(base(pw, "").unwrap().resolved_max_clock_drift_ppm(), 500);
-        // Overrides are allowed against the backend, with a warning.
+        // `off` is the normal case with the demand-driven sink: no warning.
         let off = base(alsa, "[resampler]\ndrift_correction = \"off\"").unwrap();
-        assert!(!off.drift_correction_enabled());
-        assert_eq!(off.warnings().len(), 1);
+        assert_eq!(off.drift_correction(), DriftCorrection::Off);
+        assert!(off.warnings().is_empty());
+        // `on` with a rate-matched PipeWire output still warns.
         let on = base(pw, "[resampler]\ndrift_correction = \"on\"").unwrap();
-        assert!(on.drift_correction_enabled());
+        assert_eq!(on.drift_correction(), DriftCorrection::On);
         assert_eq!(on.warnings().len(), 1);
-        assert!(base(alsa, "[resampler]\ndrift_correction = \"on\"").unwrap().warnings().is_empty());
+        assert!(
+            base(alsa, "[resampler]\ndrift_correction = \"on\"")
+                .unwrap()
+                .warnings()
+                .is_empty()
+        );
     }
 
     #[test]
