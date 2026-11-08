@@ -1,13 +1,14 @@
 """Resampler family: the polyphase rational SRC and the ASRC, measured through `PolyphaseResampler`.
 
 Harness modes `src-tone` (coherent tones through the production type) and `src-tables` (the bank a
-resampler builds at construction). No quality thresholds are applied (audit step 5); the only failures
-raised are method checks (compiled banks must equal `design_src.py`).
+resampler builds at construction). Quality requirement (`Design.md` §8.6, anchor 2, target independent): the in-band
+(20 Hz-20 kHz) error re the input tone is at most -141 dB, i.e. -141 dBFS for a full-scale input; passband deviation 0-20 kHz
+at most 0.01 dB. Method check: compiled banks must equal `design_src.py`.
 """
 
 import numpy as np
 
-from .common import Section, run_harness
+from .common import FILTER_PASSBAND_DEV_DB, TRANSPARENCY_SPUR_DBFS, Section, run_harness
 from .linear import load_f64, tone_metrics
 
 try:
@@ -67,8 +68,21 @@ def _run_src(harness_bin, stem, src_mode, in_hz, out_hz, ppm, tones_in):
     for t, x in zip(meta["tones"], data):
         r = tone_metrics(x, t["k"], out_hz, meta["amplitude"])
         r["f_in_hz"] = t["f_in_hz"]
+        r["inband_error_db"] = _inband_error_db(r, out_hz)
         rows.append(r)
-    return {"meta": meta, "rows": rows}
+    return {"meta": meta, "rows": rows, "in_hz": in_hz, "out_hz": out_hz}
+
+
+def _inband_error_db(r, out_hz):
+    """Everything unwanted in 20 Hz-20 kHz, in dB re the input tone (= dBFS for a full-scale input).
+
+    The residual outside the tone lobe always counts. The tone lobe itself is wanted when the input tone is below the
+    output Nyquist; above it, the lobe is the input's alias and counts as error when it lands in 20 Hz-20 kHz.
+    """
+    parts = [r["gain_db"] + r["resid_inband_dbc"]]
+    if r["f_in_hz"] > out_hz / 2 and 20.0 <= r["tone_hz"] <= 20_000.0:
+        parts.append(r["gain_db"])
+    return float(10 * np.log10(sum(10 ** (x / 10) for x in parts)))
 
 
 def _bank(harness_bin, mode, in_hz, out_hz):
@@ -137,11 +151,11 @@ def run(harness_bin):
 
 
 def _tone_table(case):
-    text = "| Input tone | Gain (dB) | Worst spur (dBc) | Spur frequency (kHz) | Total residual (dBc) | Residual 20 Hz-20 kHz (dBc) |\n|---:|---:|---:|---:|---:|---:|\n"
+    text = "| Input tone | Gain (dB) | Worst spur (dBc) | Spur frequency (kHz) | Total residual (dBc) | Residual 20 Hz-20 kHz (dBc) | In-band error (dB re input) |\n|---:|---:|---:|---:|---:|---:|---:|\n"
     for base, r in zip(case["tones_base"], case["rows"]):
         text += (
             f"| {base / 1000:g} kHz | {r['gain_db']:.4f} | {r['spur_dbc']:.1f} | {r['spur_hz'] / 1000:.2f} | "
-            f"{r['resid_dbc']:.1f} | {r['resid_inband_dbc']:.1f} |\n"
+            f"{r['resid_dbc']:.1f} | {r['resid_inband_dbc']:.1f} | {r['inband_error_db']:.1f} |\n"
         )
     return text
 
@@ -176,6 +190,8 @@ from the rows (`h[i*phases + p] = row_p[i]`). Gains are relative to DC at the st
     for e in res["banks"]:
         g = list(e["gain"].values())
         diff = e.get("max_diff")
+        if e["passband_dev_db"] > FILTER_PASSBAND_DEV_DB:
+            failures.append(f"Resampler bank {e['mode']} {e['in_hz']}->{e['out_hz']}: passband deviation {e['passband_dev_db']:.1e} dB")
         if design_src is not None and (diff is None or diff > BANK_MISMATCH_TOL):
             failures.append(f"Resampler bank {e['mode']} {e['in_hz']}->{e['out_hz']} differs from design_src.py")
         text += (
@@ -185,6 +201,29 @@ from the rows (`h[i*phases + p] = row_p[i]`). Gains are relative to DC at the st
         )
     text += """
 The frequencies are those of a 44.1 kHz-family lower rate scaled to the actual one (e.g. 20 kHz at 44.1 kHz is 21.77 kHz at 48 kHz).
+"""
+    cases = [(f"rational {c['label']} x{c['mult']}", c) for c in res["rational"]]
+    cases += [(f"rational {c['label']}", c) for c in res["rational_extra"]]
+    cases += [(f"asrc {c['label']} {c['ppm']:+g} ppm", c) for c in res["asrc"]]
+    worst_name, worst_row, worst_base = None, None, None
+    for name, c in cases:
+        for base, r in zip(c["tones_base"], c["rows"]):
+            if r["inband_error_db"] > TRANSPARENCY_SPUR_DBFS:
+                failures.append(f"Resampler {name}, {base / 1000:g} kHz tone: in-band error {r['inband_error_db']:.1f} dB re input")
+            if worst_row is None or r["inband_error_db"] > worst_row["inband_error_db"]:
+                worst_name, worst_row, worst_base = name, r, base
+    text += f"""
+## Requirement (`Design.md` §8.6)
+
+The resampler runs ahead of every target, so it is held to the stricter anchor (24-bit transparency): for every tone of every
+case below, everything unwanted inside 20 Hz-20 kHz (images, aliases, errors; for an input above the output Nyquist also its
+alias when that lands in band) must be at most {TRANSPARENCY_SPUR_DBFS:.0f} dB re the input tone, i.e. {TRANSPARENCY_SPUR_DBFS:.0f} dBFS for a
+full-scale input; every bank's passband deviation (0-20 kHz) must be at most {FILTER_PASSBAND_DEV_DB} dB. The tones are measured at
+-6 dBFS; the figures scale with the input level (the resampler is linear), so they hold at 0 dBFS.
+
+Worst in-band error over {sum(len(c['rows']) for _, c in cases)} tones in {len(cases)} cases: **{worst_row['inband_error_db']:.1f} dB re input**
+({worst_name}, {worst_base / 1000:g} kHz tone; margin {TRANSPARENCY_SPUR_DBFS - worst_row['inband_error_db']:.1f} dB). Worst passband deviation:
+{max(e['passband_dev_db'] for e in res['banks']):.1e} dB.
 
 ---
 

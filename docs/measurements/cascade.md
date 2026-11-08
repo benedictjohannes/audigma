@@ -1,6 +1,6 @@
 # audigma — Cascade Measurements
 
-> **Generated:** `2026-11-08 11:38:43Z`  
+> **Generated:** `2026-11-08 12:06:57Z`  
 > **Evaluated on:** `AMD Ryzen AI 7 350 w/ Radeon 860M (x86_64)` running `CachyOS (Linux 7.3.1-1-cachyos)`  
 > **Rust compiler:** `rustc 1.98.0 (88d9e12ae 2026-08-18)`  
 > **Hardware FTZ/DAZ:** `Active (hardware-verified)`  
@@ -15,8 +15,8 @@ Half-band interpolation cascade as implemented (impulse response, tones) and cas
 
 Measured through `HalfBandCascade` (harness mode `cascade-impulse`): a unit impulse at the 44.1 kHz baseband rate, response
 FFT-ed with 512 baseband frames (zero padded x8). The cascade is linear and time-invariant from the baseband
-input, so this response describes it completely. No pass/fail thresholds are applied here; values are reported for audit
-step 5. "Image rejection" is the worst level inside the bands `k*44.1 kHz +- 20 kHz` (k = 1, 2, ...) that must be removed;
+input, so this response describes it completely. The requirement (`Design.md` §8.6: image rejection >= 120 dB, passband
+deviation <= 0.01 dB with apodization `off`) is checked in the index's compliance table. "Image rejection" is the worst level inside the bands `k*44.1 kHz +- 20 kHz` (k = 1, 2, ...) that must be removed;
 "droop" is the gain at that frequency relative to DC. Every filter is designed for >= 140 dB (`design_halfband.py`); apodization
 is `off` (half-band, stopband 24.1 kHz) or the pass edge of an apodizing stage 0 whose stopband is 22.05 kHz.
 
@@ -169,7 +169,8 @@ Agreement tolerance: 0.001 dB.
 
 ## End-to-End Cascade + Modulator Verification
 
-Test conditions: Baseband PCM 1 kHz coherent tone at -6.0 dBFS upsampled via `HalfBandCascade` (2^K interpolation; linear or minimum phase, apodization `off` or pass edge 20 kHz) directly into `Modulator`.
+Test conditions: Baseband PCM 1 kHz coherent tone at -6.0 dBFS through the production `DcBlocker` and `HalfBandCascade` (2^K interpolation; linear or minimum phase, apodization `off` or pass edge 20 kHz) directly into `Modulator`.
+Verdict = no overload and bounded states. The quality requirements (`Design.md` §8.6) are checked on the production chain (`signal.md`), which adds the gain staging, DC blocker and dither.
 
 ### 5th-Order Modulator Pipeline
 

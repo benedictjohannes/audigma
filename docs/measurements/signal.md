@@ -1,13 +1,13 @@
 # audigma — Signal Measurements
 
-> **Generated:** `2026-11-08 11:39:19Z`  
+> **Generated:** `2026-11-08 12:07:29Z`  
 > **Evaluated on:** `AMD Ryzen AI 7 350 w/ Radeon 860M (x86_64)` running `CachyOS (Linux 7.3.1-1-cachyos)`  
 > **Rust compiler:** `rustc 1.98.0 (88d9e12ae 2026-08-18)`  
 > **Hardware FTZ/DAZ:** `Active (hardware-verified)`  
 > **Harness:** `crates/audigma-measurements` (`measure_harness`), analysed by `tools/measure/measure_spectral.py`.  
 > **Index:** [report.md](report.md)
 
-Production DSD chain (gain L - M, cascade, dithered modulator): level sweep, dither, IMD, ultrasonic noise, rate families.
+Production DSD chain (gain L - M, DC blocker, cascade, dithered modulator): quality tiers, level sweep, dither, DC, IMD, ultrasonic noise, rate families.
 
 ---
 
@@ -33,6 +33,37 @@ Invariant checks: no overload at any stimulus (including 0 dBFS at `M = 0`, i.e.
 measured tone level (tones up to 10 kHz) within 0.01 dB of the requested PCM level (plus 3 sigma of the
 noise inside the tone lobe at the lowest levels; worst error over the checked records:
 0.0250 dB).
+Tones above 10 kHz (CCIF 19/20 kHz) are held to the chain flatness requirement instead (§8.6).
+
+### Quality requirements (`Design.md` §8.6)
+
+Two anchors. **Audibility:** with 0 dBFS at ~120 dB SPL peak, noise and every discrete product stay below the threshold of
+hearing: DR (A) >= 120 dB and every in-band spur <= -120 dBFS. **24-bit transparency:** the chain is not the
+bottleneck for 24-bit sources (TPDF-dithered 24-bit noise is -141.5 dBFS): in-band noise, harmonic and IMD levels and every spur
+<= -141 dBFS at every stimulus. Tier A (DSD64, both families) must meet audibility, tier B (DSD128 and above) both. Tones
+above 10 kHz must be within 0.02 dB (A) / 0.01 dB (B) of the requested level. Spurs are gated in absolute
+dBFS (a spur's audibility does not depend on the test tone, and silence and DC have no tone to refer to); THD and IMD are
+ratios and stay in dBc in the tables below. Worst values are over every production record (dither on, DC blocker on: the
+level sweep, silence, DC, SMPTE, CCIF); levels within 10 dB of the analysis floor count as that bound.
+
+| Order | Rate | Tier | DR (A) (dB) | Worst spur (dBFS) | Max noise (dBFS) | Max harmonic / IMD level (dBFS) | Max level error > 10 kHz (dB) | Verdict |
+|---:|---|:---:|---:|---:|---:|---:|---:|---|
+| 5 | `DSD64` | A | 118.4 | -130.2 | -116.3 | -117.2 | 0.0110 | **EXCEPTION** (DR (A) 118.4 dB < 120; documented) |
+| 5 | `DSD128` | B | 147.5 | -163.6 | -149.7 | -149.3 | 0.0027 | **PASS** |
+| 5 | `DSD256` | B | 175.6 | -195.0 | -182.4 | -176.1 | 0.0007 | **PASS** |
+| 5 | `DSD512` | B | 210.6 | -224.8 | -215.9 | -208.5 | 0.0002 | **PASS** |
+| 5 | `DSD64_48` | A | 122.4 | -134.7 | -120.2 | -120.2 | 0.0092 | **PASS** |
+| 5 | `DSD128_48` | B | 150.7 | -171.2 | -153.6 | -152.2 | 0.0023 | **PASS** |
+| 5 | `DSD256_48` | B | 179.9 | -204.8 | -186.9 | -179.9 | 0.0006 | **PASS** |
+| 5 | `DSD512_48` | B | 213.8 | -228.3 | -219.6 | -211.3 | 0.0001 | **PASS** |
+| 7 | `DSD64` | A | 137.3 | -156.6 | -134.7 | -139.0 | 0.0150 | **PASS** |
+| 7 | `DSD128` | B | 179.9 | -193.3 | -179.6 | -182.7 | 0.0038 | **PASS** |
+| 7 | `DSD256` | B | 221.9 | -235.6 | -224.8 | -222.5 | 0.0009 | **PASS** |
+| 7 | `DSD512` | B | 267.4 | -262.6 | -243.8 | -265.5 | 0.0002 | **PASS** |
+| 7 | `DSD64_48` | A | 142.5 | -161.5 | -140.2 | -144.1 | 0.0127 | **PASS** |
+| 7 | `DSD128_48` | B | 184.0 | -204.4 | -185.4 | -186.1 | 0.0032 | **PASS** |
+| 7 | `DSD256_48` | B | 226.1 | -243.5 | -230.2 | -226.6 | 0.0008 | **PASS** |
+| 7 | `DSD512_48` | B | 272.8 | -262.8 | -243.4 | -268.0 | 0.0002 | **PASS** |
 
 ### Summary per rate and order (dither on)
 

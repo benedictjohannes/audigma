@@ -1,6 +1,6 @@
 # audigma — Modulator Measurements
 
-> **Generated:** `2026-11-08 11:38:16Z`  
+> **Generated:** `2026-11-08 12:06:33Z`  
 > **Evaluated on:** `AMD Ryzen AI 7 350 w/ Radeon 860M (x86_64)` running `CachyOS (Linux 7.3.1-1-cachyos)`  
 > **Rust compiler:** `rustc 1.98.0 (88d9e12ae 2026-08-18)`  
 > **Hardware FTZ/DAZ:** `Active (hardware-verified)`  
@@ -30,6 +30,7 @@ CRFB modulators: direct-sine verification against the synthesis oracle, stabilit
 ## Direct Modulator Verification (Theoretical Oracle vs. Compiled Bitstream)
 
 Test conditions: Direct coherent 1 kHz sine at -6.0 dBFS (f_tone = k * f_bit / N), N = 1,048,576 samples (2^20), evaluating peak modulator dynamic range and noise-shaping NTF depth against the live mathematical oracle.
+Verdict = stable and bit-exact against the reference loop. Quality figures here are noise-shaper limits without dither or gain staging; the quality requirements (`Design.md` §8.6) are checked on the production chain (`signal.md`).
 
 ### 5th-Order CRFB Modulator
 

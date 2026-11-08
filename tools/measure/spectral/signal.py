@@ -8,7 +8,8 @@ Levels are relative to the PCM input's full scale (a 0 dBFS PCM sine reaches the
 Stimuli: a 1 kHz level sweep (0 dBFS at M = 0 and M = 0.25 down to -120 dBFS), digital silence and small DC offsets,
 the same low-level set without dither, two-tone IMD (SMPTE 60 Hz + 7 kHz 4:1, CCIF 19 + 20 kHz 1:1) at 0 dBFS peak, and the
 DC offsets once more with the DC blocker off (what the chain did before O7).
-No pass/fail thresholds on quality figures (audit step 5); only method/invariant checks fail the run.
+Quality requirements (`Design.md` §8.6) are checked per tier: A (DSD64) audibility, B (DSD128+) audibility and 24-bit
+transparency; DSD64 5th order (44.1k) is a documented exception for DR (A). Method/invariant checks also fail the run.
 """
 
 import os
@@ -19,7 +20,21 @@ import numpy as np
 from dsm_analysis import FLOOR_MARGIN_DB, analysis_floor_snr_db
 
 from .analysis import SPUR_LOCAL_BINS, analyze_components, spur_prominence_noise_db
-from .common import DIRECT_RATES, N_SAMPLES, ORDERS, TMP_DIR, Section, run_harness
+from .common import (
+    AUDIBILITY_DR_A_DB,
+    AUDIBILITY_SPUR_DBFS,
+    CHAIN_FLATNESS_DB,
+    DIRECT_RATES,
+    N_SAMPLES,
+    ORDERS,
+    TIER_EXCEPTIONS,
+    TMP_DIR,
+    TRANSPARENCY_NOISE_DBFS,
+    TRANSPARENCY_SPUR_DBFS,
+    Section,
+    quality_tier,
+    run_harness,
+)
 
 PRODUCTION_MARGIN_DB = 0.25
 SWEEP_DBFS = [0.0, -1.0, -3.0, -6.0, -10.0, -20.0, -40.0, -60.0, -80.0, -100.0, -120.0]
@@ -28,16 +43,16 @@ DC_DBFS = [-40.0, -80.0]
 # The DC blocker must leave at most this fraction of a DC offset (method check for O7; the blocker is settled for 30 time
 # constants, -261 dB, so anything left is the record's own low-frequency noise).
 DC_REMOVED_DB = 60.0
-# Measured tone level must match the requested one (method check: gain staging and cascade DC gain), within
-# LEVEL_TOL_DB plus the reading error the noise inside the tone lobe allows (3 sigma, amplitude). Checked for tones up to
-# LEVEL_CHECK_MAX_HZ only: near 20 kHz the modulator's signal transfer function itself deviates by ~0.01 dB at DSD64
-# (reported in the IMD table, not a staging error).
+# Measured tone level must match the requested one, within a tolerance plus the reading error the noise inside the tone
+# lobe allows (3 sigma, amplitude). Tones up to LEVEL_CHECK_MAX_HZ: LEVEL_TOL_DB (method check: gain staging, cascade
+# DC gain, DC blocker). Above it: the chain flatness requirement CHAIN_FLATNESS_DB of the rate's tier (the modulator's
+# signal transfer function lifts 19-20 kHz by up to +0.015 dB at DSD64).
 LEVEL_TOL_DB = 0.01
 LEVEL_CHECK_MAX_HZ = 10_000.0
 
 
-def _level_tolerance_db(lobe_snr_db):
-    return LEVEL_TOL_DB + 20 * np.log10(1 + 3 * 10 ** (-lobe_snr_db / 20))
+def _level_tolerance_db(lobe_snr_db, tol_db=LEVEL_TOL_DB):
+    return tol_db + 20 * np.log10(1 + 3 * 10 ** (-lobe_snr_db / 20))
 # Two-tone records are longer so the SMPTE 60 Hz sidebands are resolved at every rate (bin ~2.7-2.9 Hz).
 RATE_MULT = {"dsd64": 1, "dsd128": 2, "dsd256": 4, "dsd512": 8}
 
@@ -89,16 +104,20 @@ def _run_one(harness_bin, order, rate_str, sid, tones, margin, dither, long, dc_
                            [t["k_bin"] for t in meta["tones"] if t["f_hz"] > 0], ref_db=meta["gain_db"])
     expected = [t["level_dbfs"] for t in meta["tones"] if t["f_hz"] > 0]
     tone_hz = [t["f_hz"] for t in meta["tones"] if t["f_hz"] > 0]
+    flat_tol = CHAIN_FLATNESS_DB[quality_tier(rate_str)]
+    tols = [_level_tolerance_db(x, LEVEL_TOL_DB if f <= LEVEL_CHECK_MAX_HZ else flat_tol)
+            for f, x in zip(tone_hz, m["tone_lobe_snr_db"])]
+    devs = [a - b for a, b in zip(m["tone_levels_db"], expected)]
     return {
         "order": order, "rate": rate_str, "id": sid, "dither": dither, "margin": margin, "samples": n,
         "dc_blocker": meta["dc_blocker"],
         "gain_db": meta["gain_db"], "limit_dbfs": meta["limit_dbfs"],
         "overloads": meta["overload_count"] + meta["warmup_overloads"],
         "peak_state": max(meta["max_state"]),
-        "level_error_db": max((abs(a - b) for a, b in zip(m["tone_levels_db"], expected)), default=0.0),
-        "level_dev_db": [a - b for a, b in zip(m["tone_levels_db"], expected)],
-        "level_checked": all(f <= LEVEL_CHECK_MAX_HZ for f in tone_hz),
-        "level_tol_db": min((_level_tolerance_db(x) for x in m["tone_lobe_snr_db"]), default=LEVEL_TOL_DB),
+        "level_error_db": max((abs(d) for d in devs), default=0.0),
+        "level_dev_db": devs,
+        "level_tol_db": tols,
+        "tone_hz": tone_hz,
         **m,
     }
 
@@ -170,8 +189,9 @@ def render(sig):
     for r in rows.values():
         if r["overloads"]:
             failures.append(f"Signal: overload at order {r['order']} {r['rate']} {r['id']} ({r['dither']}, M={r['margin']:g})")
-        if r["level_checked"] and r["level_error_db"] > r["level_tol_db"]:
-            failures.append(f"Signal: level error {r['level_error_db']:.3f} dB (tolerance {r['level_tol_db']:.3f}) at order {r['order']} {r['rate']} {r['id']}")
+        for f, d, tol in zip(r["tone_hz"], r["level_dev_db"], r["level_tol_db"]):
+            if abs(d) > tol:
+                failures.append(f"Signal: level error {d:+.4f} dB at {f / 1e3:.2f} kHz (tolerance {tol:.4f}) at order {r['order']} {r['rate']} {r['id']}")
 
     text = f"""
 ---
@@ -197,8 +217,68 @@ Records: N = 2^20 bits (2^20 x 2/4/8 at DSD128/256/512 for the two-tone tests, s
 Invariant checks: no overload at any stimulus (including 0 dBFS at `M = 0`, i.e. a sine peak exactly at `L`), and every
 measured tone level (tones up to {LEVEL_CHECK_MAX_HZ / 1e3:g} kHz) within {LEVEL_TOL_DB} dB of the requested PCM level (plus 3 sigma of the
 noise inside the tone lobe at the lowest levels; worst error over the checked records:
-{max(r['level_error_db'] for r in rows.values() if r['level_checked']):.4f} dB).
+{max(abs(d) for r in rows.values() for f, d in zip(r['tone_hz'], r['level_dev_db']) if f <= LEVEL_CHECK_MAX_HZ):.4f} dB).
+Tones above {LEVEL_CHECK_MAX_HZ / 1e3:g} kHz (CCIF 19/20 kHz) are held to the chain flatness requirement instead (§8.6).
 """
+
+    def production(order, rate):
+        """The production records (dither on, DC blocker on) of one rate and order."""
+        return [r for r in rows.values() if r["order"] == order and r["rate"] == rate and r["dither"] == "tpdf" and r["dc_blocker"]]
+
+    def bounded(x, fl):
+        """A level as an upper bound: values within FLOOR_MARGIN_DB of the analysis floor count as the bound."""
+        return max(x, fl + FLOOR_MARGIN_DB)
+
+    text += f"""
+### Quality requirements (`Design.md` §8.6)
+
+Two anchors. **Audibility:** with 0 dBFS at ~120 dB SPL peak, noise and every discrete product stay below the threshold of
+hearing: DR (A) >= {AUDIBILITY_DR_A_DB:.0f} dB and every in-band spur <= {AUDIBILITY_SPUR_DBFS:.0f} dBFS. **24-bit transparency:** the chain is not the
+bottleneck for 24-bit sources (TPDF-dithered 24-bit noise is -141.5 dBFS): in-band noise, harmonic and IMD levels and every spur
+<= {TRANSPARENCY_NOISE_DBFS:.0f} dBFS at every stimulus. Tier A (DSD64, both families) must meet audibility, tier B (DSD128 and above) both. Tones
+above {LEVEL_CHECK_MAX_HZ / 1e3:g} kHz must be within {CHAIN_FLATNESS_DB['A']} dB (A) / {CHAIN_FLATNESS_DB['B']} dB (B) of the requested level. Spurs are gated in absolute
+dBFS (a spur's audibility does not depend on the test tone, and silence and DC have no tone to refer to); THD and IMD are
+ratios and stay in dBc in the tables below. Worst values are over every production record (dither on, DC blocker on: the
+level sweep, silence, DC, SMPTE, CCIF); levels within {FLOOR_MARGIN_DB:g} dB of the analysis floor count as that bound.
+
+| Order | Rate | Tier | DR (A) (dB) | Worst spur (dBFS) | Max noise (dBFS) | Max harmonic / IMD level (dBFS) | Max level error > {LEVEL_CHECK_MAX_HZ / 1e3:g} kHz (dB) | Verdict |
+|---:|---|:---:|---:|---:|---:|---:|---:|---|
+"""
+    for order in ORDERS:
+        for rate, _, _ in DIRECT_RATES:
+            tier, fl = quality_tier(rate), floors[(order, rate)]
+            recs = production(order, rate)
+            dr = -get(order, rate, "1k_-60")["thdn_a_db"]
+            dr_bounded = min(dr, -(fl + FLOOR_MARGIN_DB))
+            spur = max(r["spur_db"] for r in recs)
+            noise = max(bounded(r["noise_db"], fl) for r in recs)
+            dist = max(bounded(x, fl) for r in recs for x in (r.get("harm_db"), r.get("imd_level_db")) if x is not None)
+            hf = [abs(d) for r in recs for f, d in zip(r["tone_hz"], r["level_dev_db"]) if f > LEVEL_CHECK_MAX_HZ]
+            misses = []
+            if dr_bounded < AUDIBILITY_DR_A_DB:
+                misses.append(f"DR (A) {dr_bounded:.1f} dB < {AUDIBILITY_DR_A_DB:.0f}")
+            spur_limit = AUDIBILITY_SPUR_DBFS if tier == "A" else TRANSPARENCY_SPUR_DBFS
+            if spur > spur_limit:
+                misses.append(f"spur {spur:.1f} dBFS > {spur_limit:.0f}")
+            if tier == "B":
+                if noise > TRANSPARENCY_NOISE_DBFS:
+                    misses.append(f"noise {noise:.1f} dBFS > {TRANSPARENCY_NOISE_DBFS:.0f}")
+                if dist > TRANSPARENCY_NOISE_DBFS:
+                    misses.append(f"distortion {dist:.1f} dBFS > {TRANSPARENCY_NOISE_DBFS:.0f}")
+            exception = TIER_EXCEPTIONS.get((order, rate))
+            if not misses:
+                verdict = "**PASS**"
+            elif exception and all(x.startswith("DR (A)") for x in misses):
+                verdict = f"**EXCEPTION** ({misses[0]}; documented)"
+            else:
+                verdict = "**FAIL** (" + "; ".join(misses) + ")"
+                failures.append(f"Signal: quality requirement at order {order} {rate}: " + "; ".join(misses))
+            if exception and not (misses and verdict.startswith("**EXCEPTION")):
+                failures.append(f"Signal: exception {(order, rate)} no longer needed or does not apply; update TIER_EXCEPTIONS")
+            text += (
+                f"| {order} | `{rate.upper()}` | {tier} | {_fmt_ratio(0.0, -dr, fl)} | {spur:.1f} | {_fmt_level(noise, fl)} | "
+                f"{_fmt_level(dist, fl)} | {max(hf):.4f} | {verdict} |\n"
+            )
 
     text += """
 ### Summary per rate and order (dither on)

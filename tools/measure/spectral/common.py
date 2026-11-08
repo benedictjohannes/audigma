@@ -15,9 +15,27 @@ INDEX_PATH = REPORT_DIR / "report.md"
 # Add tools/design to sys.path so design scripts and dsm_analysis import directly.
 sys.path.insert(0, str(REPO_ROOT / "tools" / "design"))
 
-# Pass thresholds (in-band 20 Hz-20 kHz, -6 dBFS 1 kHz tone, no dither).
-MIN_INBAND_SNR_DB = 100.0
-MAX_SPUR_DBC = -100.0
+# Quality requirements (Design.md §8.6, DSP quality audit P5). Levels are in-band (20 Hz-20 kHz) dBFS re a full-scale sine.
+# Anchor 1, audibility: 0 dBFS at ~120 dB SPL peak, so noise and every discrete product stay below ~0 dB SPL.
+AUDIBILITY_DR_A_DB = 120.0
+AUDIBILITY_SPUR_DBFS = -120.0
+# Anchor 2, 24-bit transparency: a TPDF-dithered 24-bit quantizer's in-band noise is -141.5 dBFS.
+TRANSPARENCY_NOISE_DBFS = -141.0
+TRANSPARENCY_SPUR_DBFS = -141.0
+# Linear stages (cascade with apodization off, resampler): passband deviation 0-20 kHz.
+FILTER_PASSBAND_DEV_DB = 0.01
+# Production chain, tones above 10 kHz: the modulator's STF lifts 19-20 kHz at DSD64 (+0.011 / +0.015 dB, 5th / 7th).
+CHAIN_FLATNESS_DB = {"A": 0.02, "B": 0.01}
+# Interpolation images lie above 24.1 kHz (never in band): gated as if they were audible (anchor 1). The filters are
+# designed for 140 dB (FILTER_REJECTION_TARGET_DB); that is a design goal, not the requirement.
+IMAGE_REJECTION_MIN_DB = 120.0
+# Documented exception: DSD64 (44.1k family) with the 5th-order modulator misses DR (A) >= 120 dB by ~1.6 dB.
+TIER_EXCEPTIONS = {(5, "dsd64"): "DR (A) below the audibility anchor; documented exception (Design.md §8.6)"}
+
+
+def quality_tier(rate_str):
+    """'A' (DSD64, both families: audibility anchor) or 'B' (DSD128 and above: audibility + 24-bit transparency)."""
+    return "A" if rate_str.split("_")[0] == "dsd64" else "B"
 
 N_SAMPLES = 1_048_576
 ORDERS = [5, 7]

@@ -15,8 +15,9 @@ Writes one report per measurement family to docs/measurements/ plus an index (re
 - cascade.md: the half-band cascade as implemented (impulse response, tone cross-check, against design_halfband.py)
   and cascade + modulator end to end.
 - resampler.md: compiled SRC banks vs design_src.py, polyphase rational SRC and ASRC through PolyphaseResampler.
-- signal.md: the production DSD chain (gain L - M, cascade, dithered modulator) with signal-dependent stimuli:
-  level sweep, dither on/off, two-tone IMD, ultrasonic noise, 44.1k vs 48k family.
+- signal.md: the production DSD chain (gain L - M, DC blocker, cascade, dithered modulator) with signal-dependent stimuli:
+  level sweep, dither on/off, DC blocker on/off, two-tone IMD, ultrasonic noise, 44.1k vs 48k family; the quality tiers
+  (Design.md §8.6).
 - benchmark.md: CPU throughput and deadline budget. Part of a default run; it needs a quiet machine, so coordinate
   with the user (AGENTS.md) or pass --skip-benchmark (the report is then re-rendered from the last results kept in
   docs/measurements/benchmark.json).
@@ -127,9 +128,11 @@ def main():
         def worst_spur(case):
             return max(r["spur_dbc"] for b, r in zip(case["tones_base"], case["rows"]) if b <= 18000)
 
+        inband = max(r["inband_error_db"] for c in res["rational"] + res["rational_extra"] + res["asrc"] for r in c["rows"])
         headlines["resampler"] = (
             f"Worst spur on 1-18 kHz tones: 44.1k->48k {worst_spur(up):.0f} dBc, 48k->44.1k {worst_spur(down):.0f} dBc, "
-            f"ASRC at +50 ppm {worst_spur(drift):.0f} dBc"
+            f"ASRC at +50 ppm {worst_spur(drift):.0f} dBc; worst in-band error {inband:.1f} dB re input (requirement <= -141); "
+            f"{len(failures['resampler'])} failing check(s)"
         )
 
     if "signal" in families or full:
@@ -140,8 +143,9 @@ def main():
         r = sig["rows"]
         dr = {o: -r[(o, "dsd64", "1k_-60", "tpdf", signal.PRODUCTION_MARGIN_DB)]["thdn_a_db"] for o in (5, 7)}
         headlines["signal"] = (
-            f"Production chain: DSD64 DR (A) {dr[5]:.0f} dB (5th) / {dr[7]:.0f} dB (7th); "
-            f"{len(failures['signal'])} failing check(s)"
+            f"Production chain: DSD64 DR (A) {dr[5]:.0f} dB (5th) / {dr[7]:.0f} dB (7th); quality tiers (§8.6) "
+            f"{'met' if not any('quality requirement' in f for f in failures['signal']) else 'NOT met'}, documented exception "
+            f"DSD64 5th order (DR (A)); {len(failures['signal'])} failing check(s)"
         )
 
     bench_results, bench_stats = bench.load()

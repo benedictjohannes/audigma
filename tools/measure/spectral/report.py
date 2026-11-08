@@ -8,7 +8,7 @@ FAMILIES = {
     "modulator": ("Modulator", "CRFB modulators: direct-sine verification against the synthesis oracle, stability envelope."),
     "cascade": ("Cascade", "Half-band interpolation cascade as implemented (impulse response, tones) and cascade + modulator end to end."),
     "resampler": ("Resampler", "Polyphase rational SRC (44.1k <-> 48k families) and ASRC (clock-drift tracking)."),
-    "signal": ("Signal", "Production DSD chain (gain L - M, cascade, dithered modulator): level sweep, dither, IMD, ultrasonic noise, rate families."),
+    "signal": ("Signal", "Production DSD chain (gain L - M, DC blocker, cascade, dithered modulator): quality tiers, level sweep, dither, DC, IMD, ultrasonic noise, rate families."),
     "benchmark": ("Benchmark", "CPU throughput and real-time deadline budget (pinned like a runtime DSP worker)."),
 }
 

@@ -5,8 +5,6 @@ from dsm_analysis import analysis_floor_snr_db
 from .analysis import analyze_bitstream, bitexact_mismatches, fmt_snr, floor_limited
 from .common import (
     DIRECT_RATES,
-    MAX_SPUR_DBC,
-    MIN_INBAND_SNR_DB,
     N_SAMPLES,
     ORDERS,
     Section,
@@ -74,6 +72,7 @@ def render(direct_results):
 ## 2. Direct Modulator Verification (Theoretical Oracle vs. Compiled Bitstream)
 
 Test conditions: Direct coherent 1 kHz sine at -6.0 dBFS (f_tone = k * f_bit / N), N = 1,048,576 samples (2^20), evaluating peak modulator dynamic range and noise-shaping NTF depth against the live mathematical oracle.
+Verdict = stable and bit-exact against the reference loop. Quality figures here are noise-shaper limits without dither or gain staging; the quality requirements (`Design.md` §8.6) are checked on the production chain (`signal.md`).
 """
 
     for order in ORDERS:
@@ -91,9 +90,6 @@ Test conditions: Direct coherent 1 kHz sine at -6.0 dBFS (f_tone = k * f_bit / N
             elif r["bitexact_mismatches"] != 0:
                 verdict = "**FAIL (Not bit-exact)**"
                 failed_checks.append(f"Direct Order {order} {r['rate']} differs from the reference loop")
-            elif r["snr_db"] < MIN_INBAND_SNR_DB or r["spur_dbc"] > MAX_SPUR_DBC:
-                verdict = "**FAIL (Quality)**"
-                failed_checks.append(f"Direct Order {order} {r['rate']} SNR/spur")
             else:
                 verdict = "**PASS**"
 

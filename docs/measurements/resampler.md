@@ -1,6 +1,6 @@
 # audigma — Resampler Measurements
 
-> **Generated:** `2026-11-08 11:38:48Z`  
+> **Generated:** `2026-11-08 12:07:02Z`  
 > **Evaluated on:** `AMD Ryzen AI 7 350 w/ Radeon 860M (x86_64)` running `CachyOS (Linux 7.3.1-1-cachyos)`  
 > **Rust compiler:** `rustc 1.98.0 (88d9e12ae 2026-08-18)`  
 > **Hardware FTZ/DAZ:** `Active (hardware-verified)`  
@@ -30,6 +30,18 @@ from the rows (`h[i*phases + p] = row_p[i]`). Gains are relative to DC at the st
 
 The frequencies are those of a 44.1 kHz-family lower rate scaled to the actual one (e.g. 20 kHz at 44.1 kHz is 21.77 kHz at 48 kHz).
 
+## Requirement (`Design.md` §8.6)
+
+The resampler runs ahead of every target, so it is held to the stricter anchor (24-bit transparency): for every tone of every
+case below, everything unwanted inside 20 Hz-20 kHz (images, aliases, errors; for an input above the output Nyquist also its
+alias when that lands in band) must be at most -141 dB re the input tone, i.e. -141 dBFS for a
+full-scale input; every bank's passband deviation (0-20 kHz) must be at most 0.01 dB. The tones are measured at
+-6 dBFS; the figures scale with the input level (the resampler is linear), so they hold at 0 dBFS.
+
+Worst in-band error over 146 tones in 22 cases: **-141.4 dB re input**
+(asrc 44.1k -> 44.1k +500 ppm, 20 kHz tone; margin 0.4 dB). Worst passband deviation:
+9.0e-07 dB.
+
 ---
 
 ## Rational SRC (44.1 kHz family <-> 48 kHz family)
@@ -45,63 +57,63 @@ phase accumulator, one bank row per phase), so there is no phase quantisation.
 
 ### 44.1k -> 48k (1x): input/output ratio 0.918750, 160 exact phases, 110 taps
 
-| Input tone | Gain (dB) | Worst spur (dBc) | Spur frequency (kHz) | Total residual (dBc) | Residual 20 Hz-20 kHz (dBc) |
-|---:|---:|---:|---:|---:|---:|
-| 1 kHz | -0.0000 | -160.5 | 4.90 | -160.3 | -160.3 |
-| 10 kHz | -0.0000 | -159.5 | 13.90 | -157.5 | -157.6 |
-| 18 kHz | 0.0000 | -146.2 | 21.90 | -146.1 | -163.3 |
-| 20 kHz | -0.0000 | -141.4 | 23.90 | -141.4 | -170.9 |
-| 21 kHz | -0.1083 | -38.0 | 23.10 | -38.0 | -170.1 |
+| Input tone | Gain (dB) | Worst spur (dBc) | Spur frequency (kHz) | Total residual (dBc) | Residual 20 Hz-20 kHz (dBc) | In-band error (dB re input) |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 kHz | -0.0000 | -160.5 | 4.90 | -160.3 | -160.3 | -160.3 |
+| 10 kHz | -0.0000 | -159.5 | 13.90 | -157.5 | -157.6 | -157.6 |
+| 18 kHz | 0.0000 | -146.2 | 21.90 | -146.1 | -163.3 | -163.3 |
+| 20 kHz | -0.0000 | -141.4 | 23.90 | -141.4 | -170.9 | -170.9 |
+| 21 kHz | -0.1083 | -38.0 | 23.10 | -38.0 | -170.1 | -170.2 |
 
 ### 48k -> 44.1k (1x): input/output ratio 1.088435, 147 exact phases, 120 taps
 
-| Input tone | Gain (dB) | Worst spur (dBc) | Spur frequency (kHz) | Total residual (dBc) | Residual 20 Hz-20 kHz (dBc) |
-|---:|---:|---:|---:|---:|---:|
-| 1 kHz | -0.0000 | -161.0 | 2.90 | -159.4 | -159.4 |
-| 10 kHz | -0.0000 | -169.2 | 13.90 | -166.2 | -166.3 |
-| 18 kHz | 0.0000 | -156.7 | 14.10 | -156.4 | -156.6 |
-| 20 kHz | -0.0000 | -148.8 | 16.10 | -148.8 | -148.8 |
-| 21 kHz | -0.1067 | -169.3 | 13.20 | -166.2 | -166.2 |
-| 22 kHz | -5.3383 | -143.5 | 18.10 | -143.5 | -143.5 |
-| 23 kHz | -33.2165 | -113.3 | 19.10 | -113.3 | -113.3 |
-| 23.5 kHz | -66.2206 | -75.9 | 19.60 | -75.9 | -75.9 |
-| 24.5 kHz | -142.1261 | 75.9 | 20.60 | 75.9 | -25.9 |
-| 26 kHz | -148.8902 | 143.6 | 22.00 | 143.6 | -22.1 |
+| Input tone | Gain (dB) | Worst spur (dBc) | Spur frequency (kHz) | Total residual (dBc) | Residual 20 Hz-20 kHz (dBc) | In-band error (dB re input) |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 kHz | -0.0000 | -161.0 | 2.90 | -159.4 | -159.4 | -159.4 |
+| 10 kHz | -0.0000 | -169.2 | 13.90 | -166.2 | -166.3 | -166.3 |
+| 18 kHz | 0.0000 | -156.7 | 14.10 | -156.4 | -156.6 | -156.6 |
+| 20 kHz | -0.0000 | -148.8 | 16.10 | -148.8 | -148.8 | -148.8 |
+| 21 kHz | -0.1067 | -169.3 | 13.20 | -166.2 | -166.2 | -166.3 |
+| 22 kHz | -5.3383 | -143.5 | 18.10 | -143.5 | -143.5 | -148.9 |
+| 23 kHz | -33.2165 | -113.3 | 19.10 | -113.3 | -113.3 | -146.5 |
+| 23.5 kHz | -66.2206 | -75.9 | 19.60 | -75.9 | -75.9 | -142.1 |
+| 24.5 kHz | -142.1261 | 75.9 | 20.60 | 75.9 | -25.9 | -142.1 |
+| 26 kHz | -148.8902 | 143.6 | 22.00 | 143.6 | -22.1 | -148.9 |
 
 ### 96k -> 44.1k: input/output ratio 2.176871, 147 exact phases, 240 taps
 
 Reached when a PCM target is below the input's matched tier (e.g. 96 kHz input, 44.1 kHz PCM output).
 
-| Input tone | Gain (dB) | Worst spur (dBc) | Spur frequency (kHz) | Total residual (dBc) | Residual 20 Hz-20 kHz (dBc) |
-|---:|---:|---:|---:|---:|---:|
-| 1 kHz | -0.0000 | -171.7 | 6.80 | -169.3 | -169.4 |
-| 10 kHz | -0.0000 | -176.9 | 2.20 | -174.3 | -174.4 |
-| 18 kHz | 0.0000 | -176.0 | 10.20 | -174.0 | -174.0 |
-| 20 kHz | -0.0000 | -189.0 | 12.20 | -187.8 | -187.8 |
-| 21 kHz | -0.1067 | -169.2 | 13.20 | -167.8 | -167.9 |
-| 22 kHz | -5.3383 | -171.8 | 14.20 | -170.3 | -170.3 |
-| 23 kHz | -33.2165 | -137.5 | 15.20 | -135.3 | -135.3 |
-| 23.5 kHz | -66.2206 | -104.7 | 15.70 | -103.5 | -103.6 |
-| 24.5 kHz | -142.1262 | -35.3 | 16.70 | -30.7 | -30.8 |
-| 26 kHz | -148.6435 | -30.2 | 18.20 | -29.4 | -29.4 |
-| 30 kHz | -155.6057 | -22.3 | 21.90 | -21.8 | -30.8 |
-| 40 kHz | -176.9201 | 1.2 | 11.90 | 1.6 | 1.6 |
+| Input tone | Gain (dB) | Worst spur (dBc) | Spur frequency (kHz) | Total residual (dBc) | Residual 20 Hz-20 kHz (dBc) | In-band error (dB re input) |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 kHz | -0.0000 | -171.7 | 6.80 | -169.3 | -169.4 | -169.4 |
+| 10 kHz | -0.0000 | -176.9 | 2.20 | -174.3 | -174.4 | -174.4 |
+| 18 kHz | 0.0000 | -176.0 | 10.20 | -174.0 | -174.0 | -174.0 |
+| 20 kHz | -0.0000 | -189.0 | 12.20 | -187.8 | -187.8 | -187.8 |
+| 21 kHz | -0.1067 | -169.2 | 13.20 | -167.8 | -167.9 | -168.0 |
+| 22 kHz | -5.3383 | -171.8 | 14.20 | -170.3 | -170.3 | -175.7 |
+| 23 kHz | -33.2165 | -137.5 | 15.20 | -135.3 | -135.3 | -168.6 |
+| 23.5 kHz | -66.2206 | -104.7 | 15.70 | -103.5 | -103.6 | -169.8 |
+| 24.5 kHz | -142.1262 | -35.3 | 16.70 | -30.7 | -30.8 | -142.1 |
+| 26 kHz | -148.6435 | -30.2 | 18.20 | -29.4 | -29.4 | -148.6 |
+| 30 kHz | -155.6057 | -22.3 | 21.90 | -21.8 | -30.8 | -155.6 |
+| 40 kHz | -176.9201 | 1.2 | 11.90 | 1.6 | 1.6 | -173.1 |
 
 ### 88.2k -> 48k: input/output ratio 1.837500, 80 exact phases, 204 taps
 
 Reached when a PCM target is below the input's matched tier (e.g. 96 kHz input, 44.1 kHz PCM output).
 
-| Input tone | Gain (dB) | Worst spur (dBc) | Spur frequency (kHz) | Total residual (dBc) | Residual 20 Hz-20 kHz (dBc) |
-|---:|---:|---:|---:|---:|---:|
-| 1 kHz | -0.0000 | -166.5 | 6.80 | -162.3 | -162.6 |
-| 10 kHz | -0.0000 | -166.6 | 17.80 | -165.6 | -166.0 |
-| 18 kHz | 0.0000 | -164.1 | 22.20 | -161.2 | -164.6 |
-| 20 kHz | -0.0000 | -165.5 | 20.20 | -162.3 | -165.4 |
-| 21 kHz | 0.0000 | -165.3 | 19.20 | -160.7 | -160.8 |
-| 24.5 kHz | -15.3884 | -150.6 | 15.70 | -146.5 | -146.6 |
-| 26 kHz | -152.3280 | -12.8 | 14.20 | -11.9 | -11.9 |
-| 30 kHz | -150.0234 | -10.8 | 10.20 | -9.1 | -9.6 |
-| 40 kHz | -158.5640 | -1.6 | 0.20 | 0.1 | -0.2 |
+| Input tone | Gain (dB) | Worst spur (dBc) | Spur frequency (kHz) | Total residual (dBc) | Residual 20 Hz-20 kHz (dBc) | In-band error (dB re input) |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 kHz | -0.0000 | -166.5 | 6.80 | -162.3 | -162.6 | -162.6 |
+| 10 kHz | -0.0000 | -166.6 | 17.80 | -165.6 | -166.0 | -166.0 |
+| 18 kHz | 0.0000 | -164.1 | 22.20 | -161.2 | -164.6 | -164.6 |
+| 20 kHz | -0.0000 | -165.5 | 20.20 | -162.3 | -165.4 | -165.4 |
+| 21 kHz | 0.0000 | -165.3 | 19.20 | -160.7 | -160.8 | -160.8 |
+| 24.5 kHz | -15.3884 | -150.6 | 15.70 | -146.5 | -146.6 | -162.0 |
+| 26 kHz | -152.3280 | -12.8 | 14.20 | -11.9 | -11.9 | -164.3 |
+| 30 kHz | -150.0234 | -10.8 | 10.20 | -9.1 | -9.6 | -149.6 |
+| 40 kHz | -158.5640 | -1.6 | 0.20 | 0.1 | -0.2 | -155.6 |
 
 ### Summary across rate tiers
 
@@ -151,10 +163,10 @@ below the prototype's own stopband, so the measured spurs are set by the prototy
 
 ### Tone detail, 44.1 kHz -> 44.1 kHz at +50 ppm
 
-| Input tone | Gain (dB) | Worst spur (dBc) | Spur frequency (kHz) | Total residual (dBc) | Residual 20 Hz-20 kHz (dBc) |
-|---:|---:|---:|---:|---:|---:|
-| 1 kHz | -0.0000 | -160.5 | 1.00 | -160.4 | -160.4 |
-| 10 kHz | -0.0000 | -159.3 | 10.00 | -157.5 | -157.5 |
-| 18 kHz | 0.0000 | -146.2 | 18.00 | -146.1 | -146.1 |
-| 20 kHz | -0.0000 | -141.4 | 20.00 | -141.4 | -141.4 |
-| 21 kHz | -0.1082 | -38.0 | 21.00 | -38.0 | -211.2 |
+| Input tone | Gain (dB) | Worst spur (dBc) | Spur frequency (kHz) | Total residual (dBc) | Residual 20 Hz-20 kHz (dBc) | In-band error (dB re input) |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 kHz | -0.0000 | -160.5 | 1.00 | -160.4 | -160.4 | -160.4 |
+| 10 kHz | -0.0000 | -159.3 | 10.00 | -157.5 | -157.5 | -157.5 |
+| 18 kHz | 0.0000 | -146.2 | 18.00 | -146.1 | -146.1 | -146.1 |
+| 20 kHz | -0.0000 | -141.4 | 20.00 | -141.4 | -141.4 | -141.4 |
+| 21 kHz | -0.1082 | -38.0 | 21.00 | -38.0 | -211.2 | -211.3 |

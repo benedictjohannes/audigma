@@ -1,8 +1,9 @@
 """Invariant compliance table and conclusion (tail of the index report)."""
 
-from .common import ORDERS, Section
+from .common import FILTER_PASSBAND_DEV_DB, IMAGE_REJECTION_MIN_DB, ORDERS, Section
 
-# Design.md section 4.2: every interpolation filter is designed for >= 140 dB image rejection.
+# Design.md section 4.2: every interpolation filter is designed for >= 140 dB image rejection (design goal). The requirement
+# (section 8.6) is IMAGE_REJECTION_MIN_DB, plus FILTER_PASSBAND_DEV_DB with apodization off.
 REJECTION_GOAL_DB = 140.0
 
 
@@ -11,7 +12,7 @@ def filter_goal(cascade_filters_res):
     impulse = cascade_filters_res["impulse"]
     rej = min(m["worst_image_db"] for m in impulse.values())
     ripple_off = max(m["ripple_db"] for key, m in impulse.items() if key[1] == "off")
-    return rej, ripple_off, rej >= REJECTION_GOAL_DB
+    return rej, ripple_off, rej >= IMAGE_REJECTION_MIN_DB and ripple_off <= FILTER_PASSBAND_DEV_DB
 
 
 def render(env_info, direct_results, stability_results, bench_stats, cascade_filters_res, failed_so_far, stability_ok):
@@ -33,11 +34,11 @@ def render(env_info, direct_results, stability_results, bench_stats, cascade_fil
     # Half-band cascade against the Design.md section 4.2 goal, measured on the implemented cascade.
     rej, ripple_off, filters_ok = filter_goal(cascade_filters_res)
     rej_str = (
-        f"{rej:.1f} dB worst over all phases, apodizations and K (goal >= {REJECTION_GOAL_DB:.0f} dB); "
-        f"passband deviation with `off` {ripple_off:.1e} dB (fixed by the rejection, no separate goal)"
+        f"{rej:.1f} dB worst over all phases, apodizations and K (requirement >= {IMAGE_REJECTION_MIN_DB:.0f} dB, design goal "
+        f">= {REJECTION_GOAL_DB:.0f} dB); passband deviation with `off` {ripple_off:.1e} dB (requirement <= {FILTER_PASSBAND_DEV_DB} dB)"
     )
     if not filters_ok:
-        failed_checks.append("Cascade image rejection goal (Design.md section 4.2)")
+        failed_checks.append("Cascade image rejection / passband requirement (Design.md section 8.6)")
 
     stability_compliant = stability_ok
 
@@ -54,7 +55,7 @@ def render(env_info, direct_results, stability_results, bench_stats, cascade_fil
 
     rows = [
         ("Baseband OSR Calculation", "`Design.md §4.1`", osr_val_str, osr_compliant),
-        ("Cascade Image Rejection (implemented, all settings, all K)", "`Design.md §4.2`", rej_str, filters_ok),
+        ("Cascade Image Rejection & Passband (implemented, all settings, all K)", "`Design.md §4.2`, `§8.6`", rej_str, filters_ok),
         ("Modulator Stability Envelope", "`Design.md §4.3`", "Bounded states across silence, DC (+0.5), multitone, step overload recovery", stability_compliant),
         ("DSD Silence Byte Invariant", "`Design.md §1.3`", silence_val_str, silence_byte_compliant),
         ("Hardware FTZ/DAZ", "`Design.md §4.1`", env_info["ftz_daz_status"], env_info["ftz_daz_active"] is True),
@@ -86,7 +87,8 @@ def render(env_info, direct_results, stability_results, bench_stats, cascade_fil
     if failed_checks:
         text += f"{len(failed_checks)} non-compliant check(s):\n" + "\n".join(f"- {c}" for c in failed_checks) + "\n\n"
     text += (
-        "Filter-cascade and resampler *quality* (flatness, image/alias levels, ASRC spurs) is reported in [cascade.md](cascade.md) and "
-        "[resampler.md](resampler.md) without thresholds; whether it is good enough is decided in audit step 5.\n"
+        "Quality requirements (`Design.md` §8.6: audibility for DSD64, plus 24-bit transparency for DSD128 and above and for the "
+        "resampler) are checked in [signal.md](signal.md), [resampler.md](resampler.md) and the cascade row above; a miss is listed "
+        "as a non-compliant check.\n"
     )
     return text, failed_checks
