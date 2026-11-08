@@ -1,4 +1,4 @@
-//! ALSA Hardware UAC2 mixer interface (`Design.md §1.8`, `Phase 5 Step 5.5`).
+//! ALSA Hardware UAC2 mixer interface (`Design.md §1.8`).
 //!
 //! Provides hardware-level volume attenuation and mute control on ALSA endpoints
 //! (e.g. UAC2 DACs like JadeAudio JA11). Probes candidate controls in priority order

@@ -1,4 +1,4 @@
-//! ALSA audio interface modules (`Design.md §2`, `§7`, `Plan.md Phase 3`).
+//! ALSA audio interface modules (`Design.md §2`, `§7`).
 
 pub mod mixer;
 pub mod output;

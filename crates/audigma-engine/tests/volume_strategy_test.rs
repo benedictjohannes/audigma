@@ -1,4 +1,4 @@
-//! Integration tests for Unified Volume Strategy & Hardware Mixer Bridge (`Design.md §1.8`, `Phase 5 Step 5.5`).
+//! Integration tests for Unified Volume Strategy & Hardware Mixer Bridge (`Design.md §1.8`).
 
 use audigma_dsp::rates::PcmRateHz;
 use audigma_engine::live_pipeline::{

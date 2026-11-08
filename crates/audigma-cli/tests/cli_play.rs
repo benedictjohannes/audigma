@@ -1,4 +1,4 @@
-//! Integration tests for `audigma play` CLI command (`Design.md §7`, `Plan.md Phase 3`).
+//! Integration tests for `audigma play` CLI command (`Design.md §7`).
 
 use std::process::Command;
 

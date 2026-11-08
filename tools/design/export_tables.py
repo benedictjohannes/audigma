@@ -8,7 +8,7 @@
 # ///
 """Export verified FIR filter and CRFB modulator coefficient tables to audigma-dsp.
 
-Maps to Design.md §4.2, §4.3, and Plan.md Phase 1.
+Maps to Design.md §4.2 and §4.3.
 Generates `crates/audigma-dsp/src/tables.rs`.
 """
 

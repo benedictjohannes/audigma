@@ -159,6 +159,7 @@ decode / unpack / DSD decimation
     - `4` $\to$ `[ "FL", "FR", "RL", "RR" ]`
     - `6` $\to$ `[ "FL", "FR", "FC", "LFE", "RL", "RR" ]` (5.1 surround)
     - `8` $\to$ `[ "FL", "FR", "FC", "LFE", "RL", "RR", "SL", "SR" ]` (7.1 surround)
+  - **Offline file input topology:** WAV/FLAC decoding conditions input to stereo in floating-point PCM before any gain or resampling: mono is duplicated to both channels at unity gain, stereo passes through, and more than two channels are folded down per ITU-R BS.775.
   - Both PipeWire adapter node properties (`audio.channels`, `audio.position`) and SPA `AudioInfoRaw` channel arrays are constructed dynamically from the resolved `channel_positions`.
 
 - **Persistent Real-Time Channel Worker Pool (`[runtime] dsp_threads`):**

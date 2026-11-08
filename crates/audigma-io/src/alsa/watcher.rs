@@ -1,4 +1,4 @@
-//! Linux ALSA soundcard event watcher using inotify on `/dev/snd` (`Design.md §1.6`, `Plan.md Step 5.2`).
+//! Linux ALSA soundcard event watcher using inotify on `/dev/snd` (`Design.md §1.6`).
 //!
 //! Provides zero-polling, push-driven event detection for hotplugged sound cards.
 //! Monitors `/dev/snd` node creation (`IN_CREATE`, `IN_ATTRIB`) and matches against

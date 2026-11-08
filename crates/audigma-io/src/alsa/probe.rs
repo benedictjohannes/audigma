@@ -1,4 +1,4 @@
-//! ALSA hardware capability probing and device discovery (`Design.md §7`, `Plan.md Phase 3`).
+//! ALSA hardware capability probing and device discovery (`Design.md §7`).
 //!
 //! Provides device enumeration, hardware parameter testing (`snd_pcm_hw_params_test_*`),
 //! procfs stream descriptor inspection (`/proc/asound`), and detection of Native DSD

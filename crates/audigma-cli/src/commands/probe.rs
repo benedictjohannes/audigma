@@ -38,13 +38,13 @@ pub fn run_probe(args: ProbeArgs) -> Result<(), CliError> {
                     "{}",
                     serde_json::to_string_pretty(&json!({
                         "backend": "pipewire",
-                        "status": "planned for Phase 4 (PipeWire Virtual Sink & Graph Clock Bridge)",
+                        "status": "not yet implemented",
                         "note": "Use 'audigma probe --backend alsa' to inspect direct ALSA DAC hardware."
                     }))
                     .unwrap()
                 );
             } else {
-                println!("audigma probe: PipeWire backend probing is scheduled for Phase 4.");
+                println!("audigma probe: PipeWire backend probing is not yet implemented.");
                 println!(
                     "Use 'audigma probe --backend alsa' to probe direct hardware ALSA devices."
                 );

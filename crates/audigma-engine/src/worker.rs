@@ -1,4 +1,4 @@
-//! Persistent real-time multi-channel worker pool (`Design.md §1.2`, Phase 5 Step 5.3).
+//! Persistent real-time multi-channel worker pool (`Design.md §1.2`).
 //!
 //! Provides:
 //! - Dedicated persistent worker threads (1 thread per channel) spawned upon pipeline preparation.

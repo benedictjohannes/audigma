@@ -2,7 +2,7 @@
 //!
 //! `PRESET_BALANCED`, `PRESET_REFERENCE`, and `PRESET_LOW_LATENCY` define the quality targets,
 //! modulator stability limits (`L dBFS`), required profile headroom, and stage metadata.
-//! In Phase 1, `tools/design/` populates the full synthesized FIR tap arrays and 5th-order CRFB NTF state vectors.
+//! `tools/design/` populates the full synthesized FIR tap arrays and 5th-order CRFB NTF state vectors.
 
 use crate::config::{
     Apodization, DitherType, DspConfiguration, FilterPhase, FilterPreset, OverloadPolicy,

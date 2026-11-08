@@ -1,4 +1,4 @@
-//! ALSA audio output driver (`Design.md §1.4`, `§3.3`, `§4.5`, `§5.1–§5.2`, `Plan.md Phase 3`).
+//! ALSA audio output driver (`Design.md §1.4`, `§3.3`, `§4.5`, `§5.1–§5.2`).
 //!
 //! Provides direct exclusive ALSA hardware egress supporting:
 //! - Native DSD (`DSD_U32_BE` / `DSD_U32_LE`)

@@ -1,6 +1,6 @@
 # FiiO K17 — Reference DAC Hardware Profile
 
-> **Workspace Reference:** Referenced by [`Plan.md`](../../Plan.md) and [`Design.md`](../../Design.md).
+> **Workspace Reference:** Referenced by [`Design.md`](../../Design.md).
 
 ## 1. Device Identification
 - **Vendor / Model:** FiiO K17 Desktop DAC & Headphone Amplifier
@@ -24,5 +24,5 @@
   - **DoP Support:** Supports DoP64 (`176.4 kHz`), DoP128 (`352.8 kHz`), and DoP256 (`705.6 kHz`) encapsulated in `S32_LE` (`s32le` MSB-justified `[0x00, LO, HI, MM]`).
 
 ## 3. Operational Notes & Invariants
-- Often actively used by `mpd` or PipeWire/WirePlumber on the host desktop; never assume exclusive ALSA availability without consulting the user first (`Plan.md §1 Rule 5`).
+- Often actively used by `mpd` or PipeWire/WirePlumber on the host desktop; never assume exclusive ALSA availability without consulting the user first (see `AGENTS.md`).
 - Supports dynamic D-Bus device reservation (`org.freedesktop.ReserveDevice1`) when WirePlumber manages the session.

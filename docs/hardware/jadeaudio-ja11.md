@@ -1,6 +1,6 @@
 # JadeAudio JA11 — Reference DAC Hardware Profile
 
-> **Workspace Reference:** Referenced by [`Plan.md`](../../Plan.md) and [`Design.md`](../../Design.md).
+> **Workspace Reference:** Referenced by [`Design.md`](../../Design.md).
 
 ## 1. Device Identification
 - **Vendor / Model:** JadeAudio (FiiO) JA11 USB-C Dongle DAC

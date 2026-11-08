@@ -1,4 +1,4 @@
-//! Integration tests for output device resilience and hotplug lifecycle transitions (`Plan.md Step 5.2`).
+//! Integration tests for output device resilience and hotplug lifecycle transitions.
 
 use audigma_dsp::rates::PcmRateHz;
 use audigma_engine::live_pipeline::{
