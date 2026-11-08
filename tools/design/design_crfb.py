@@ -4,6 +4,7 @@
 # dependencies = [
 #     "numpy",
 #     "scipy",
+#     "numba",
 # ]
 # ///
 """5th-Order and 7th-Order CRFB Delta-Sigma Modulator NTF synthesis & coefficient generator for audigma-dsp (Design.md §4.3).
@@ -18,8 +19,8 @@ Synthesizes:
   tuned to target out-of-band gain H_inf (typically ~1.40).
 - Canonical CRFB (Cascade of Resonators with Feedback) state-space realization
   via dual pole placement.
-- Rigorous stability verification across tone amplitudes to confirm maximum stable
-  input amplitude L (dBFS) and default headroom M (dB).
+- Maximum stable input amplitude L (dBFS) from a DC + tone level sweep (`measure_msa_dbfs`),
+  exported per rate and order; the headroom inequality adds the safety margin M.
 """
 
 import numpy as np
@@ -32,9 +33,100 @@ from dsm_analysis import analyze_record, simulate_crfb
 B_AUDIO_HZ = 20000.0
 
 
-def synthesize_crfb(f_bit_hz, order=5, H_inf=1.40, name="DSD"):
+def optimal_zero_ratios(order):
+    """Positive NTF zero frequencies (as fractions of the band edge) minimising in-band noise.
+
+    For NTF zeros on the unit circle and a high OSR, the integrated in-band noise
+    int_0^1 prod (x^2 - r_i^2)^2 dx is minimised by the roots of the Legendre polynomial
+    P_order (Schreier, "Understanding Delta-Sigma Data Converters", sec. 4.3; `ds_optzeros`).
+    Odd orders also have the root at 0 (the DC zero), which is not returned.
+    """
+    roots = np.polynomial.legendre.legroots([0.0] * order + [1.0])
+    return sorted(float(r) for r in np.real(roots) if r > 1e-9)
+
+
+# Maximum-stable-amplitude sweep (Design.md §4.3-§4.4). DC is the hardest case, high tones the easiest.
+MSA_STIMULI_HZ = (0.0, 50.0, 1000.0, 5000.0, 10000.0, 15000.0, 20000.0)
+MSA_SAMPLES = 1 << 21
+MSA_STEP_DB = 0.25
+MSA_START_DBFS = -6.0
+# Production dithers the quantizer (TPDF, peak 0.005: `modulator::TpdfDither::default`). Near the edge, stability
+# depends on the exact trajectory, so every level must hold without dither and with these dither seeds.
+MSA_DITHER_PEAK = 0.005
+MSA_DITHER_SEEDS = (1, 2)
+# Guard band below the last level that held in every trial. At the edge itself stability is statistical (a
+# trajectory with other dither can still diverge), so L is placed one grid step lower, where the production
+# modulator holds reliably (checked in the modulator report, "Input limit L").
+MSA_GUARD_DB = MSA_STEP_DB
+# Same divergence bound as the Rust overload guard (`modulator::STABILITY_THRESHOLD`).
+MSA_STATE_BOUND = 50.0
+
+
+def _msa_kernel():
+    import numba
+
+    @numba.njit(cache=True)
+    def first_divergence(order, g, a, b1, u, d, bound):
+        """Index of the first sample whose state exceeds `bound` (-1 if none); same loop as `simulate_crfb`."""
+        x = np.zeros(order)
+        for n in range(u.shape[0]):
+            v = 1.0 if x[order - 1] + d[n] >= 0.0 else -1.0
+            x[0] = x[0] - g[0] * x[1] + b1 * u[n] - a[0] * v
+            x[1] = x[1] + x[0] - a[1] * v
+            x[2] = x[2] - g[1] * x[3] + x[1] - a[2] * v
+            x[3] = x[3] + x[2] - a[3] * v
+            if order == 5:
+                x[4] = x[4] + x[3] - a[4] * v
+            else:
+                x[4] = x[4] - g[2] * x[5] + x[3] - a[4] * v
+                x[5] = x[5] + x[4] - a[5] * v
+                x[6] = x[6] + x[5] - a[6] * v
+            for i in range(order):
+                if abs(x[i]) > bound:
+                    return n
+        return -1
+
+    return first_divergence
+
+
+def measure_msa_dbfs(res):
+    """Input limit L (dBFS, MSA_STEP_DB grid): one guard step below the last level stable for every stimulus.
+
+    For each stimulus (DC and sines of peak amplitude A) the level rises from MSA_START_DBFS in
+    MSA_STEP_DB steps until the state exceeds MSA_STATE_BOUND within MSA_SAMPLES, without dither or with any
+    of the MSA_DITHER_SEEDS; the stimulus' MSA is the last stable level. L is the minimum over all stimuli
+    minus MSA_GUARD_DB. The safety margin M is not subtracted here: the headroom inequality adds it (`Design.md §4.4`).
+    """
+    kernel = _msa_kernel()
+    order = res["order"]
+    g = np.array([res["g1"], res["g2"], res.get("g3", 0.0)])
+    a = np.array(res["a"], dtype=float)
+    n = np.arange(MSA_SAMPLES)
+    dithers = [np.zeros(MSA_SAMPLES)] + [
+        np.random.default_rng(seed).triangular(-MSA_DITHER_PEAK, 0.0, MSA_DITHER_PEAK, MSA_SAMPLES)
+        for seed in MSA_DITHER_SEEDS
+    ]
+
+    def stable(u):
+        return all(kernel(order, g, a, res["b1"], u, d, MSA_STATE_BOUND) < 0 for d in dithers)
+
+    worst = 0.0
+    for f in MSA_STIMULI_HZ:
+        shape = np.ones(MSA_SAMPLES) if f == 0.0 else np.sin(2.0 * np.pi * f * n / res["f_bit_hz"])
+        level = MSA_START_DBFS
+        if not stable(10.0 ** (level / 20.0) * shape):
+            raise ValueError(f"{res['name']} order {order}: unstable at {level} dBFS for {f} Hz")
+        while level + MSA_STEP_DB <= 0.0 and stable(10.0 ** ((level + MSA_STEP_DB) / 20.0) * shape):
+            level += MSA_STEP_DB
+        worst = min(worst, level)
+    return float(worst - MSA_GUARD_DB)
+
+
+def synthesize_crfb(f_bit_hz, order=5, H_inf=1.40, name="DSD", sweep_msa=False):
     """
     Synthesizes a 5th-order or 7th-order CRFB modulator for bit rate `f_bit_hz` and target `H_inf`.
+
+    With `sweep_msa`, also measures the maximum stable input `stable_msa_dbfs` (`measure_msa_dbfs`, slow).
     """
     if order not in (5, 7):
         raise ValueError(f"Unsupported CRFB order: {order} (only 5 and 7 supported)")
@@ -43,11 +135,8 @@ def synthesize_crfb(f_bit_hz, order=5, H_inf=1.40, name="DSD"):
     wb = np.pi / osr  # Baseband edge in rad/sample
 
     if order == 5:
-        # Optimal zero locations for 5th-order loop:
-        # 1 zero at DC (w = 0)
-        # 2 conjugate pairs at w1 and w2
-        w1 = 0.6568 * wb
-        w2 = 0.9429 * wb
+        # 1 zero at DC and 2 conjugate pairs at the optimal (Legendre) positions
+        w1, w2 = (r * wb for r in optimal_zero_ratios(5))
         zeros = np.exp(1j * np.array([0.0, w1, -w1, w2, -w2]))
 
         g1 = float(2.0 * (1.0 - np.cos(w1)))
@@ -65,12 +154,8 @@ def synthesize_crfb(f_bit_hz, order=5, H_inf=1.40, name="DSD"):
         B_u_unit = np.linalg.inv(L) @ np.array([1.0, 0.0, 0.0, 0.0, 0.0])
 
     else:  # order == 7
-        # Optimal zero locations for 7th-order loop (Schreier optimal Chebyshev zeros):
-        # 1 zero at DC (w = 0)
-        # 3 conjugate pairs at w1, w2, w3
-        w1 = 0.40584371 * wb
-        w2 = 0.74153078 * wb
-        w3 = 0.94910785 * wb
+        # 1 zero at DC and 3 conjugate pairs at the optimal (Legendre) positions
+        w1, w2, w3 = (r * wb for r in optimal_zero_ratios(7))
         zeros = np.exp(1j * np.array([0.0, w1, -w1, w2, -w2, w3, -w3]))
 
         g1 = float(2.0 * (1.0 - np.cos(w1)))
@@ -119,43 +204,6 @@ def synthesize_crfb(f_bit_hz, order=5, H_inf=1.40, name="DSD"):
     dc_gain = (C @ np.linalg.inv(np.eye(order) - A_cl) @ B_u_unit)[0]
     b1 = float(1.0 / dc_gain)
 
-    # Stability search across input amplitudes to determine L (dBFS)
-    # Target MSA check: test from -3.0 dBFS down to -6.0 dBFS
-    stable_msa = -6.0
-    for amp_db in [-3.0, -3.2, -3.5, -3.8, -4.0, -4.5, -5.0, -6.0]:
-        amp = 10.0 ** (amp_db / 20.0)
-        N = 100000
-        t = np.arange(N) / f_bit_hz
-        u = amp * np.sin(2 * np.pi * 1000.0 * t)
-        x = np.zeros(order)
-        stable = True
-        for n in range(N):
-            y = x[-1]
-            v = 1.0 if y >= 0 else -1.0
-            if order == 5:
-                x1 = x[0] - g[0] * x[1] + b1 * u[n] - a[0] * v
-                x2 = x[1] + c[0] * x1 - a[1] * v
-                x3 = x[2] - g[1] * x[3] + c[1] * x2 - a[2] * v
-                x4 = x[3] + c[2] * x3 - a[3] * v
-                x5 = x[4] + c[3] * x4 - a[4] * v
-                x[0] = x1; x[1] = x2; x[2] = x3; x[3] = x4; x[4] = x5
-            else:
-                x1 = x[0] - g[0] * x[1] + b1 * u[n] - a[0] * v
-                x2 = x[1] + c[0] * x1 - a[1] * v
-                x3 = x[2] - g[1] * x[3] + c[1] * x2 - a[2] * v
-                x4 = x[3] + c[2] * x3 - a[3] * v
-                x5 = x[4] - g[2] * x[5] + c[3] * x4 - a[4] * v
-                x6 = x[5] + c[4] * x5 - a[5] * v
-                x7 = x[6] + c[5] * x6 - a[6] * v
-                x[0] = x1; x[1] = x2; x[2] = x3; x[3] = x4; x[4] = x5; x[5] = x6; x[6] = x7
-
-            if np.any(np.abs(x) > 50.0):
-                stable = False
-                break
-        if stable:
-            stable_msa = amp_db
-            break
-
     res_dict = {
         "name": name,
         "order": order,
@@ -167,10 +215,11 @@ def synthesize_crfb(f_bit_hz, order=5, H_inf=1.40, name="DSD"):
         "c": c,
         "a": a,
         "b1": b1,
-        "stable_msa_dbfs": stable_msa,
     }
     if order == 7:
         res_dict["g3"] = float(g[2])
+    if sweep_msa:
+        res_dict["stable_msa_dbfs"] = measure_msa_dbfs(res_dict)
 
     # In-band SNR with a coherent -6 dBFS tone and small TPDF dither (Design.md §4.3),
     # analysed with the shared windowed method (a rectangular window is invalid here).
@@ -202,7 +251,7 @@ def main():
 
     print("=== 5th-Order CRFB Synthesis Results ===")
     for name, f_bit, h_inf in rates:
-        res = synthesize_crfb(f_bit, order=5, H_inf=h_inf, name=name)
+        res = synthesize_crfb(f_bit, order=5, H_inf=h_inf, name=name, sweep_msa=True)
         print(
             f"{name:10s} (f_bit={f_bit:8d}, OSR={res['osr']:6.2f}): "
             f"MSA={res['stable_msa_dbfs']:4.1f} dBFS, in-band SNR={res['measured_snr_db']:5.1f} dB"
@@ -212,7 +261,7 @@ def main():
 
     print("\n=== 7th-Order CRFB Synthesis Results ===")
     for name, f_bit, h_inf in rates:
-        res = synthesize_crfb(f_bit, order=7, H_inf=h_inf, name=name)
+        res = synthesize_crfb(f_bit, order=7, H_inf=h_inf, name=name, sweep_msa=True)
         print(
             f"{name:10s} (f_bit={f_bit:8d}, OSR={res['osr']:6.2f}): "
             f"MSA={res['stable_msa_dbfs']:4.1f} dBFS, in-band SNR={res['measured_snr_db']:5.1f} dB"

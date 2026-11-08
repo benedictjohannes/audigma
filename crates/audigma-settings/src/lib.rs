@@ -1216,11 +1216,12 @@ impl Settings {
         }
         dsp_config.dither_tpdf_seed = target.dither_tpdf_seed;
         dsp_config.modulator_order = resampler.modulator_order;
-        if target.format == TargetFormat::Pcm {
-            // The preset's attenuation and input limit describe the 1-bit modulator.
-            // PCM output has no modulator, so only full scale limits it.
-            dsp_config.profile_headroom_db = 0.0;
-            dsp_config.max_stable_input_dbfs = 0.0;
+        // The input limit and headroom belong to the selected modulator (order and bit rate). PCM output
+        // has no modulator, so only full scale limits it (the preset default: no headroom, L = 0 dBFS).
+        if let TargetRateSpec::Dsd { bit_rate } = target_spec {
+            dsp_config.apply_modulator_limits(bit_rate).map_err(|_| {
+                SettingsError::Validation("no modulator for this order and DSD rate")
+            })?;
         }
 
         Ok(ResolvedPipelinePlan {

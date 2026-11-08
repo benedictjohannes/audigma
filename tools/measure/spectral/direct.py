@@ -46,7 +46,6 @@ def run(harness_bin, oracle_results):
                 "f_bit_hz": f_bit,
                 "osr": theo.get("osr", f_bit / (2.0 * 20000.0)),
                 "theoretical_snr_db": theo.get("theoretical_snr_db"),
-                "theoretical_msa_dbfs": theo.get("stable_msa_dbfs"),
                 "k_bin": meta["k_bin"],
                 "f_tone_hz": meta["f_tone_hz"],
                 "max_state": meta["max_state"],

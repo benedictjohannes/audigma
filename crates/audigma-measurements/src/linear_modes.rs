@@ -11,16 +11,14 @@
 //!   cascade (preset, phase, apodization, stage count).
 //! - `cascade-tone`: coherent tones through the same cascade (cross-check of the impulse response).
 //! - `src-tone`: coherent tones through `PolyphaseResampler` (rational or ASRC, optional drift).
-//! - `src-tables`: the exported resampler tables, row-major, rational then ASRC.
+//! - `src-tables`: the bank a `PolyphaseResampler` builds for `--src-mode/--in-hz/--out-hz`, row-major.
 
 use std::f64::consts::PI;
 use std::fs::File;
 use std::io::Write;
 
-use audigma_dsp::tables::{SRC_ASRC_256_PHASES, SRC_RATIONAL_160_PHASES};
 use audigma_dsp::{
     Apodization, FilterPhase, FilterPreset, HalfBandCascade, PcmRateHz, PolyphaseResampler,
-    SRC_ASRC_PHASES, SRC_RATIONAL_PHASES, SRC_TAPS_PER_PHASE,
 };
 
 /// Modes handled by this module.
@@ -30,7 +28,7 @@ const TILE_BASEBAND: usize = 64;
 /// Baseband frames of steady-state signal fed before recording (well beyond any filter delay).
 const WARMUP_BASEBAND: usize = 128 * TILE_BASEBAND;
 const TONE_AMPLITUDE: f64 = 0.5;
-/// Output frames discarded by `src-tone` before recording (far above 48 taps).
+/// Output frames discarded by `src-tone` before recording (far above the resampler's taps).
 const SRC_WARMUP_OUTPUT: usize = 4096;
 const SRC_CHUNK_INPUT: usize = 256;
 
@@ -284,19 +282,13 @@ fn cascade_tone(a: &Args) {
 }
 
 fn src_tone(a: &Args) {
-    let in_rate = PcmRateHz::new(a.in_hz).expect("unsupported --in-hz");
-    let out_rate = PcmRateHz::new(a.out_hz).expect("unsupported --out-hz");
     let mut all = Vec::with_capacity(a.tones_hz.len() * a.n_out);
     let mut tones_json = Vec::new();
     let mut ratio = 0.0;
     let mut table_phases = 0;
     let mut taps = 0;
     for &f in &a.tones_hz {
-        let mut src = if a.src_asrc {
-            PolyphaseResampler::new_asrc(in_rate, out_rate)
-        } else {
-            PolyphaseResampler::new_rational(in_rate, out_rate).expect("unsupported ratio")
-        };
+        let mut src = make_src(a);
         src.set_drift_ppm(a.ppm);
         ratio = src.input_per_output_ratio();
         table_phases = src.table_phases();
@@ -348,18 +340,30 @@ fn src_tone(a: &Args) {
 }
 
 fn src_tables(a: &Args) {
-    let mut all = Vec::new();
-    for row in SRC_RATIONAL_160_PHASES.iter() {
-        all.extend_from_slice(row);
-    }
-    for row in SRC_ASRC_256_PHASES.iter() {
-        all.extend_from_slice(row);
-    }
-    write_f64(&a.out_bin, &all);
+    let src = make_src(a);
+    write_f64(&a.out_bin, src.bank());
     write_json(
         &a.out_json,
         &format!(
-            r#"{{"mode":"src-tables","rational_phases":{SRC_RATIONAL_PHASES},"asrc_phases":{SRC_ASRC_PHASES},"taps":{SRC_TAPS_PER_PHASE}}}"#
+            r#"{{"mode":"src-tables","src_mode":"{}","in_hz":{},"out_hz":{},"phases":{},"taps":{},"rows":{},"first_phase":{},"scale":{:.17e}}}"#,
+            if a.src_asrc { "asrc" } else { "rational" },
+            a.in_hz,
+            a.out_hz,
+            src.table_phases(),
+            src.taps_per_phase(),
+            src.bank().len() / src.taps_per_phase(),
+            if a.src_asrc { -1 } else { 0 },
+            src.band_limit_scale(),
         ),
     );
+}
+
+fn make_src(a: &Args) -> PolyphaseResampler {
+    let in_rate = PcmRateHz::new(a.in_hz).expect("unsupported --in-hz");
+    let out_rate = PcmRateHz::new(a.out_hz).expect("unsupported --out-hz");
+    if a.src_asrc {
+        PolyphaseResampler::new_asrc(in_rate, out_rate)
+    } else {
+        PolyphaseResampler::new_rational(in_rate, out_rate).expect("unsupported ratio")
+    }
 }

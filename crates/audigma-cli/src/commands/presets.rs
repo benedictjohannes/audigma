@@ -1,6 +1,7 @@
 //! Handler for `audigma presets` subcommand.
 
-use audigma_dsp::presets::{ALL_PRESETS, by_name};
+use audigma_dsp::presets::{ALL_PRESETS, DEFAULT_SAFETY_MARGIN_DB, by_name};
+use audigma_dsp::{DsdBitRateHz, max_stable_input_dbfs};
 use clap::{Args, Subcommand};
 
 use crate::error::CliError;
@@ -51,20 +52,30 @@ pub fn run_presets(args: PresetsArgs) -> Result<(), CliError> {
                     "Stopband Rejection Min:  >= {:.1} dB",
                     p.stopband_rejection_min_db
                 );
-                println!("Modulator Order:         {}", p.modulator.order);
-                println!("NTF H_inf:               {:.2}", p.modulator.ntf_h_inf);
                 println!(
-                    "Max Stable Input:        {:.2} dBFS",
-                    p.modulator.max_stable_input_dbfs
+                    "Safety Margin M:         {:.2} dB (DSD targets; headroom = L - M)",
+                    DEFAULT_SAFETY_MARGIN_DB
                 );
                 println!(
-                    "Default Safety Margin:   {:.2} dB",
-                    p.modulator.default_safety_margin_db
+                    "Modulator input limit L (dBFS), by order and DSD rate (independent of preset):"
                 );
-                println!(
-                    "Baseline Headroom:       {:.2} dB",
-                    p.modulator.baseline_headroom_db
-                );
+                println!("  {:<24} {:>8} {:>8}", "RATE", "5th", "7th");
+                for rate in [
+                    DsdBitRateHz::DSD64,
+                    DsdBitRateHz::DSD128,
+                    DsdBitRateHz::DSD256,
+                    DsdBitRateHz::DSD512,
+                    DsdBitRateHz::DSD64_48,
+                    DsdBitRateHz::DSD128_48,
+                    DsdBitRateHz::DSD256_48,
+                    DsdBitRateHz::DSD512_48,
+                ] {
+                    let l = |order| {
+                        max_stable_input_dbfs(order, rate)
+                            .map_or_else(|_| "n/a".to_string(), |v| format!("{v:.2}"))
+                    };
+                    println!("  {:<24} {:>8} {:>8}", rate.to_string(), l(5), l(7));
+                }
                 Ok(())
             } else {
                 Err(CliError::PresetNotFound { name })

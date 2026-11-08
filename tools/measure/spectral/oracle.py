@@ -21,7 +21,6 @@ def synthesize_oracle():
             oracle_results[order][rate_str] = {
                 "synth": synth,
                 "theoretical_snr_db": synth["measured_snr_db"],
-                "stable_msa_dbfs": synth["stable_msa_dbfs"],
                 "osr": synth["osr"],
                 "h_inf": synth.get("H_inf", 1.40),
             }

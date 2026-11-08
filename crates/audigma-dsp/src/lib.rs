@@ -13,8 +13,9 @@ pub mod tables;
 pub mod volume;
 
 pub use tables::{
-    CrfbCoefficients, CrfbCoefficients5, CrfbCoefficients7, HalfBandTaps, SRC_ASRC_256_PHASES,
-    SRC_RATIONAL_160_PHASES, get_crfb_coefficients, get_crfb5_coefficients, get_crfb7_coefficients,
+    CrfbCoefficients, CrfbCoefficients5, CrfbCoefficients7, HalfBandTaps, SRC_ASRC_PHASES,
+    SRC_CUTOFF, SRC_KAISER_BETA, SRC_PASS_EDGE, SRC_STOP_EDGE, SRC_TAPS_UNITY,
+    get_crfb_coefficients, get_crfb5_coefficients, get_crfb7_coefficients,
     get_halfband_stage0_filter, get_halfband_stage0_taps, get_halfband_stage1_filter,
     get_halfband_stage1_taps,
 };
@@ -26,17 +27,18 @@ pub use config::{
 pub use fir::{
     DSD_BYTE_TO_FLOATS, FirError, HalfBandCascade, HalfBandDecimationCascade,
     HalfBandDecimationStage, HalfBandStage, PolyphaseInterpolationStage, PolyphaseMode,
-    PolyphaseResampler, SRC_ASRC_PHASES, SRC_RATIONAL_PHASES, SRC_TAPS_PER_PHASE,
-    unpack_dsd_bytes_to_floats,
+    PolyphaseResampler, SRC_MAX_RATIONAL_PHASES, src_band_limit_scale, src_prototype,
+    src_taps_for_scale, unpack_dsd_bytes_to_floats,
 };
 pub use ftz::ScopedFtzDaz;
 pub use modulator::{
     CrfbCore, CrfbCore5, CrfbCore7, CrfbModulator, CrfbModulator5, CrfbModulator7,
     GenericCrfbModulator, Modulator, ModulatorError, STABILITY_THRESHOLD, TpdfDither,
+    max_stable_input_dbfs,
 };
 pub use presets::{
-    ALL_PRESETS, DSD_IDLE_BYTE, DSD_IDLE_U32_BE, ModulatorProfileSpec, PRESET_BALANCED,
-    PRESET_LOW_LATENCY, PRESET_REFERENCE, PresetDefinition,
+    ALL_PRESETS, DEFAULT_MODULATOR_ORDER, DEFAULT_SAFETY_MARGIN_DB, DSD_IDLE_BYTE, DSD_IDLE_U32_BE,
+    PRESET_BALANCED, PRESET_LOW_LATENCY, PRESET_REFERENCE, PresetDefinition,
 };
 pub use rates::{
     DEFAULT_AUDIO_BASEBAND_HZ, DsdBitRateHz, DsdMultiplier, PcmRateHz, RateFamily,

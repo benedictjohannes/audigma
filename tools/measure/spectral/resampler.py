@@ -1,11 +1,9 @@
 """Resampler family: the polyphase rational SRC and the ASRC, measured through `PolyphaseResampler`.
 
-Harness modes `src-tone` (coherent tones through the production type) and `src-tables` (the exported
-tables). No quality thresholds are applied (audit step 5); the only failures raised are method checks
-(exported tables must equal the generator output).
+Harness modes `src-tone` (coherent tones through the production type) and `src-tables` (the bank a
+resampler builds at construction). No quality thresholds are applied (audit step 5); the only failures
+raised are method checks (compiled banks must equal `design_src.py`).
 """
-
-from fractions import Fraction
 
 import numpy as np
 
@@ -13,15 +11,22 @@ from .common import Section, run_harness
 from .linear import load_f64, tone_metrics
 
 try:
-    from design_src import design_polyphase_sinc
+    import design_src
 except ImportError:  # scipy missing
-    design_polyphase_sinc = None
+    design_src = None
 
 # Tone grid for the 1x case (Hz at 44.1k/48k base rates); scaled by the rate multiplier for 2x..16x.
 TONES_HZ = [1000, 10000, 18000, 20000, 21000]
-# 48k-family input at and above the 44.1k-family Nyquist (22.05 kHz): aliases back into 20.6-22 kHz unless rejected.
-DOWN_EXTRA_HZ = [22000, 23000, 23500]
+# 48k-family input at and above the 44.1k-family Nyquist (22.05 kHz). 22-23.5 kHz is the transition band (its aliases
+# land in 20.6-22.05 kHz, above the audio band); 24.5 and 26 kHz are in the stopband and would alias to 19.6 / 18.1 kHz.
+DOWN_EXTRA_HZ = [22000, 23000, 23500, 24500, 26000]
 MULTIPLIERS = [1, 2, 4, 8, 16]
+# Rational conversions outside the matched-tier pairs (PCM targets below the matched tier).
+RATIONAL_EXTRA = [
+    # (label, in_hz, out_hz, tones at the input)
+    ("96k -> 44.1k", 96_000, 44_100, TONES_HZ + DOWN_EXTRA_HZ + [30_000, 40_000]),
+    ("88.2k -> 48k", 88_200, 48_000, TONES_HZ + [24_500, 26_000, 30_000, 40_000]),
+]
 ASRC_CASES = [
     # (label, in_hz, out_hz, ppm)
     ("44.1k -> 44.1k", 44_100, 44_100, 0.0),
@@ -33,12 +38,19 @@ ASRC_CASES = [
     ("48k -> 48k", 48_000, 48_000, 50.0),
     ("44.1k -> 48k", 44_100, 48_000, 0.0),
     ("48k -> 44.1k", 48_000, 44_100, 0.0),
+    ("48k -> 44.1k", 48_000, 44_100, 100.0),
+]
+# Banks compared with design_src.py: (mode, in_hz, out_hz).
+BANK_CASES = [
+    ("rational", 44_100, 48_000),
+    ("rational", 48_000, 44_100),
+    ("rational", 96_000, 44_100),
+    ("asrc", 44_100, 44_100),
+    ("asrc", 48_000, 44_100),
 ]
 N_OUT = 131_072
-# Table design parameters (tools/design/export_tables.py).
-TABLE_CUTOFF = 0.4535
-TABLE_BETA = 12.5
-TABLE_MISMATCH_TOL = 0.0
+# Rust and numpy evaluate the same closed form; allow a few ulps of libm difference.
+BANK_MISMATCH_TOL = 1e-14
 
 
 def _run_src(harness_bin, stem, src_mode, in_hz, out_hz, ppm, tones_in):
@@ -59,48 +71,43 @@ def _run_src(harness_bin, stem, src_mode, in_hz, out_hz, ppm, tones_in):
     return {"meta": meta, "rows": rows}
 
 
-def _delay_error(ratio, phases):
-    """Largest fractional-delay error (input samples) caused by flooring positions onto the table grid.
-
-    Output positions advance by `ratio` input samples; the fractional parts form the set
-    {(j * p mod q) / q} for ratio = p / q. Each is floored to a multiple of 1/phases.
-    """
-    frac = Fraction(ratio).limit_denominator(2000)
-    q = frac.denominator
-    pos = [Fraction((j * frac.numerator) % q, q) for j in range(q)]
-    err = [p - Fraction(int(p * phases), phases) for p in pos]
-    return float(max(err)), q
-
-
-def _tables(harness_bin):
-    meta, bin_out = run_harness(harness_bin, "src_tables", ["--mode", "src-tables"], with_bin=True)
-    flat = load_f64(bin_out)
+def _bank(harness_bin, mode, in_hz, out_hz):
+    meta, bin_out = run_harness(
+        harness_bin,
+        f"src_bank_{mode}_{in_hz}_{out_hz}",
+        ["--mode", "src-tables", "--src-mode", mode, "--in-hz", str(in_hz), "--out-hz", str(out_hz)],
+        with_bin=True,
+    )
+    taps, phases = meta["taps"], meta["phases"]
+    bank = load_f64(bin_out).reshape(meta["rows"], taps)
     bin_out.unlink()
-    taps = meta["taps"]
-    rat = flat[: meta["rational_phases"] * taps].reshape(meta["rational_phases"], taps)
-    asrc = flat[meta["rational_phases"] * taps :].reshape(meta["asrc_phases"], taps)
-    out = {}
-    for name, table in (("rational", rat), ("asrc", asrc)):
-        phases = table.shape[0]
-        entry = {"phases": phases, "taps": taps}
-        if design_polyphase_sinc is not None:
-            ref = np.array(design_polyphase_sinc(phases, taps, TABLE_CUTOFF, TABLE_BETA)["table"])
-            entry["max_diff"] = float(np.max(np.abs(ref - table)))
-        # Prototype reconstructed from the exported table: h[j * phases + p] = table[p, j].
-        h = table.T.reshape(-1)
-        nfft = 1 << 18
-        spec = np.fft.rfft(h, nfft) / phases
-        f = np.fft.rfftfreq(nfft, 1.0 / phases)  # in units of the input rate
-        db = 20 * np.log10(np.maximum(np.abs(spec), 1e-300))
-        entry["gain"] = {x: float(np.interp(x, f, db)) for x in (18_000 / 44_100, 0.4535, 21_000 / 44_100, 0.5)}
-        entry["stop_rejection_db"] = float(-db[f >= 1.0 - TABLE_CUTOFF].max())
-        out[name] = entry
-    return out
+    first = meta["first_phase"]
+    entry = {"mode": mode, "in_hz": in_hz, "out_hz": out_hz, "phases": phases, "taps": taps, "rows": meta["rows"], "scale": meta["scale"]}
+    if design_src is not None:
+        ref_taps = design_src.taps_for_scale(meta["scale"], design_src.design_unity_taps())
+        entry["ref_taps"] = ref_taps
+        if ref_taps == taps:
+            ref = np.array([design_src.bank_row((first + r) / phases, meta["scale"], taps)[::-1] for r in range(meta["rows"])])
+            entry["max_diff"] = float(np.max(np.abs(ref - bank)))
+    # Prototype sampled at `phases` points per input sample, rebuilt from the rows for phases 0..phases-1
+    # (rows are stored reversed, oldest input first): h[i * phases + p] = row_p[taps - 1 - i].
+    rows = bank[-first : -first + phases, ::-1]
+    h = rows.T.reshape(-1)
+    nfft = 1 << 20
+    spec = np.fft.rfft(h, nfft) / phases
+    f = np.fft.rfftfreq(nfft, 1.0 / phases) * in_hz  # Hz
+    db = 20 * np.log10(np.maximum(np.abs(spec), 1e-300))
+    low = min(in_hz, out_hz)
+    entry["gain"] = {x: float(np.interp(x, f, db)) for x in (18_000 / 44_100 * low, 20_000 / 44_100 * low, 21_000 / 44_100 * low, 0.5 * low)}
+    pb = f <= 20_000 / 44_100 * low
+    entry["passband_dev_db"] = float(np.max(np.abs(db[pb])))
+    entry["stop_rejection_db"] = float(-db[f >= 24_100 / 44_100 * low].max())
+    return entry
 
 
 def run(harness_bin):
     print("\n=== Resampler: PolyphaseResampler tables, rational SRC and ASRC ===")
-    res = {"tables": _tables(harness_bin), "rational": [], "asrc": []}
+    res = {"banks": [_bank(harness_bin, *c) for c in BANK_CASES], "rational": [], "rational_extra": [], "asrc": []}
     for m in MULTIPLIERS:
         for label, in_base, out_base, extra in (
             ("44.1k -> 48k", 44_100, 48_000, []),
@@ -112,6 +119,12 @@ def run(harness_bin):
             res["rational"].append(case)
             worst = max(r["spur_dbc"] for r in case["rows"][:4])
             print(f"  rational {label} x{m}: worst spur on 1-20 kHz tones {worst:.1f} dBc")
+    for label, in_hz, out_hz, tones in RATIONAL_EXTRA:
+        case = _run_src(harness_bin, f"src_rat_{in_hz}_{out_hz}", "rational", in_hz, out_hz, 0.0, tones)
+        case.update(label=label, mult=1, tones_base=tones)
+        res["rational_extra"].append(case)
+        worst = max(r["spur_dbc"] for r in case["rows"][:4])
+        print(f"  rational {label}: worst spur on 1-20 kHz tones {worst:.1f} dBc")
     for label, in_hz, out_hz, ppm in ASRC_CASES:
         scale = in_hz / (48_000 if in_hz % 48_000 == 0 else 44_100)
         tones = [t * scale for t in TONES_HZ]
@@ -145,31 +158,34 @@ def _summary_row(case, extra=""):
 
 def render(res):
     failures = []
-    tb = res["tables"]
     text = """
 ---
 
-## Exported tables
+## Banks
 
-Harness mode `src-tables` dumps `SRC_RATIONAL_160_PHASES` and `SRC_ASRC_256_PHASES` as compiled. The prototype filter
-is rebuilt from them (`h[j*phases + p] = table[p][j]`) and its response is given relative to the input rate. The tap and phase
-counts come from `audigma_dsp::{SRC_TAPS_PER_PHASE, SRC_RATIONAL_PHASES, SRC_ASRC_PHASES}`, which are derived from the tables.
+`PolyphaseResampler` builds its bank at construction from the closed-form prototype (`fir::src_prototype`, Kaiser-windowed sinc,
+parameters exported from `tools/design/design_src.py`). The band edges are relative to the **lower** of the two rates (scale
+`min(1, out/in)`), so a downsampler is also the anti-alias filter: passband to 20 kHz and stopband from 24.1 kHz at 44.1 kHz, scaled
+with the rate. Rational banks have one row per exact output phase; the ASRC bank has 256 rows plus guard rows and is cubic interpolated
+between rows. Harness mode `src-tables` dumps the compiled bank; it is compared with `design_src.bank_row`, and the prototype is rebuilt
+from the rows (`h[i*phases + p] = row_p[i]`). Gains are relative to DC at the stated frequency of the lower rate (e.g. 20 kHz for 44.1 kHz).
 
-| Table | Phases | Taps/phase | Max abs diff vs `design_src.py` | Gain @ 18 kHz (dB) | @ 20 kHz (dB) | @ 21 kHz (dB) | @ Nyquist (dB) | Stopband rejection (>= 0.5465 fs_in) (dB) |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Mode | In -> out (Hz) | Phases | Taps | Max abs diff vs `design_src.py` | Gain @ 18 kHz (dB) | @ 20 kHz (dB) | @ 21 kHz (dB) | @ low Nyquist (dB) | Passband deviation 0-20 kHz (dB) | Rejection >= 24.1 kHz (dB) |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 """
-    for name, e in tb.items():
+    for e in res["banks"]:
         g = list(e["gain"].values())
         diff = e.get("max_diff")
-        if diff is not None and diff > TABLE_MISMATCH_TOL:
-            failures.append(f"Resampler table {name} differs from design_src.py")
+        if design_src is not None and (diff is None or diff > BANK_MISMATCH_TOL):
+            failures.append(f"Resampler bank {e['mode']} {e['in_hz']}->{e['out_hz']} differs from design_src.py")
         text += (
-            f"| {name} | {e['phases']} | {e['taps']} | {'n/a' if diff is None else f'{diff:.1e}'} | "
-            f"{g[0]:.3f} | {g[1]:.2f} | {g[2]:.2f} | {g[3]:.1f} | {e['stop_rejection_db']:.1f} |\n"
+            f"| {e['mode']} | {e['in_hz']} -> {e['out_hz']} | {e['phases']} | {e['taps']} | "
+            f"{'n/a' if diff is None else f'{diff:.1e}'} | {g[0]:.6f} | {g[1]:.6f} | {g[2]:.2f} | {g[3]:.2f} | "
+            f"{e['passband_dev_db']:.1e} | {e['stop_rejection_db']:.1f} |\n"
         )
-    text += "\nGain is relative to DC and expressed for a 44.1 kHz input rate (frequencies scale with the input rate).\n"
-
     text += """
+The frequencies are those of a 44.1 kHz-family lower rate scaled to the actual one (e.g. 20 kHz at 44.1 kHz is 21.77 kHz at 48 kHz).
+
 ---
 
 ## Rational SRC (44.1 kHz family <-> 48 kHz family)
@@ -178,17 +194,25 @@ Harness mode `src-tone`: `PolyphaseResampler::new_rational(in, out)`, a coherent
 column), 131,072 output frames analysed with the Nuttall window after discarding the first 4,096. Rates are the pipeline's matched tiers
 (1x = 44.1k/48k, 2x = 88.2k/96k, ... 16x = 705.6k/768k); the tone grid is scaled with the multiplier so results are
 comparable. The spur is the strongest component outside the tone (image, alias or error); the residual is everything outside the tone lobe.
+For an input tone above the output Nyquist the "gain" is the level of its alias; for a tone in the stopband only that column is
+meaningful (the spur and residual are relative to the tiny alias). Images or aliases of 20-22.05 kHz content land in the transition band
+(20-24.1 kHz), above the audio band, by design (the same convention as the half-band cascade). Output positions are exact rational phases (integer
+phase accumulator, one bank row per phase), so there is no phase quantisation.
 """
     for case in res["rational"]:
         if case["mult"] != 1:
             continue
         m = case["meta"]
-        err, q = _delay_error(m["ratio"], m["table_phases"])
         text += f"""
-### {case['label']} (1x): input/output ratio {m['ratio']:.6f}, {m['table_phases']} table phases
+### {case['label']} (1x): input/output ratio {m['ratio']:.6f}, {m['table_phases']} exact phases, {m['taps']} taps
 
-Fractional output positions are multiples of 1/{q} input samples; flooring them onto the {m['table_phases']}-phase table gives a \
-worst-case delay error of {err:.5f} input samples ({'on the table grid: no quantisation' if err < 1e-12 else '**not on the table grid**'}).
+""" + _tone_table(case)
+    for case in res["rational_extra"]:
+        m = case["meta"]
+        text += f"""
+### {case['label']}: input/output ratio {m['ratio']:.6f}, {m['table_phases']} exact phases, {m['taps']} taps
+
+Reached when a PCM target is below the input's matched tier (e.g. 96 kHz input, 44.1 kHz PCM output).
 
 """ + _tone_table(case)
     text += """
@@ -207,9 +231,11 @@ Tone frequencies in the header are for the 1x tier and scale with the multiplier
 
 ## ASRC (continuously variable ratio)
 
-`PolyphaseResampler::new_asrc(in, out)` with `set_drift_ppm(ppm)`: ratio = nominal x (1 + ppm x 1e-6), the ASRC table indexed by the
-floored fractional position. Live adaptive mode (`live_pipeline.rs`) uses this with nominal ratio `input_rate / intermediate_rate` (1 when they are equal) and drift within `max_correction_ppm` (default 500).
-With 0 ppm and a nominal ratio of 1 the fractional position never leaves phase 0, so only drifting or non-unity ratios exercise the phase selection.
+`PolyphaseResampler::new_asrc(in, out)` with `set_drift_ppm(ppm)`: ratio = nominal x (1 + ppm x 1e-6). The fractional position selects
+four adjacent bank rows (256 phases per input sample) and the outputs of the four are combined with 4-point Lagrange weights. Live
+adaptive mode (`live_pipeline.rs`) uses this with nominal ratio `input_rate / intermediate_rate` (1 when they are equal) and drift within
+`max_correction_ppm` (default 500). With 0 ppm and a nominal ratio of 1 the position never leaves phase 0, so only drifting or non-unity
+ratios exercise the interpolation.
 
 ### Summary
 
@@ -218,17 +244,11 @@ With 0 ppm and a nominal ratio of 1 the fractional position never leaves phase 0
 """
     for case in res["asrc"]:
         text += _summary_row(case, f"{case['label']} | {case['ppm']:+g} ppm ")
-    asrc_phases = res["asrc"][0]["meta"]["table_phases"]  # reported by the harness from audigma_dsp
-    exp = 1 / asrc_phases
-    rms = exp / 12**0.5
-
-    def first_order(f_hz):
-        return 20 * np.log10(2 * np.pi * f_hz / 44_100 * rms)
-
+    phases = res["asrc"][0]["meta"]["table_phases"]
     text += f"""
-Phase selection floors the position to 1/{asrc_phases} of an input sample (`audigma_dsp::SRC_ASRC_PHASES`), so the delay error is uniform
-in [0, {exp:.5f}) samples (rms {rms:.5f}). First-order error spur for a tone at f: `2*pi*(f/fs)*err_rms`, i.e. about
-{first_order(1000):.0f} dBc at 1 kHz, {first_order(10000):.0f} dBc at 10 kHz and {first_order(20000):.0f} dBc at 20 kHz (44.1 kHz input); compare the measured spur columns.
+Interpolation error estimate: for a prototype sampled at {phases} points per input sample, the 4-point Lagrange error for a tone at f
+is about `(2*pi*f/(fs*{phases}))^4 * 0.023`, i.e. {20 * np.log10((2 * np.pi * 20_000 / 44_100 / phases) ** 4 * 0.0234):.0f} dBc at 20 kHz (44.1 kHz input):
+below the prototype's own stopband, so the measured spurs are set by the prototype and the analysis, not by the interpolation.
 
 ### Tone detail, 44.1 kHz -> 44.1 kHz at +50 ppm
 """

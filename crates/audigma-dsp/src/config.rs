@@ -137,6 +137,18 @@ pub struct DspConfiguration {
 }
 
 impl DspConfiguration {
+    /// Sets the input limit `L` of the selected modulator (`modulator_order` at `bit_rate`) and the matching
+    /// profile headroom `L - M`, so a 0 dBFS PCM peak reaches the modulator at `L - M` (`Design.md §4.3-§4.4`).
+    pub fn apply_modulator_limits(
+        &mut self,
+        bit_rate: DsdBitRateHz,
+    ) -> Result<(), crate::modulator::ModulatorError> {
+        let limit = crate::modulator::max_stable_input_dbfs(self.modulator_order, bit_rate)?;
+        self.max_stable_input_dbfs = limit;
+        self.profile_headroom_db = limit - self.safety_margin_db;
+        Ok(())
+    }
+
     /// Returns the total configured static gain in dB (`preamp_db + user_volume_db + profile_headroom_db`).
     #[inline]
     pub fn total_configured_gain_db(&self) -> f64 {
@@ -194,25 +206,56 @@ mod tests {
 
     #[test]
     fn test_headroom_inequality_and_two_pass_gain() {
-        let cfg = PRESET_REFERENCE.to_default_dsp_config(
+        let mut cfg = PRESET_REFERENCE.to_default_dsp_config(
             FilterPhase::Linear,
             Apodization::Off,
             0.0,
             0.0,
             OverloadPolicy::Error,
         );
-        // Reference profile has L = -3.5 dBFS, M = 0.5 dB, profile_headroom_db = -4.0 dB
-        assert!((cfg.total_configured_gain_db() - (-4.0)).abs() < 1e-9);
+        // Without a modulator (PCM) there is no headroom and the limit is full scale.
+        assert_eq!(cfg.total_configured_gain_db(), 0.0);
+        assert_eq!(cfg.max_stable_input_dbfs, 0.0);
 
-        // If Pass 1 measures an inter-sample true peak of +1.2 dBFS:
-        // L - M - P = -3.5 - 0.5 - 1.2 = -5.2 dB
+        cfg.apply_modulator_limits(DsdBitRateHz::DSD64).unwrap();
+        let l = crate::modulator::max_stable_input_dbfs(5, DsdBitRateHz::DSD64).unwrap();
+        let m = cfg.safety_margin_db;
+        assert_eq!(cfg.max_stable_input_dbfs, l);
+        assert!((cfg.total_configured_gain_db() - (l - m)).abs() < 1e-12);
+
+        // Pass 1 measures an inter-sample true peak of +1.2 dBFS: gain = L - M - P.
         let two_pass_gain = cfg.resolve_two_pass_gain_db(1.2);
-        assert!((two_pass_gain - (-5.2)).abs() < 1e-9);
+        assert!((two_pass_gain - (l - m - 1.2)).abs() < 1e-12);
 
-        // If Pass 1 measures a conservative peak of -1.0 dBFS:
-        // L - M - P = -3.5 - 0.5 - (-1.0) = -3.0 dB, so configured -4.0 dB is kept
+        // A quiet peak of -1.0 dBFS would allow more than the configured headroom, which is kept.
         let quiet_gain = cfg.resolve_two_pass_gain_db(-1.0);
-        assert!((quiet_gain - (-4.0)).abs() < 1e-9);
+        assert!((quiet_gain - (l - m)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_modulator_limits_follow_order_and_rate() {
+        let mut cfg = PRESET_REFERENCE.to_default_dsp_config(
+            FilterPhase::Linear,
+            Apodization::Off,
+            0.0,
+            0.0,
+            OverloadPolicy::Error,
+        );
+        for rate in [
+            DsdBitRateHz::DSD64,
+            DsdBitRateHz::DSD512,
+            DsdBitRateHz::DSD256_48,
+        ] {
+            for order in [5u8, 7] {
+                cfg.modulator_order = order;
+                cfg.apply_modulator_limits(rate).unwrap();
+                let l = crate::modulator::max_stable_input_dbfs(order, rate).unwrap();
+                assert_eq!(cfg.max_stable_input_dbfs, l);
+                assert!(l < -3.0 && l > -6.0, "implausible limit {l} dBFS");
+            }
+        }
+        cfg.modulator_order = 6;
+        assert!(cfg.apply_modulator_limits(DsdBitRateHz::DSD64).is_err());
     }
 
     #[test]

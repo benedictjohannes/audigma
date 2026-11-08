@@ -14,7 +14,7 @@ Writes one report per measurement family to docs/measurements/ plus an index (re
   (tools/design/design_crfb.py, tools/design/dsm_analysis.py) and the stability envelope.
 - cascade.md: the half-band cascade as implemented (impulse response, tone cross-check, against design_halfband.py)
   and cascade + modulator end to end.
-- resampler.md: exported tables, polyphase rational SRC and ASRC through PolyphaseResampler.
+- resampler.md: compiled SRC banks vs design_src.py, polyphase rational SRC and ASRC through PolyphaseResampler.
 - benchmark.md: CPU throughput and deadline budget. Opt-in (--benchmark): it needs a quiet machine, so coordinate
   with the user (AGENTS.md). The last results are kept in docs/measurements/benchmark.json.
 
@@ -84,7 +84,7 @@ def main():
         stability_results = stability.run(harness_bin)
         d_sec, s_sec = direct.render(direct_results), stability.render(stability_results)
         stability_ok = not s_sec.failures
-        matrix = summary.matrix(direct_results, oracle_results)
+        matrix = summary.matrix(direct_results, oracle_results, stability_results)
         report.write_family("modulator", env_info, [d_sec, s_sec], preamble=f"\n## Modulator Architecture & Selection Matrix\n\n{matrix}\n")
         failures["modulator"] = d_sec.failures + s_sec.failures
         results["modulator"] = (direct_results, stability_results)

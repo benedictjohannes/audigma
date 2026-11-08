@@ -3,7 +3,7 @@
 from .analysis import floor_limited, fmt_snr
 
 
-def matrix(direct_results, oracle_results):
+def matrix(direct_results, oracle_results, stability_results=None):
     def get_direct(order, rate_name):
         for r in direct_results[order]:
             if r["rate"].lower() == rate_name.lower():
@@ -36,10 +36,14 @@ def matrix(direct_results, oracle_results):
             return f"**{fmt_snr(direct_res)}** (Oracle: {theo:.1f} dB)"
         return f"**{fmt_snr(direct_res)}**"
 
-    msa_5_vals = [r["theoretical_msa_dbfs"] for r in direct_results[5] if r.get("theoretical_msa_dbfs") is not None]
-    msa_7_vals = [r["theoretical_msa_dbfs"] for r in direct_results[7] if r.get("theoretical_msa_dbfs") is not None]
-    msa_5_str = f"{min(msa_5_vals):.1f} dBFS" if msa_5_vals and min(msa_5_vals) == max(msa_5_vals) else (f"{min(msa_5_vals):.1f} to {max(msa_5_vals):.1f} dBFS" if msa_5_vals else "-3.2 dBFS")
-    msa_7_str = f"{min(msa_7_vals):.1f} dBFS" if msa_7_vals and min(msa_7_vals) == max(msa_7_vals) else (f"{min(msa_7_vals):.1f} to {max(msa_7_vals):.1f} dBFS" if msa_7_vals else "-3.8 dBFS")
+    def limit_range(order):
+        vals = [r["limit_dbfs"] for r in (stability_results or {}).get(order, {}).get("input_limit", [])]
+        if not vals:
+            return "n/a"
+        lo, hi = min(vals), max(vals)
+        return f"{lo:.2f} dBFS" if lo == hi else f"{lo:.2f} to {hi:.2f} dBFS"
+
+    msa_5_str, msa_7_str = limit_range(5), limit_range(7)
 
     h_inf_5 = oracle_results[5].get("dsd64", {}).get("h_inf", 1.40)
     h_inf_7 = oracle_results[7].get("dsd64", {}).get("h_inf", 1.40)
@@ -48,7 +52,7 @@ def matrix(direct_results, oracle_results):
 |---|---|---|---|
 | **Resonator Couplings** | 2 pairs (g1, g2) | 3 pairs (g1, g2, g3) | — |
 | **Out-of-Band Gain H_inf** | {h_inf_5:.2f} | {h_inf_7:.2f} | Synthesized via Schreier prototype |
-| **Stable Operating Limit (MSA)** | {msa_5_str} | {msa_7_str} | — |
+| **Input limit L (compiled, all rates)** | {msa_5_str} | {msa_7_str} | — |
 | **DSD64 (OSR ~70.6)** | {format_matrix_cell(d64_5)} | {format_matrix_cell(d64_7)} | {pick(d64_5, d64_7)} |
 | **DSD128 (OSR ~141.1)** | {format_matrix_cell(d128_5)} | {format_matrix_cell(d128_7)} | {pick(d128_5, d128_7)} |
 | **DSD256 (OSR ~282.2)** | {format_matrix_cell(d256_5)} | {format_matrix_cell(d256_7)} | {pick(d256_5, d256_7)} |

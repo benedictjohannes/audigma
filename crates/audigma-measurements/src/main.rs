@@ -236,6 +236,9 @@ fn main() {
         "overload" => {
             run_overload(&config, &mut modulator, f_bit_hz);
         }
+        "input-limit" => {
+            run_input_limit(&config, &mut modulator, bit_rate, f_bit_hz);
+        }
         "benchmark" => {
             run_benchmark(
                 &config,
@@ -653,6 +656,63 @@ fn run_multitone(
         );
         let mut f = File::create(path).unwrap();
         f.write_all(json.as_bytes()).unwrap();
+    }
+}
+
+/// Stimuli of the input-limit check: DC and sines (Hz), the same set as `design_crfb.MSA_STIMULI_HZ`.
+const INPUT_LIMIT_STIMULI_HZ: [f64; 7] = [0.0, 50.0, 1000.0, 5000.0, 10000.0, 15000.0, 20000.0];
+
+/// Runs the production modulator (tile path, configured dither) at its compiled input limit `L` for DC and
+/// tones of peak amplitude `L`, `config.samples` bits each, from a reset state.
+fn run_input_limit(
+    config: &HarnessConfig,
+    modulator: &mut Modulator,
+    bit_rate: DsdBitRateHz,
+    f_bit_hz: u32,
+) {
+    const TILE_BITS: usize = 4096;
+    let limit = audigma_dsp::max_stable_input_dbfs(config.order, bit_rate)
+        .unwrap_or_else(|e| panic!("no input limit: {e}"));
+    let amp = 10f64.powf(limit / 20.0);
+    let mut tile = [0.0f64; TILE_BITS];
+    let mut bytes = [0u8; TILE_BITS / 8];
+    let mut rows = Vec::new();
+    for &f in &INPUT_LIMIT_STIMULI_HZ {
+        modulator.reset();
+        let before = modulator.overload_count();
+        let mut max_state = 0.0f64;
+        let mut n: u64 = 0;
+        for _ in 0..config.samples / TILE_BITS {
+            for s in tile.iter_mut() {
+                *s = if f == 0.0 {
+                    amp
+                } else {
+                    amp * (2.0 * std::f64::consts::PI * f * n as f64 / f_bit_hz as f64).sin()
+                };
+                n += 1;
+            }
+            modulator.process_tile_bytes(&tile, &mut bytes).unwrap();
+            for &x in modulator.state_slice() {
+                max_state = max_state.max(x.abs());
+            }
+        }
+        rows.push(format!(
+            r#"{{"f_hz":{f},"overloads":{},"max_state":{max_state:.6}}}"#,
+            modulator.overload_count() - before
+        ));
+    }
+    if let Some(ref path) = config.out_json {
+        let json = format!(
+            r#"{{"mode":"input-limit","rate":"{}","order":{},"limit_dbfs":{limit},"samples":{},"stimuli":[{}]}}"#,
+            config.rate,
+            config.order,
+            config.samples,
+            rows.join(",")
+        );
+        File::create(path)
+            .unwrap()
+            .write_all(json.as_bytes())
+            .unwrap();
     }
 }
 

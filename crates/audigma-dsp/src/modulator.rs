@@ -553,6 +553,22 @@ pub enum Modulator {
     Order7(CrfbModulator7),
 }
 
+/// Measured maximum stable input `L` (dBFS) of the modulator for `order` at `bit_rate` (`Design.md §4.3-§4.4`).
+///
+/// Generated per rate and order by `tools/design/design_crfb.py` (DC + tone level sweep); the headroom
+/// inequality subtracts the safety margin `M` from it.
+pub fn max_stable_input_dbfs(order: u8, bit_rate: DsdBitRateHz) -> Result<f64, ModulatorError> {
+    match order {
+        5 => crate::tables::get_crfb5_coefficients(bit_rate)
+            .map(|c| c.max_stable_input_dbfs)
+            .ok_or(ModulatorError::UnsupportedRate { bit_rate, order }),
+        7 => crate::tables::get_crfb7_coefficients(bit_rate)
+            .map(|c| c.max_stable_input_dbfs)
+            .ok_or(ModulatorError::UnsupportedRate { bit_rate, order }),
+        other => Err(ModulatorError::UnsupportedOrder(other)),
+    }
+}
+
 impl Modulator {
     /// Creates a new modulator for the given order, target bit rate, dither, and overload policy.
     pub fn new(
