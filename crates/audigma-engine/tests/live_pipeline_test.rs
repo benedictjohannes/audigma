@@ -236,7 +236,6 @@ transport = "native"
 [target]
 {target}
 [gain]
-headroom = "profile"
 overload_policy = "mute-recover"
 [clock]
 mode = "adaptive-input"

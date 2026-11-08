@@ -27,7 +27,7 @@ pub struct ModulatorProfileSpec {
     pub max_stable_input_dbfs: f64,
     /// Default safety margin `M` in dB (`Design.md §4.4`).
     pub default_safety_margin_db: f64,
-    /// Baseline profile attenuation applied when `[gain] headroom = "profile"`.
+    /// Baseline attenuation applied before the modulator for DSD targets (PCM targets get none).
     pub baseline_headroom_db: f64,
 }
 

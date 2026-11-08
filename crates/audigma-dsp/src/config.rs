@@ -90,8 +90,9 @@ pub enum DitherType {
 }
 
 /// Modulator overload handling policy (`Design.md §4.4`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum OverloadPolicy {
+    #[default]
     #[serde(rename = "mute-recover")]
     MuteRecover,
     #[serde(rename = "error")]

@@ -735,15 +735,6 @@ impl LivePipeline {
         input_rate: PcmRateHz,
         worker_setup: Option<WorkerSetup>,
     ) -> Result<Self, EngineError> {
-        if let Some(gain) = settings.gain.as_ref() {
-            if gain.peak_analysis == audigma_settings::PeakAnalysisMode::TwoPass {
-                tracing::warn!(
-                    target: "audigma::engine",
-                    "two-pass peak analysis is not supported for live real-time output; using single-pass"
-                );
-            }
-        }
-
         let plan = settings.explain_for_input_rate(input_rate)?;
         let target_spec = plan.stream_spec.target;
         let topology = PipelineTopology::resolve(input_rate, target_spec)?;

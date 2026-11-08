@@ -213,7 +213,8 @@ decode / unpack / DSD decimation
 ### 4.4 Headroom Inequality, Two-Pass Offline Peak Analysis & Live Overload Protection
 - **Required Attenuation Equation:** Given a predicted or measured post-interpolation peak of $P\text{ dBFS}$, the modulator profile's maximum stable input limit $L\text{ dBFS}$ (e.g., $-3.5\text{ dBFS}$), and a safety margin $M\text{ dB}$ (default $0.5\text{ dB}$), the total applied pre-modulator gain must satisfy:
   $$\text{gain\_db} \le L - M - P$$
-- **Offline Two-Pass Gain (`peak_analysis = "two-pass"`):** Because the PCM SRC + $2\times$ FIR interpolation cascade is Linear and Time-Invariant (LTI), scaling the pre-SRC input by gain $G$ scales the reconstructed peak entering the modulator by exactly $G$. Therefore, **Pass 1 runs only the PCM interpolation cascade** (skipping the sequential 1-bit DSM loop and bit packing) to measure the true inter-sample peak $P\text{ dBFS}$, solves $\text{gain\_db} = \min(\text{configured\_gain\_db},\; L - M - P)$, and **Pass 2 runs the complete pipeline**.
+- **PCM targets:** The profile attenuation and the input limit $L$ describe the 1-bit modulator, so they apply to DSD targets only. For PCM targets the profile headroom is $0\text{ dB}$ and $L = 0\text{ dBFS}$ (full scale).
+- **Offline Two-Pass Gain (`peak_analysis = "two-pass"`, `convert` only; `run` and `play` ignore it):** Because the PCM SRC + $2\times$ FIR interpolation cascade is Linear and Time-Invariant (LTI), scaling the pre-SRC input by gain $G$ scales the reconstructed peak entering the modulator by exactly $G$. Therefore, **Pass 1 runs only the PCM interpolation cascade** (skipping the sequential 1-bit DSM loop and bit packing) to measure the true inter-sample peak $P\text{ dBFS}$, solves $\text{gain\_db} = \min(\text{configured\_gain\_db},\; L - M - P)$, and **Pass 2 runs the complete pipeline**.
 - **Live Overload Guard (`overload_policy = "mute-recover"`):** Monitors the PCM signal entering the modulator and the internal integrator states. If an unexpected transient exceeds the modulator's stable envelope or drives states toward instability:
   1. Immediately bypass the filter tail and switch the output to the verified DSD idle stream at the modulator boundary.
   2. Reset and reprime the modulator state vector to zero.
@@ -381,7 +382,6 @@ dsd_rate = "dsd256"
 
 [gain]
 preamp_db = 0.0
-headroom = "profile"
 overload_policy = "mute-recover"
 
 [resampler]
@@ -412,7 +412,6 @@ dither_tpdf_seed = 12345
 
 [gain]
 preamp_db = 0.0
-headroom = "profile"
 peak_analysis = "two-pass"
 overload_policy = "error"
 
@@ -448,7 +447,6 @@ rate_family = "44100"
 dsd_rate = "dsd128"
 
 [gain]
-headroom = "profile"
 overload_policy = "error"
 
 [resampler]

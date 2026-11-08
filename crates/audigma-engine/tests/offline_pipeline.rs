@@ -137,8 +137,9 @@ fn test_offline_pipeline_wav_conversion_two_pass() {
     let measured_peak = report.measured_peak_dbfs.unwrap();
     // Inter-sample transient peak of abruptly started sine wave is captured accurately around +0.57 dBFS
     assert!((measured_peak - 0.57).abs() < 0.1);
-    // Two-pass gain staging automatically applied attenuation to ensure L - M - P headroom
-    assert!(report.applied_gain_db < -4.0);
+    // PCM targets are limited by full scale (L = 0 dBFS), so with M = 0.5 dB the two-pass
+    // gain is 0 - 0.5 - P, with no modulator profile attenuation.
+    assert!((report.applied_gain_db - (-0.5 - measured_peak)).abs() < 0.01);
 
     // Read back with hound
     let wav_bytes = out_buffer.into_inner();

@@ -130,15 +130,6 @@ impl std::fmt::Display for TargetRateFamily {
     }
 }
 
-/// `[gain] headroom` options (`Design.md §6.2`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum HeadroomMode {
-    #[default]
-    Profile,
-    Manual,
-}
-
 /// `[gain] peak_analysis` options (`Design.md §4.4`, `§6.2`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum PeakAnalysisMode {
@@ -408,9 +399,8 @@ pub struct GainConfig {
     #[serde(default)]
     pub preamp_db: f64,
     #[serde(default)]
-    pub headroom: HeadroomMode,
-    #[serde(default)]
     pub peak_analysis: PeakAnalysisMode,
+    #[serde(default)]
     pub overload_policy: OverloadPolicy,
 }
 
@@ -418,7 +408,6 @@ impl Default for GainConfig {
     fn default() -> Self {
         Self {
             preamp_db: 0.0,
-            headroom: HeadroomMode::Profile,
             peak_analysis: PeakAnalysisMode::SinglePass,
             overload_policy: OverloadPolicy::MuteRecover,
         }
@@ -429,6 +418,7 @@ impl Default for GainConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResamplerConfig {
+    #[serde(default)]
     pub preset: FilterPreset,
     #[serde(default = "default_filter_phase")]
     pub phase: FilterPhase,
@@ -768,7 +758,6 @@ impl Settings {
                 }),
                 gain: Some(GainConfig {
                     preamp_db: 0.0,
-                    headroom: HeadroomMode::Profile,
                     peak_analysis: PeakAnalysisMode::TwoPass,
                     overload_policy: OverloadPolicy::Error,
                 }),
@@ -827,7 +816,6 @@ impl Settings {
                 }),
                 gain: Some(GainConfig {
                     preamp_db: -3.0,
-                    headroom: HeadroomMode::Profile,
                     peak_analysis: PeakAnalysisMode::SinglePass,
                     overload_policy: OverloadPolicy::Error,
                 }),
@@ -886,7 +874,6 @@ impl Settings {
                 }),
                 gain: Some(GainConfig {
                     preamp_db: -3.0,
-                    headroom: HeadroomMode::Profile,
                     peak_analysis: PeakAnalysisMode::SinglePass,
                     overload_policy: OverloadPolicy::Error,
                 }),
@@ -945,7 +932,6 @@ impl Settings {
                 }),
                 gain: Some(GainConfig {
                     preamp_db: 0.0,
-                    headroom: HeadroomMode::Profile,
                     peak_analysis: PeakAnalysisMode::SinglePass,
                     overload_policy: OverloadPolicy::Error,
                 }),
@@ -1230,8 +1216,11 @@ impl Settings {
         }
         dsp_config.dither_tpdf_seed = target.dither_tpdf_seed;
         dsp_config.modulator_order = resampler.modulator_order;
-        if gain.headroom == HeadroomMode::Manual && target.format == TargetFormat::Pcm {
+        if target.format == TargetFormat::Pcm {
+            // The preset's attenuation and input limit describe the 1-bit modulator.
+            // PCM output has no modulator, so only full scale limits it.
             dsp_config.profile_headroom_db = 0.0;
+            dsp_config.max_stable_input_dbfs = 0.0;
         }
 
         Ok(ResolvedPipelinePlan {
@@ -1554,7 +1543,6 @@ dsd_rate = "dsd256"
 
 [gain]
 preamp_db = 0.0
-headroom = "profile"
 overload_policy = "mute-recover"
 
 [resampler]
@@ -1647,7 +1635,6 @@ dither_tpdf_seed = 12345
 
 [gain]
 preamp_db = 0.0
-headroom = "profile"
 peak_analysis = "two-pass"
 overload_policy = "error"
 
@@ -1694,7 +1681,6 @@ rate_family = "44100"
 dsd_rate = "dsd128"
 
 [gain]
-headroom = "profile"
 overload_policy = "error"
 
 [resampler]
@@ -2455,5 +2441,46 @@ pcm_rate_hz = 96000
         let settings = Settings::from_toml_str(toml).unwrap();
         let output = settings.output.as_ref().unwrap();
         assert_eq!(output.mixer_control(), Some("PCM"));
+    }
+
+    #[test]
+    fn test_gain_and_resampler_sections_accept_omitted_keys() {
+        let settings = Settings::from_toml_str(
+            r#"
+schema_version = 1
+
+[target]
+format = "dsd"
+dsd_rate = "dsd64"
+
+[gain]
+preamp_db = -2.0
+
+[resampler]
+phase = "minimum"
+"#,
+        )
+        .unwrap();
+        let gain = settings.gain.unwrap();
+        assert_eq!(gain.overload_policy, OverloadPolicy::MuteRecover);
+        assert_eq!(settings.resampler.unwrap().preset, FilterPreset::Balanced);
+    }
+
+    #[test]
+    fn test_preset_headroom_applies_to_dsd_but_not_pcm() {
+        let mut settings = Settings::default_offline(OutputContainer::Dsf);
+        let dsd = settings
+            .explain_for_input_rate(PcmRateHz::PCM_44100)
+            .unwrap()
+            .dsp_config;
+        assert!(dsd.profile_headroom_db < 0.0);
+
+        settings = Settings::default_offline(OutputContainer::Wav);
+        let pcm = settings
+            .explain_for_input_rate(PcmRateHz::PCM_44100)
+            .unwrap()
+            .dsp_config;
+        assert_eq!(pcm.profile_headroom_db, 0.0);
+        assert_eq!(pcm.max_stable_input_dbfs, 0.0);
     }
 }

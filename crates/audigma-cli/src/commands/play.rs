@@ -149,7 +149,11 @@ pub fn run_play(args: PlayArgs) -> Result<(), CliError> {
     // 5. Deserialize merged TOML table into typed Settings and validate
     let settings_str = toml::to_string(&toml_table)
         .map_err(|e| CliError::Serialization(format!("failed to serialize merged TOML: {e}")))?;
-    let settings = Settings::from_toml_str(&settings_str)?;
+    let mut settings = Settings::from_toml_str(&settings_str)?;
+    // `play` streams in real time and cannot look ahead; peak analysis is convert-only.
+    if let Some(gain) = settings.gain.as_mut() {
+        gain.peak_analysis = audigma_settings::PeakAnalysisMode::SinglePass;
+    }
     settings.validate()?;
 
     // 3. Open AudioInput
