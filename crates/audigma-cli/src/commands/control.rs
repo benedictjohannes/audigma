@@ -72,7 +72,8 @@ fn print_telemetry(telem: &audigma_engine::DaemonTelemetry) {
     if let Some(dur) = telem.disconnect_duration_ms {
         println!("  Disconnected For:    {} ms", dur);
     }
-    println!("  Uptime:              {}s", telem.uptime_secs);
+    println!("  Uptime:              {}s", telem.daemon_uptime_secs);
+    println!("  Stream Uptime:       {}s", telem.stream_uptime_secs);
 
     println!("  Input Rate:          {} Hz", telem.input_rate_hz);
     println!(

@@ -239,7 +239,11 @@ pub struct DaemonTelemetry {
     pub overload_count: u64,
     pub xrun_count: u64,
     pub generation: u64,
-    pub uptime_secs: u64,
+    /// Seconds since the daemon process started (survives rate switches).
+    pub daemon_uptime_secs: u64,
+    /// Seconds since the current pipeline was built (resets on rate switch,
+    /// together with the frame counters).
+    pub stream_uptime_secs: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device_target: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -292,7 +296,7 @@ struct TelemetryState {
     drift_estimate_ppm: AtomicU64,
     overload_count: AtomicU64,
     xrun_count: AtomicU64,
-    uptime_secs: AtomicU64,
+    stream_uptime_secs: AtomicU64,
     device_target: Mutex<Option<String>>,
     disconnect_duration_ms: AtomicU64,
     empty_polls: AtomicU64,
@@ -318,6 +322,7 @@ pub struct DaemonControlHandle {
     volume_mode: Arc<AtomicU8>,
     is_muted: Arc<AtomicBool>,
     telemetry: Arc<TelemetryState>,
+    daemon_start: Instant,
 }
 
 impl DaemonControlHandle {
@@ -346,7 +351,7 @@ impl DaemonControlHandle {
             drift_estimate_ppm: AtomicU64::new(f64::NAN.to_bits()),
             overload_count: AtomicU64::new(0),
             xrun_count: AtomicU64::new(0),
-            uptime_secs: AtomicU64::new(0),
+            stream_uptime_secs: AtomicU64::new(0),
             device_target: Mutex::new(None),
             disconnect_duration_ms: AtomicU64::new(DISCONNECT_NONE),
             empty_polls: AtomicU64::new(0),
@@ -370,6 +375,7 @@ impl DaemonControlHandle {
             volume_mode: Arc::new(AtomicU8::new(DaemonVolumeMode::Software as u8)),
             is_muted: Arc::new(AtomicBool::new(false)),
             telemetry: Arc::new(telemetry),
+            daemon_start: Instant::now(),
         }
     }
 
@@ -504,7 +510,8 @@ impl DaemonControlHandle {
             overload_count: self.telemetry.overload_count.load(Ordering::Relaxed),
             xrun_count: self.telemetry.xrun_count.load(Ordering::Relaxed),
             generation: self.generation.load(Ordering::Relaxed),
-            uptime_secs: self.telemetry.uptime_secs.load(Ordering::Relaxed),
+            daemon_uptime_secs: self.daemon_start.elapsed().as_secs(),
+            stream_uptime_secs: self.telemetry.stream_uptime_secs.load(Ordering::Relaxed),
             device_target,
             disconnect_duration_ms,
             empty_polls: self.telemetry.empty_polls.load(Ordering::Relaxed),
@@ -593,7 +600,7 @@ impl DaemonControlHandle {
         asrc_fault_active: bool,
         max_dsp_tile_us: u64,
         late_dsp_tiles: u64,
-        uptime_secs: u64,
+        stream_uptime_secs: u64,
     ) {
         self.telemetry
             .total_input_frames
@@ -657,8 +664,8 @@ impl DaemonControlHandle {
             .late_dsp_tiles
             .store(late_dsp_tiles, Ordering::Relaxed);
         self.telemetry
-            .uptime_secs
-            .store(uptime_secs, Ordering::Relaxed);
+            .stream_uptime_secs
+            .store(stream_uptime_secs, Ordering::Relaxed);
     }
 }
 
