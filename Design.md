@@ -29,7 +29,7 @@ In `audigma`, architectural decisions are enforced directly by the Rust type sys
 
 5. **Clock Domains & Low-Rate Baseband ASRC (`audigma-dsp` / `audigma-engine`):**
    - **Shared Clock (`clock.mode = "shared-graph"`):** When both `[input]` and `[output]` use `backend = "pipewire"`, both sides are paced by the same PipeWire graph clock; no asynchronous drift controller is needed.
-   - **Independent Clocks (`clock.mode = "adaptive-input"`):** When bridging a software input clock (PipeWire sink or ALSA Loopback) to a physical ALSA hardware DAC (`[output] backend = "alsa"`), the hardware DAC is the master clock. Clock drift is absorbed by factoring the total conversion ratio as:
+   - **Independent Clocks (`clock.mode = "adaptive-input"`):** When bridging a software input clock (the PipeWire virtual sink) to a physical ALSA hardware DAC (`[output] backend = "alsa"`), the hardware DAC is the master clock. Clock drift is absorbed by factoring the total conversion ratio as:
      $$R_{\text{total}}(t) = R_{\text{asrc}}(t) \times R_{\text{rational}} \times 2^K$$
    - The continuously variable fractional-phase stage ($R_{\text{asrc}}(t)$) **always executes at the low baseband/intermediate PCM rate ($1\times$ or $2\times$)** *before* the fixed-coefficient $2\times$ half-band FIR cascade—never at the final MHz DSD bit rate, and never by dropping/duplicating DSD bits.
    - **ASRC Drift Bounds & Recovery:** The drift loop operates within a bounded correction range (e.g. `max_correction_ppm = 500`). When measured drift or queue fill exceeds safety thresholds, the engine invokes a controlled fault/recovery sequence rather than silently dropping or duplicating samples.
@@ -99,7 +99,7 @@ examples/                 # Ready-to-use TOML configs, MPD snippets, and WirePlu
 ### 3.1 Two Execution Modes
 
 1. **Live Streaming Daemon (`audigma run`):**
-   - Bridges a live `[input]` (`pipewire` virtual sink `audigma_sink` or `alsa` capture/loopback) through the prepared real-time DSP pipeline to a live `[output]` (`pipewire` node or exclusive `alsa` hardware device).
+   - Bridges a live `[input]` (`pipewire` virtual sink `audigma_sink`) through the prepared real-time DSP pipeline to a live `[output]` (`pipewire` node or exclusive `alsa` hardware device).
    - Allows both desktop applications (browsers, YouTube Music) and dedicated players (MPD) to play through the same pipeline without `Device or resource busy` lockouts.
 
 2. **Offline File / Stream Converter (`audigma convert`):**
@@ -395,50 +395,7 @@ mode = "adaptive-input"
 max_correction_ppm = 500
 ```
 
-#### C. ALSA Loopback (MPD) $\to$ Direct Exclusive ALSA High-Rate PCM (`loopback-alsa-pcm.toml`)
-```toml
-schema_version = 1
-
-[input]
-backend = "alsa"
-device = "hw:Loopback,1,0"
-channels = 2
-channel_positions = [ "FL", "FR" ]
-
-[output]
-backend = "alsa"
-device = "hw:CARD=K17,DEV=0"
-transport = "pcm"
-reserve_device = true
-volume_control = "hardware-software-fallback"
-device_wait_ms = -1
-keep_audio_sink_ms = 5000
-buffer_ms = 40
-period_ms = 5
-
-[target]
-format = "pcm"
-rate_family = "source"
-pcm_rate_hz = 768000
-sample_format = "s32le"
-valid_bits = 24
-dither = "tpdf"
-
-[gain]
-preamp_db = -4.0
-overload_policy = "mute-recover"
-
-[resampler]
-preset = "reference"
-phase = "linear"
-apodization = "off"
-
-[clock]
-mode = "adaptive-input"
-max_correction_ppm = 500
-```
-
-#### D. Offline WAV/FLAC $\to$ DSF (`offline-dsf.toml`)
+#### C. Offline WAV/FLAC $\to$ DSF (`offline-dsf.toml`)
 ```toml
 schema_version = 1
 
@@ -473,7 +430,7 @@ write_report = true
 dsf_pad_mode = "spec-zero"
 ```
 
-#### E. Raw PCM stdin $\to$ Raw DoP stdout (`stdio-dop.toml`)
+#### D. Raw PCM stdin $\to$ Raw DoP stdout (`stdio-dop.toml`)
 ```toml
 schema_version = 1
 

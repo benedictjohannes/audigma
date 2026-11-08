@@ -141,10 +141,6 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
                     sink.set_preroll_secs(target_preroll_secs);
                     Ok(Box::new(sink))
                 }
-                InputBackend::Alsa => Err(EngineError::AudioBackend {
-                    backend: "alsa",
-                    message: "ALSA live capture input not yet configured".to_string(),
-                }),
                 InputBackend::File | InputBackend::Stdio => Err(EngineError::InvalidTopology {
                     message: "File/Stdio backend is for offline mode; use 'audigma convert'"
                         .to_string(),

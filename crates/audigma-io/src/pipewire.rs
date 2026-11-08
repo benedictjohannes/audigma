@@ -705,7 +705,6 @@ impl PipeWireVirtualSink {
         let dummy_cfg = InputConfig {
             backend: audigma_settings::InputBackend::Pipewire,
             node_name: Some(node_name.to_string()),
-            device: None,
             sample_format: None,
             rate_hz: PcmRateHz::new(rate_hz),
             channels: Some(channels as u8),

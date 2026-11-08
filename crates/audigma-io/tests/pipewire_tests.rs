@@ -145,7 +145,6 @@ fn test_pipewire_virtual_sink_from_input_config_resolution() {
     let in_cfg = InputConfig {
         backend: InputBackend::Pipewire,
         node_name: Some("test_dynamic_sink".to_string()),
-        device: None,
         sample_format: None,
         rate_hz: None,
         channels: Some(6),

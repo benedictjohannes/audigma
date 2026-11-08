@@ -34,7 +34,6 @@ pub enum SettingsError {
 #[serde(rename_all = "lowercase")]
 pub enum InputBackend {
     Pipewire,
-    Alsa,
     File,
     Stdio,
 }
@@ -237,7 +236,6 @@ impl DsdInputConfig {
 pub struct InputConfig {
     pub backend: InputBackend,
     pub node_name: Option<String>,
-    pub device: Option<String>,
     pub sample_format: Option<SampleFormat>,
     pub rate_hz: Option<PcmRateHz>,
     pub channels: Option<u8>,
@@ -735,7 +733,6 @@ impl Settings {
                 input: Some(InputConfig {
                     backend: InputBackend::File,
                     node_name: None,
-                    device: None,
                     sample_format: None,
                     rate_hz: None,
                     channels: None,
@@ -796,7 +793,6 @@ impl Settings {
                 input: Some(InputConfig {
                     backend: InputBackend::File,
                     node_name: None,
-                    device: None,
                     sample_format: None,
                     rate_hz: None,
                     channels: None,
@@ -857,7 +853,6 @@ impl Settings {
                 input: Some(InputConfig {
                     backend: InputBackend::File,
                     node_name: None,
-                    device: None,
                     sample_format: None,
                     rate_hz: None,
                     channels: None,
@@ -918,7 +913,6 @@ impl Settings {
                 input: Some(InputConfig {
                     backend: InputBackend::Stdio,
                     node_name: None,
-                    device: None,
                     sample_format: Some(SampleFormat::S16Le),
                     rate_hz: Some(PcmRateHz::PCM_44100),
                     channels: Some(2),
@@ -1659,76 +1653,7 @@ modulator_order = 6
     }
 
     #[test]
-    fn test_design_md_fixture_c_loopback_alsa_pcm() {
-        let toml = r#"
-schema_version = 1
-
-[input]
-backend = "alsa"
-device = "hw:Loopback,1,0"
-channels = 2
-channel_positions = [ "FL", "FR" ]
-
-[output]
-backend = "alsa"
-device = "hw:CARD=K17,DEV=0"
-transport = "pcm"
-reserve_device = true
-volume_control = "hardware-software-fallback"
-device_wait_ms = -1
-keep_audio_sink_ms = 5000
-buffer_ms = 40
-period_ms = 5
-
-[target]
-format = "pcm"
-rate_family = "source"
-pcm_rate_hz = 768000
-sample_format = "s32le"
-valid_bits = 24
-dither = "tpdf"
-
-[gain]
-preamp_db = -4.0
-overload_policy = "mute-recover"
-
-[resampler]
-preset = "reference"
-phase = "linear"
-apodization = "off"
-
-[clock]
-mode = "adaptive-input"
-max_correction_ppm = 500
-"#;
-        let settings = Settings::from_toml_str(toml).unwrap();
-        let plan_44 = settings
-            .explain_for_input_rate(PcmRateHz::PCM_44100)
-            .unwrap();
-        assert_eq!(
-            plan_44.stream_spec.target,
-            TargetRateSpec::Pcm {
-                rate: PcmRateHz::PCM_705600,
-                sample_format: SampleFormat::S32Le,
-                valid_bits: Some(24),
-            }
-        );
-
-        let plan_48 = settings
-            .explain_for_input_rate(PcmRateHz::PCM_96000)
-            .unwrap();
-        assert_eq!(
-            plan_48.stream_spec.target,
-            TargetRateSpec::Pcm {
-                rate: PcmRateHz::PCM_768000,
-                sample_format: SampleFormat::S32Le,
-                valid_bits: Some(24),
-            }
-        );
-    }
-
-    #[test]
-    fn test_design_md_fixture_d_offline_dsf() {
+    fn test_design_md_fixture_c_offline_dsf() {
         let toml = r#"
 schema_version = 1
 
@@ -1774,7 +1699,7 @@ dsf_pad_mode = "spec-zero"
     }
 
     #[test]
-    fn test_design_md_fixture_e_stdio_dop() {
+    fn test_design_md_fixture_d_stdio_dop() {
         let toml = r#"
 schema_version = 1
 
@@ -1991,7 +1916,6 @@ pcm_rate_hz = 96000
         let mono_input = InputConfig {
             backend: InputBackend::Pipewire,
             node_name: None,
-            device: None,
             sample_format: None,
             rate_hz: None,
             channels: Some(1),
