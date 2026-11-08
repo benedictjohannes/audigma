@@ -104,7 +104,7 @@ Drift correction is needed only when the input runs on its own clock: then its r
 
 The PipeWire virtual sink does not run on its own clock: audigma pulls it whenever the queue gets low, so it follows the output device exactly and needs no correction.
 
-- `auto`: correct an input with its own clock when `output.backend = "alsa"` (the DAC clock is master); otherwise off. With the PipeWire virtual sink this means off. Recommended.
+- `auto`: correct an input with its own clock when `output.backend = "alsa"` (the DAC clock is master); otherwise off. With the PipeWire virtual sink this means off.
 - `on`: correct an input with its own clock. With the PipeWire virtual sink the drift is only measured and shown by `audigma status`; nothing is changed in the audio. With a PipeWire output a warning is shown: the output stream is already rate-matched by PipeWire.
 - `off`: never correct or measure drift.
 
@@ -138,5 +138,5 @@ If the queue still runs nearly empty or full, the full correction is applied in 
 """
 default = 500
 range = [1, 10000]
-show_if = { any = [{ key = "resampler.drift_correction", eq = "on" }, { key = "resampler.drift_correction", eq = "auto" }] }
+show_if = { key = "resampler.drift_correction", eq = "on" }
 applies_to = ["run"]
