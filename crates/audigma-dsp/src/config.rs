@@ -104,7 +104,6 @@ pub enum TargetRateSpec {
     Pcm {
         rate: PcmRateHz,
         sample_format: SampleFormat,
-        valid_bits: Option<u8>,
     },
     Dsd {
         bit_rate: DsdBitRateHz,

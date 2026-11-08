@@ -849,7 +849,6 @@ fn input_dsp_timing_counts_one_job_and_uses_pre_src_duration() {
     let target = audigma_dsp::TargetRateSpec::Pcm {
         rate: PcmRateHz::PCM_48000,
         sample_format: audigma_dsp::SampleFormat::F64,
-        valid_bits: None,
     };
     let topology = PipelineTopology::resolve(PcmRateHz::PCM_44100, target).unwrap();
     let config = InputDspConfig {

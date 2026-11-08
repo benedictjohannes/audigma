@@ -546,7 +546,6 @@ mod tests {
         let pcm96_spec = TargetRateSpec::Pcm {
             rate: PcmRateHz::PCM_96000,
             sample_format: crate::config::SampleFormat::F32,
-            valid_bits: None,
         };
 
         // DSD64 -> DSD256: in_useful is 176.4k -> selects 176.4k

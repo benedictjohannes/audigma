@@ -397,7 +397,6 @@ pub struct TargetConfig {
     pub pcm_rate_hz: Option<PcmRateHz>,
     pub dsd_rate: Option<DsdMultiplier>,
     pub sample_format: Option<SampleFormat>,
-    pub valid_bits: Option<u8>,
     pub dither: Option<DitherType>,
     pub dither_tpdf_seed: Option<u64>,
 }
@@ -764,7 +763,6 @@ impl Settings {
                     pcm_rate_hz: None,
                     dsd_rate: Some(DsdMultiplier::Dsd256),
                     sample_format: None,
-                    valid_bits: None,
                     dither: None,
                     dither_tpdf_seed: Some(12345),
                 }),
@@ -824,7 +822,6 @@ impl Settings {
                     pcm_rate_hz: Some(PcmRateHz::PCM_192000),
                     dsd_rate: None,
                     sample_format: Some(SampleFormat::S32Le),
-                    valid_bits: Some(24),
                     dither: Some(DitherType::Tpdf),
                     dither_tpdf_seed: None,
                 }),
@@ -884,7 +881,6 @@ impl Settings {
                     pcm_rate_hz: Some(PcmRateHz::PCM_96000),
                     dsd_rate: None,
                     sample_format: Some(SampleFormat::S24Le),
-                    valid_bits: Some(24),
                     dither: Some(DitherType::Tpdf),
                     dither_tpdf_seed: None,
                 }),
@@ -944,7 +940,6 @@ impl Settings {
                     pcm_rate_hz: None,
                     dsd_rate: Some(DsdMultiplier::Dsd128),
                     sample_format: None,
-                    valid_bits: None,
                     dither: None,
                     dither_tpdf_seed: None,
                 }),
@@ -1209,7 +1204,6 @@ impl Settings {
                 TargetRateSpec::Pcm {
                     rate,
                     sample_format: target.sample_format.unwrap_or(SampleFormat::S32Le),
-                    valid_bits: target.valid_bits,
                 }
             }
             TargetFormat::Dsd => {
@@ -1524,7 +1518,6 @@ mode = "shared-graph"
             TargetRateSpec::Pcm {
                 rate: PcmRateHz::PCM_192000,
                 sample_format: SampleFormat::F32,
-                valid_bits: None,
             }
         );
     }
@@ -1752,7 +1745,6 @@ format = "pcm"
 rate_family = "48000"
 pcm_rate_hz = 192000
 sample_format = "s24le"
-valid_bits = 24
 dither = "tpdf"
 
 [gain]
@@ -2315,7 +2307,6 @@ pcm_rate_hz = 768000
             TargetRateSpec::Pcm {
                 rate: PcmRateHz::PCM_705600,
                 sample_format: SampleFormat::S32Le,
-                valid_bits: None,
             }
         );
         // 48k input automatically resolves to 16x 48k = 768k
@@ -2327,7 +2318,6 @@ pcm_rate_hz = 768000
             TargetRateSpec::Pcm {
                 rate: PcmRateHz::PCM_768000,
                 sample_format: SampleFormat::S32Le,
-                valid_bits: None,
             }
         );
 
@@ -2350,7 +2340,6 @@ pcm_rate_hz = 192000
             TargetRateSpec::Pcm {
                 rate: PcmRateHz::PCM_176400,
                 sample_format: SampleFormat::S32Le,
-                valid_bits: None,
             }
         );
         assert_eq!(
@@ -2362,7 +2351,6 @@ pcm_rate_hz = 192000
             TargetRateSpec::Pcm {
                 rate: PcmRateHz::PCM_176400,
                 sample_format: SampleFormat::S32Le,
-                valid_bits: None,
             }
         );
     }

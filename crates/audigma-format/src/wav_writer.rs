@@ -11,7 +11,6 @@ use std::io::{Seek, Write};
 pub struct PcmWavWriter<W: Write + Seek> {
     writer: WavWriter<W>,
     sample_format: SampleFormat,
-    valid_bits: u16,
     frames_written: u64,
 }
 
@@ -21,18 +20,12 @@ impl<W: Write + Seek> PcmWavWriter<W> {
         writer: W,
         sample_rate: PcmRateHz,
         sample_format: SampleFormat,
-        valid_bits: Option<u8>,
     ) -> Result<Self, FormatError> {
-        let (bits_per_sample, hound_fmt, eff_valid_bits) = match sample_format {
-            SampleFormat::S16Le => (16u16, HoundFormat::Int, 16u16),
-            SampleFormat::S24Le | SampleFormat::S24_3Le => {
-                (24u16, HoundFormat::Int, valid_bits.unwrap_or(24) as u16)
-            }
-            SampleFormat::S32Le => {
-                let v = valid_bits.unwrap_or(24).min(32) as u16;
-                (32u16, HoundFormat::Int, v)
-            }
-            SampleFormat::F32 => (32u16, HoundFormat::Float, 32u16),
+        let (bits_per_sample, hound_fmt) = match sample_format {
+            SampleFormat::S16Le => (16u16, HoundFormat::Int),
+            SampleFormat::S24Le | SampleFormat::S24_3Le => (24u16, HoundFormat::Int),
+            SampleFormat::S32Le => (32u16, HoundFormat::Int),
+            SampleFormat::F32 => (32u16, HoundFormat::Float),
             SampleFormat::F64 => {
                 return Err(FormatError::UnsupportedSampleFormat(sample_format));
             }
@@ -55,7 +48,6 @@ impl<W: Write + Seek> PcmWavWriter<W> {
         Ok(Self {
             writer: wav_writer,
             sample_format,
-            valid_bits: eff_valid_bits,
             frames_written: 0,
         })
     }
@@ -89,23 +81,12 @@ impl<W: Write + Seek> PcmWavWriter<W> {
                 }
             }
             SampleFormat::S32Le => {
-                if self.valid_bits <= 24 {
-                    // 24-bit aligned in 32-bit container (shifted by 8)
-                    let scale = 8388607.0_f64;
-                    for (&l, &r) in left.iter().zip(right.iter()) {
-                        let il = ((l * scale).clamp(-8388608.0, 8388607.0).round() as i32) << 8;
-                        let ir = ((r * scale).clamp(-8388608.0, 8388607.0).round() as i32) << 8;
-                        self.writer.write_sample(il).map_err(map_hound_err)?;
-                        self.writer.write_sample(ir).map_err(map_hound_err)?;
-                    }
-                } else {
-                    let scale = 2147483647.0_f64;
-                    for (&l, &r) in left.iter().zip(right.iter()) {
-                        let il = (l * scale).clamp(-2147483648.0, 2147483647.0).round() as i32;
-                        let ir = (r * scale).clamp(-2147483648.0, 2147483647.0).round() as i32;
-                        self.writer.write_sample(il).map_err(map_hound_err)?;
-                        self.writer.write_sample(ir).map_err(map_hound_err)?;
-                    }
+                let scale = 2147483647.0_f64;
+                for (&l, &r) in left.iter().zip(right.iter()) {
+                    let il = (l * scale).clamp(-2147483648.0, 2147483647.0).round() as i32;
+                    let ir = (r * scale).clamp(-2147483648.0, 2147483647.0).round() as i32;
+                    self.writer.write_sample(il).map_err(map_hound_err)?;
+                    self.writer.write_sample(ir).map_err(map_hound_err)?;
                 }
             }
             SampleFormat::F32 => {
@@ -143,13 +124,8 @@ mod tests {
     #[test]
     fn test_wav_writer_s24le_roundtrip() {
         let mut buffer = Cursor::new(Vec::new());
-        let mut writer = PcmWavWriter::new(
-            &mut buffer,
-            PcmRateHz::PCM_192000,
-            SampleFormat::S24Le,
-            Some(24),
-        )
-        .unwrap();
+        let mut writer =
+            PcmWavWriter::new(&mut buffer, PcmRateHz::PCM_192000, SampleFormat::S24Le).unwrap();
 
         let left = vec![0.0, 0.5, -0.5, 0.9999];
         let right = vec![0.0, -0.25, 0.25, -0.9999];

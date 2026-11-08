@@ -237,7 +237,6 @@ mod tests {
         let target = TargetRateSpec::Pcm {
             rate: PcmRateHz::PCM_352800, // 8x
             sample_format: SampleFormat::S32Le,
-            valid_bits: None,
         };
         let topo = PipelineTopology::resolve(in_rate, target).unwrap();
         assert_eq!(topo.intermediate_rate, in_rate);
@@ -255,7 +254,6 @@ mod tests {
         let target = TargetRateSpec::Pcm {
             rate: PcmRateHz::PCM_44100,
             sample_format: SampleFormat::S32Le,
-            valid_bits: None,
         };
         let topo = PipelineTopology::resolve(in_rate, target).unwrap();
         assert_eq!(topo.intermediate_rate, PcmRateHz::PCM_44100);
@@ -273,7 +271,6 @@ mod tests {
         let target = TargetRateSpec::Pcm {
             rate: PcmRateHz::PCM_48000,
             sample_format: SampleFormat::S32Le,
-            valid_bits: None,
         };
         let topo = PipelineTopology::resolve(in_rate, target).unwrap();
         assert_eq!(topo.intermediate_rate, PcmRateHz::PCM_48000);
@@ -290,7 +287,6 @@ mod tests {
         let target = TargetRateSpec::Pcm {
             rate: PcmRateHz::PCM_48000,
             sample_format: SampleFormat::S32Le,
-            valid_bits: None,
         };
         let topo = PipelineTopology::resolve(in_rate, target).unwrap();
         assert_eq!(topo.intermediate_rate, PcmRateHz::PCM_48000);
@@ -307,7 +303,6 @@ mod tests {
         let target = TargetRateSpec::Pcm {
             rate: PcmRateHz::PCM_48000,
             sample_format: SampleFormat::S32Le,
-            valid_bits: None,
         };
         let topo = PipelineTopology::resolve(in_rate, target).unwrap();
         assert_eq!(topo.intermediate_rate, PcmRateHz::PCM_48000);

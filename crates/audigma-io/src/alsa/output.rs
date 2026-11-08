@@ -679,7 +679,6 @@ mod tests {
         let target_spec = TargetRateSpec::Pcm {
             rate: PcmRateHz::PCM_768000,
             sample_format: SampleFormat::S32Le,
-            valid_bits: Some(24),
         };
 
         let cfg = AlsaOutputConfig::from_settings(&settings, &target_spec).unwrap();

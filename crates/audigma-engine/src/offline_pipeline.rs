@@ -80,7 +80,6 @@ enum ContainerWriter<'a> {
     RawPcm {
         output: Box<dyn AudioOutput + 'a>,
         format: SampleFormat,
-        _valid_bits: u8,
         staging_pcm: Vec<u8>,
         frames_written: u64,
         bytes_written: u64,
@@ -127,19 +126,18 @@ impl<'a> ContainerWriter<'a> {
                 if !output.can_seek() {
                     return Err(EngineError::SeekableOutputRequired { container: "wav" });
                 }
-                let (pcm_rate, sample_format, valid_bits) = match target_spec {
+                let (pcm_rate, sample_format) = match target_spec {
                     TargetRateSpec::Pcm {
                         rate,
                         sample_format,
-                        valid_bits,
-                    } => (*rate, *sample_format, *valid_bits),
+                    } => (*rate, *sample_format),
                     TargetRateSpec::Dsd { .. } => {
                         return Err(EngineError::InvalidTopology {
                             message: "cannot write WAV container for DSD target format".into(),
                         });
                     }
                 };
-                let writer = PcmWavWriter::new(output, pcm_rate, sample_format, valid_bits)?;
+                let writer = PcmWavWriter::new(output, pcm_rate, sample_format)?;
                 Ok(Self::Wav(writer))
             }
             OutputContainer::Flac => {
@@ -209,7 +207,6 @@ impl<'a> ContainerWriter<'a> {
                         Ok(Self::RawPcm {
                             output,
                             format: sample_format,
-                            _valid_bits: 24,
                             staging_pcm: Vec::new(),
                             frames_written: 0,
                             bytes_written: 0,

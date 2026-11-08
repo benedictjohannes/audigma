@@ -27,7 +27,7 @@ fn test_wav_encode_and_decode_roundtrip_with_rewind() {
     let mut wav_bytes = Cursor::new(Vec::new());
     {
         let mut writer =
-            PcmWavWriter::new(&mut wav_bytes, sample_rate, SampleFormat::S24Le, Some(24)).unwrap();
+            PcmWavWriter::new(&mut wav_bytes, sample_rate, SampleFormat::S24Le).unwrap();
         writer.write_stereo_samples(&orig_l, &orig_r).unwrap();
         writer.finalize().unwrap();
     }
