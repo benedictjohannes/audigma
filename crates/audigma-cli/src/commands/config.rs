@@ -87,6 +87,7 @@ pub fn run_config(args: ConfigArgs) -> Result<(), CliError> {
                     "preamp_db": plan.dsp_config.preamp_db,
                     "profile_headroom_db": plan.dsp_config.profile_headroom_db,
                     "max_stable_input_dbfs": plan.dsp_config.max_stable_input_dbfs,
+                    "safety_margin_db": plan.dsp_config.safety_margin_db,
                     "dither": format!("{:?}", plan.dsp_config.dither),
                     "overload_policy": format!("{:?}", plan.dsp_config.overload_policy),
                 });
@@ -105,6 +106,10 @@ pub fn run_config(args: ConfigArgs) -> Result<(), CliError> {
                 println!(
                     "Max Input:     {:.2} dBFS",
                     plan.dsp_config.max_stable_input_dbfs
+                );
+                println!(
+                    "Margin:        {:.2} dB (DSD only; 0 for PCM targets)",
+                    plan.dsp_config.safety_margin_db
                 );
                 println!("Dither:        {:?}", plan.dsp_config.dither);
                 println!("Overload:      {:?}", plan.dsp_config.overload_policy);

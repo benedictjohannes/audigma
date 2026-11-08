@@ -389,6 +389,13 @@ pub struct GainConfig {
     pub peak_analysis: PeakAnalysisMode,
     #[serde(default)]
     pub overload_policy: OverloadPolicy,
+    /// Modulator safety margin `M` in dB: 0, 0.25 or 0.5. Applies to DSD targets only; PCM targets use `M = 0` (`Design.md §4.4`).
+    #[serde(default = "default_dsd_safety_margin_db")]
+    pub dsd_safety_margin_db: f64,
+}
+
+const fn default_dsd_safety_margin_db() -> f64 {
+    audigma_dsp::DEFAULT_SAFETY_MARGIN_DB
 }
 
 impl Default for GainConfig {
@@ -397,6 +404,7 @@ impl Default for GainConfig {
             preamp_db: 0.0,
             peak_analysis: PeakAnalysisMode::SinglePass,
             overload_policy: OverloadPolicy::MuteRecover,
+            dsd_safety_margin_db: default_dsd_safety_margin_db(),
         }
     }
 }
@@ -743,6 +751,7 @@ impl Settings {
                     preamp_db: 0.0,
                     peak_analysis: PeakAnalysisMode::TwoPass,
                     overload_policy: OverloadPolicy::Error,
+                    dsd_safety_margin_db: 0.25,
                 }),
                 resampler: Some(ResamplerConfig {
                     phase: FilterPhase::Linear,
@@ -800,6 +809,7 @@ impl Settings {
                     preamp_db: -3.0,
                     peak_analysis: PeakAnalysisMode::SinglePass,
                     overload_policy: OverloadPolicy::Error,
+                    dsd_safety_margin_db: 0.25,
                 }),
                 resampler: Some(ResamplerConfig {
                     phase: FilterPhase::Linear,
@@ -857,6 +867,7 @@ impl Settings {
                     preamp_db: -3.0,
                     peak_analysis: PeakAnalysisMode::SinglePass,
                     overload_policy: OverloadPolicy::Error,
+                    dsd_safety_margin_db: 0.25,
                 }),
                 resampler: Some(ResamplerConfig {
                     phase: FilterPhase::Linear,
@@ -914,6 +925,7 @@ impl Settings {
                     preamp_db: 0.0,
                     peak_analysis: PeakAnalysisMode::SinglePass,
                     overload_policy: OverloadPolicy::Error,
+                    dsd_safety_margin_db: 0.25,
                 }),
                 resampler: Some(ResamplerConfig {
                     phase: FilterPhase::Linear,
@@ -944,6 +956,14 @@ impl Settings {
             return Err(SettingsError::Validation(
                 "configuration must specify [target]",
             ));
+        }
+
+        if let Some(gain) = &self.gain {
+            if ![0.0, 0.25, 0.5].contains(&gain.dsd_safety_margin_db) {
+                return Err(SettingsError::Validation(
+                    "[gain] dsd_safety_margin_db must be 0, 0.25 or 0.5",
+                ));
+            }
         }
 
         if let Some(resampler) = &self.resampler {
@@ -1179,9 +1199,11 @@ impl Settings {
         // The input limit and headroom belong to the selected modulator (order and bit rate). PCM output
         // has no modulator, so only full scale limits it (the default: no headroom, L = 0 dBFS).
         if let TargetRateSpec::Dsd { bit_rate } = target_spec {
-            dsp_config.apply_modulator_limits(bit_rate).map_err(|_| {
-                SettingsError::Validation("no modulator for this order and DSD rate")
-            })?;
+            dsp_config
+                .apply_modulator_limits(bit_rate, gain.dsd_safety_margin_db)
+                .map_err(|_| {
+                    SettingsError::Validation("no modulator for this order and DSD rate")
+                })?;
         }
 
         Ok(ResolvedPipelinePlan {
@@ -1550,6 +1572,37 @@ modulator_order = 7
             .explain_for_input_rate(PcmRateHz::PCM_44100)
             .unwrap();
         assert_eq!(plan.dsp_config.modulator_order, 7);
+    }
+
+    fn margin_toml(extra: &str) -> String {
+        format!(
+            "schema_version = 1\n\n[output]\nbackend = \"alsa\"\ndevice = \"hw:0,0\"\n\n[target]\nformat = \"dsd\"\ndsd_rate = \"dsd256\"\n\n[gain]\n{extra}\n"
+        )
+    }
+
+    #[test]
+    fn test_safety_margin_default_values_and_rejection() {
+        let plan = |t: &str| {
+            Settings::from_toml_str(t).and_then(|s| s.explain_for_input_rate(PcmRateHz::PCM_44100))
+        };
+        let default = plan(&margin_toml("")).unwrap().dsp_config;
+        assert_eq!(default.safety_margin_db, 0.25);
+        let m0 = plan(&margin_toml("dsd_safety_margin_db = 0"))
+            .unwrap()
+            .dsp_config;
+        assert_eq!(m0.safety_margin_db, 0.0);
+        assert_eq!(m0.profile_headroom_db, m0.max_stable_input_dbfs);
+        let m5 = plan(&margin_toml("dsd_safety_margin_db = 0.5"))
+            .unwrap()
+            .dsp_config;
+        assert!((m5.profile_headroom_db - (m5.max_stable_input_dbfs - 0.5)).abs() < 1e-12);
+        let pcm = margin_toml("dsd_safety_margin_db = 0.5").replace(
+            "format = \"dsd\"\ndsd_rate = \"dsd256\"",
+            "format = \"pcm\"\npcm_rate_hz = 192000",
+        );
+        assert_eq!(plan(&pcm).unwrap().dsp_config.safety_margin_db, 0.0);
+        let err = plan(&margin_toml("dsd_safety_margin_db = 0.3")).unwrap_err();
+        assert!(err.to_string().contains("dsd_safety_margin_db"));
     }
 
     #[test]

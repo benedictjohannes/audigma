@@ -219,7 +219,7 @@ decode / unpack / DSD decimation
 - **Input Limit & Baseline Headroom:** The input limit $L$ belongs to the modulator (order and DSD rate): every coefficient table (`tables.rs`, per order and DSD rate) carries its measured $L$ (`max_stable_input_dbfs`) and its $H_\infty$. $L$ comes from `design_crfb.measure_msa_dbfs`: DC and 50 Hz–20 kHz sines, level raised in 0.25 dB steps from -8 dBFS, $2^{21}$ samples each, without dither and with two TPDF dither sequences (production dithers), unstable when any state exceeds the overload bound (50); $L$ is one 0.25 dB guard step below the last level stable in every trial (at the edge itself stability is statistical; DC is the hardest stimulus). The modulator report runs the production modulator at exactly $L$ for the same stimuli and fails on any overload. Current values: 5th order -4.0 to -4.25 dBFS, 7th order -4.5 to -4.75 dBFS (`docs/measurements/modulator.md` lists them). For DSD targets the baseline headroom is $L - M$, so a 0 dBFS PCM peak reaches the modulator at $L - M$; `config explain` reports $L$ for the resolved target and the total attenuation (`preamp_db + volume_db + profile_headroom_db`).
 
 ### 4.4 Headroom Inequality, Two-Pass Offline Peak Analysis & Live Overload Protection
-- **Required Attenuation Equation:** Given a predicted or measured post-interpolation peak of $P\text{ dBFS}$, the selected modulator's maximum stable input limit $L\text{ dBFS}$ (§4.3, e.g. $-4.0\text{ dBFS}$ for the 5th order at DSD64), and a safety margin $M\text{ dB}$ (default $0.5\text{ dB}$), the total applied pre-modulator gain must satisfy:
+- **Required Attenuation Equation:** Given a predicted or measured post-interpolation peak of $P\text{ dBFS}$, the selected modulator's maximum stable input limit $L\text{ dBFS}$ (§4.3, e.g. $-4.0\text{ dBFS}$ for the 5th order at DSD64), and a safety margin $M\text{ dB}$ (`[gain] dsd_safety_margin_db`: exactly `0`, `0.25` or `0.5`; default `0.25`; DSD targets only: sets the profile headroom `L - M` and the two-pass gain; PCM targets use `M = 0`; `0` is proven for the measured stimuli, not arbitrary inter-sample peaks, and overloads fall back to the overload policy), the total applied pre-modulator gain must satisfy:
   $$\text{gain\_db} \le L - M - P$$
 - **PCM targets:** The profile attenuation and the input limit $L$ describe the 1-bit modulator, so they apply to DSD targets only. For PCM targets the profile headroom is $0\text{ dB}$ and $L = 0\text{ dBFS}$ (full scale).
 - **Offline Two-Pass Gain (`peak_analysis = "two-pass"`, `convert` only; `run` and `play` ignore it):** Because the PCM SRC + $2\times$ FIR interpolation cascade is Linear and Time-Invariant (LTI), scaling the pre-SRC input by gain $G$ scales the reconstructed peak entering the modulator by exactly $G$. Therefore, **Pass 1 runs only the PCM interpolation cascade** (skipping the sequential 1-bit DSM loop and bit packing) to measure the true inter-sample peak $P\text{ dBFS}$, solves $\text{gain\_db} = \min(\text{configured\_gain\_db},\; L - M - P)$, and **Pass 2 runs the complete pipeline**.
@@ -390,6 +390,7 @@ dsd_rate = "dsd256"
 [gain]
 preamp_db = 0.0
 overload_policy = "mute-recover"
+dsd_safety_margin_db = 0.25   # 0 | 0.25 | 0.5
 
 [resampler]
 phase = "minimum"

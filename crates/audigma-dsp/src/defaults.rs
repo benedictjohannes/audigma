@@ -19,7 +19,7 @@ pub const DEFAULT_MODULATOR_ORDER: u8 = 5;
 ///
 /// The input limit itself belongs to the modulator (order and DSD rate):
 /// see `modulator::max_stable_input_dbfs` and `DspConfiguration::apply_modulator_limits`.
-pub const DEFAULT_SAFETY_MARGIN_DB: f64 = 0.5;
+pub const DEFAULT_SAFETY_MARGIN_DB: f64 = 0.25;
 
 /// Image rejection every interpolation/decimation filter is designed for (`Design.md §4.2`).
 pub const FILTER_REJECTION_TARGET_DB: f64 = 140.0;

@@ -234,7 +234,7 @@ impl DspConfiguration {
             user_volume_db,
             profile_headroom_db: 0.0,
             max_stable_input_dbfs: 0.0,
-            safety_margin_db: crate::defaults::DEFAULT_SAFETY_MARGIN_DB,
+            safety_margin_db: 0.0,
             dither: DitherType::Tpdf,
             dither_tpdf_seed: None,
             overload_policy,
@@ -242,14 +242,16 @@ impl DspConfiguration {
     }
 
     /// Sets the input limit `L` of the selected modulator (`modulator_order` at `bit_rate`) and the matching
-    /// profile headroom `L - M`, so a 0 dBFS PCM peak reaches the modulator at `L - M` (`Design.md §4.3-§4.4`).
+    /// profile headroom `L - M` (`M` = `safety_margin_db`, DSD only; PCM keeps `M = 0`), so a 0 dBFS PCM peak reaches the modulator at `L - M` (`Design.md §4.3-§4.4`).
     pub fn apply_modulator_limits(
         &mut self,
         bit_rate: DsdBitRateHz,
+        safety_margin_db: f64,
     ) -> Result<(), crate::modulator::ModulatorError> {
         let limit = crate::modulator::max_stable_input_dbfs(self.modulator_order, bit_rate)?;
         self.max_stable_input_dbfs = limit;
-        self.profile_headroom_db = limit - self.safety_margin_db;
+        self.safety_margin_db = safety_margin_db;
+        self.profile_headroom_db = limit - safety_margin_db;
         Ok(())
     }
 
@@ -332,8 +334,10 @@ mod tests {
         // Without a modulator (PCM) there is no headroom and the limit is full scale.
         assert_eq!(cfg.total_configured_gain_db(), 0.0);
         assert_eq!(cfg.max_stable_input_dbfs, 0.0);
+        assert_eq!(cfg.safety_margin_db, 0.0);
 
-        cfg.apply_modulator_limits(DsdBitRateHz::DSD64).unwrap();
+        cfg.apply_modulator_limits(DsdBitRateHz::DSD64, 0.25)
+            .unwrap();
         let l = crate::modulator::max_stable_input_dbfs(5, DsdBitRateHz::DSD64).unwrap();
         let m = cfg.safety_margin_db;
         assert_eq!(cfg.max_stable_input_dbfs, l);
@@ -364,14 +368,17 @@ mod tests {
         ] {
             for order in [5u8, 7] {
                 cfg.modulator_order = order;
-                cfg.apply_modulator_limits(rate).unwrap();
+                cfg.apply_modulator_limits(rate, 0.25).unwrap();
                 let l = crate::modulator::max_stable_input_dbfs(order, rate).unwrap();
                 assert_eq!(cfg.max_stable_input_dbfs, l);
                 assert!(l < -3.0 && l > -6.0, "implausible limit {l} dBFS");
             }
         }
         cfg.modulator_order = 6;
-        assert!(cfg.apply_modulator_limits(DsdBitRateHz::DSD64).is_err());
+        assert!(
+            cfg.apply_modulator_limits(DsdBitRateHz::DSD64, 0.25)
+                .is_err()
+        );
     }
 
     #[test]
