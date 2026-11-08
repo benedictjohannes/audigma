@@ -1,67 +1,62 @@
 //! Integration test proving bit-exact output equivalence between sequential
 //! and persistent real-time ChannelWorkerPool DSP execution (`Design.md §1.2`).
 
-use audigma_dsp::config::{Apodization, DitherType, FilterPhase, FilterPreset, OverloadPolicy};
+use audigma_dsp::config::{Apodization, DitherType, FilterPhase, OverloadPolicy};
 use audigma_dsp::fir::HalfBandCascade;
 use audigma_dsp::modulator::Modulator;
-use audigma_dsp::presets::{PRESET_BALANCED, PRESET_REFERENCE};
 use audigma_dsp::rates::DsdBitRateHz;
 use audigma_engine::worker::{ChannelWorkerPool, TargetDsdConfig};
 use std::f64::consts::PI;
 
 #[test]
 fn test_worker_pool_stereo_dsd64_bit_exact() {
-    verify_stereo_dsd_bit_exact(DsdBitRateHz::DSD64, 6, PRESET_BALANCED.preset, 100, 5);
+    verify_stereo_dsd_bit_exact(DsdBitRateHz::DSD64, 6, 100, 5);
 }
 
 #[test]
 fn test_worker_pool_stereo_dsd128_bit_exact() {
-    verify_stereo_dsd_bit_exact(DsdBitRateHz::DSD128, 7, PRESET_BALANCED.preset, 50, 5);
+    verify_stereo_dsd_bit_exact(DsdBitRateHz::DSD128, 7, 50, 5);
 }
 
 #[test]
 fn test_worker_pool_stereo_dsd256_reference_bit_exact() {
-    verify_stereo_dsd_bit_exact(DsdBitRateHz::DSD256, 8, PRESET_REFERENCE.preset, 20, 5);
+    verify_stereo_dsd_bit_exact(DsdBitRateHz::DSD256, 8, 20, 5);
 }
 
 #[test]
 fn test_worker_pool_stereo_dsd128_order7_bit_exact() {
-    verify_stereo_dsd_bit_exact(DsdBitRateHz::DSD128, 7, PRESET_BALANCED.preset, 50, 7);
+    verify_stereo_dsd_bit_exact(DsdBitRateHz::DSD128, 7, 50, 7);
 }
 
 #[test]
 fn test_worker_pool_stereo_dsd256_order7_bit_exact() {
-    verify_stereo_dsd_bit_exact(DsdBitRateHz::DSD256, 8, PRESET_REFERENCE.preset, 20, 7);
+    verify_stereo_dsd_bit_exact(DsdBitRateHz::DSD256, 8, 20, 7);
 }
 
 #[test]
 fn test_worker_pool_stereo_dsd512_bit_exact() {
-    verify_stereo_dsd_bit_exact(DsdBitRateHz::DSD512, 9, PRESET_BALANCED.preset, 10, 5);
+    verify_stereo_dsd_bit_exact(DsdBitRateHz::DSD512, 9, 10, 5);
 }
 
 #[test]
 fn test_worker_pool_stereo_dsd512_order7_bit_exact() {
-    verify_stereo_dsd_bit_exact(DsdBitRateHz::DSD512, 9, PRESET_REFERENCE.preset, 10, 7);
+    verify_stereo_dsd_bit_exact(DsdBitRateHz::DSD512, 9, 10, 7);
 }
 
 #[test]
 fn test_worker_pool_stereo_dsd512_48_bit_exact() {
-    verify_stereo_dsd_bit_exact(DsdBitRateHz::DSD512_48, 9, PRESET_BALANCED.preset, 10, 5);
+    verify_stereo_dsd_bit_exact(DsdBitRateHz::DSD512_48, 9, 10, 5);
 }
 
 #[test]
 fn test_dsd_subtiles_partial_tiles_modes_and_reset() {
-    for preset in [
-        FilterPreset::Balanced,
-        FilterPreset::Reference,
-        FilterPreset::LowLatency,
-    ] {
+    {
         for order in [5, 7] {
             for (phase, apodization) in [
                 (FilterPhase::Linear, Apodization::Off),
-                (FilterPhase::Linear, Apodization::Gentle),
+                (FilterPhase::Linear, Apodization::PassEdge19000),
                 (FilterPhase::Minimum, Apodization::Off),
-                (FilterPhase::Minimum, Apodization::Gentle),
+                (FilterPhase::Minimum, Apodization::PassEdge20000),
             ] {
                 let rate = if phase == FilterPhase::Linear {
                     DsdBitRateHz::DSD512
@@ -80,18 +75,10 @@ fn test_dsd_subtiles_partial_tiles_modes_and_reset() {
                     overload_policy: OverloadPolicy::MuteRecover,
                     seed_base: 424242,
                 };
-                let mut pool = ChannelWorkerPool::new(
-                    1,
-                    preset,
-                    phase,
-                    apodization,
-                    9,
-                    512,
-                    Some(config),
-                    None,
-                )
-                .unwrap();
-                let mut cascade = HalfBandCascade::new(preset, phase, apodization, 9, 512);
+                let mut pool =
+                    ChannelWorkerPool::new(1, phase, apodization, 9, 512, Some(config), None)
+                        .unwrap();
+                let mut cascade = HalfBandCascade::new(phase, apodization, 9, 512);
                 let mut modulator =
                     Modulator::new(order, rate, dither, OverloadPolicy::MuteRecover).unwrap();
                 modulator.set_dither_seed(424242);
@@ -141,7 +128,6 @@ fn test_worker_pool_stereo_pcm_bit_exact() {
 
     let mut pool = ChannelWorkerPool::new(
         CHANNELS,
-        PRESET_BALANCED.preset,
         FilterPhase::Linear,
         Apodization::Off,
         STAGES,
@@ -151,20 +137,10 @@ fn test_worker_pool_stereo_pcm_bit_exact() {
     )
     .expect("worker pool creation failed");
 
-    let mut seq_cascade_l = HalfBandCascade::new(
-        PRESET_BALANCED.preset,
-        FilterPhase::Linear,
-        Apodization::Off,
-        STAGES,
-        FRAMES,
-    );
-    let mut seq_cascade_r = HalfBandCascade::new(
-        PRESET_BALANCED.preset,
-        FilterPhase::Linear,
-        Apodization::Off,
-        STAGES,
-        FRAMES,
-    );
+    let mut seq_cascade_l =
+        HalfBandCascade::new(FilterPhase::Linear, Apodization::Off, STAGES, FRAMES);
+    let mut seq_cascade_r =
+        HalfBandCascade::new(FilterPhase::Linear, Apodization::Off, STAGES, FRAMES);
 
     let mult = pool.rate_multiplier();
     let req_pcm = FRAMES * mult;
@@ -209,7 +185,6 @@ fn test_worker_pool_7_1_surround_channels() {
 
     let mut pool = ChannelWorkerPool::new(
         CHANNELS,
-        PRESET_BALANCED.preset,
         FilterPhase::Linear,
         Apodization::Off,
         STAGES,
@@ -238,7 +213,6 @@ fn test_worker_pool_7_1_surround_channels() {
 fn verify_stereo_dsd_bit_exact(
     bit_rate: DsdBitRateHz,
     stages: usize,
-    preset: FilterPreset,
     num_blocks: usize,
     order: u8,
 ) {
@@ -256,7 +230,6 @@ fn verify_stereo_dsd_bit_exact(
 
     let mut pool = ChannelWorkerPool::new(
         CHANNELS,
-        preset,
         FilterPhase::Linear,
         Apodization::Off,
         stages,
@@ -266,20 +239,10 @@ fn verify_stereo_dsd_bit_exact(
     )
     .expect("worker pool creation failed");
 
-    let mut seq_cascade_l = HalfBandCascade::new(
-        preset,
-        FilterPhase::Linear,
-        Apodization::Off,
-        stages,
-        FRAMES,
-    );
-    let mut seq_cascade_r = HalfBandCascade::new(
-        preset,
-        FilterPhase::Linear,
-        Apodization::Off,
-        stages,
-        FRAMES,
-    );
+    let mut seq_cascade_l =
+        HalfBandCascade::new(FilterPhase::Linear, Apodization::Off, stages, FRAMES);
+    let mut seq_cascade_r =
+        HalfBandCascade::new(FilterPhase::Linear, Apodization::Off, stages, FRAMES);
     let mut seq_mod_l =
         Modulator::new(order, bit_rate, dsd_cfg.dither, dsd_cfg.overload_policy).unwrap();
     seq_mod_l.set_dither_seed(SEED_BASE);

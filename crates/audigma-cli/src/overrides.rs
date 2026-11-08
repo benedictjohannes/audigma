@@ -90,7 +90,7 @@ mod tests {
                 toml::Value::Integer(48000),
             ])
         );
-        // Bare words fall back to strings, so unquoted presets keep working.
+        // Bare words fall back to strings, so unquoted keywords keep working.
         assert_eq!(
             parse_override_value("two-pass"),
             toml::Value::String("two-pass".to_string())

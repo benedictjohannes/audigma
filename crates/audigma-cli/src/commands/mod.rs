@@ -5,7 +5,6 @@ pub mod config;
 pub mod control;
 pub mod convert;
 pub mod play;
-pub mod presets;
 pub mod probe;
 pub mod run;
 
@@ -17,7 +16,6 @@ pub use config::{ConfigArgs, ConfigCommands, run_config};
 pub use control::{SetArgs, SetCommands, StatusArgs, StopArgs, run_set, run_status, run_stop};
 pub use convert::{ConvertArgs, run_convert};
 pub use play::{PlayArgs, run_play};
-pub use presets::{PresetsArgs, PresetsCommands, run_presets};
 pub use probe::{ProbeArgs, print_alsa_probe_report, run_probe};
 pub use run::{RunArgs, run_run};
 
@@ -65,7 +63,7 @@ pub enum Commands {
     /// Query live daemon runtime status and telemetry
     Status(StatusArgs),
 
-    /// Modify daemon volume or preset dynamically
+    /// Modify daemon volume dynamically
     Set(SetArgs),
 
     /// Play audio directly to hardware via exclusive ALSA
@@ -76,9 +74,6 @@ pub enum Commands {
 
     /// Run DSP throughput and execution budget benchmarks
     Benchmark(BenchmarkArgs),
-
-    /// Inspect and display DSP presets
-    Presets(PresetsArgs),
 
     /// Validate or inspect configuration files
     Config(ConfigArgs),

@@ -156,7 +156,6 @@ pub use crate::transport::is_dsd_passthrough_eligible;
 mod tests {
     use super::*;
     use audigma_dsp::config::{Apodization, FilterPhase, OverloadPolicy, SampleFormat};
-    use audigma_dsp::presets::PRESET_REFERENCE;
     use audigma_dsp::rates::{DsdBitRateHz, PcmRateHz};
     use audigma_format::decoder::AudioStreamInfo;
 
@@ -330,7 +329,7 @@ mod tests {
         let dsd_info = AudioStreamInfo::new_dsd(bit_rate, 2, None);
         let pcm_info = AudioStreamInfo::new_pcm(PcmRateHz::PCM_44100, 2, None, Some(16));
 
-        let mut dsp_cfg = PRESET_REFERENCE.to_default_dsp_config(
+        let mut dsp_cfg = DspConfiguration::new(
             FilterPhase::Linear,
             Apodization::Off,
             0.0,

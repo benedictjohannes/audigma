@@ -8,7 +8,7 @@
 //!
 //! Modes:
 //! - `cascade-impulse`: unit impulse through `HalfBandCascade`; the response of the implemented
-//!   cascade (preset, phase, apodization, stage count).
+//!   cascade (phase, apodization, stage count).
 //! - `cascade-tone`: coherent tones through the same cascade (cross-check of the impulse response).
 //! - `src-tone`: coherent tones through `PolyphaseResampler` (rational or ASRC, optional drift).
 //! - `src-tables`: the bank a `PolyphaseResampler` builds for `--src-mode/--in-hz/--out-hz`, row-major.
@@ -17,9 +17,7 @@ use std::f64::consts::PI;
 use std::fs::File;
 use std::io::Write;
 
-use audigma_dsp::{
-    Apodization, FilterPhase, FilterPreset, HalfBandCascade, PcmRateHz, PolyphaseResampler,
-};
+use audigma_dsp::{Apodization, FilterPhase, HalfBandCascade, PcmRateHz, PolyphaseResampler};
 
 /// Modes handled by this module.
 pub const MODES: &[&str] = &["cascade-impulse", "cascade-tone", "src-tone", "src-tables"];
@@ -34,7 +32,6 @@ const SRC_CHUNK_INPUT: usize = 256;
 
 struct Args {
     mode: String,
-    preset: FilterPreset,
     phase: FilterPhase,
     apodization: Apodization,
     stages: Option<usize>,
@@ -53,7 +50,6 @@ struct Args {
 fn parse(args: &[String]) -> Args {
     let mut a = Args {
         mode: String::new(),
-        preset: FilterPreset::Balanced,
         phase: FilterPhase::Linear,
         apodization: Apodization::Off,
         stages: None,
@@ -75,14 +71,6 @@ fn parse(args: &[String]) -> Args {
         let val = args.get(i).cloned().unwrap_or_default();
         match flag {
             "--mode" => a.mode = val,
-            "--preset" => {
-                a.preset = match val.as_str() {
-                    "balanced" => FilterPreset::Balanced,
-                    "reference" => FilterPreset::Reference,
-                    "low-latency" => FilterPreset::LowLatency,
-                    other => panic!("Unknown preset: {other}"),
-                }
-            }
             "--phase" => {
                 a.phase = match val.as_str() {
                     "linear" => FilterPhase::Linear,
@@ -91,11 +79,8 @@ fn parse(args: &[String]) -> Args {
                 }
             }
             "--apodization" => {
-                a.apodization = match val.as_str() {
-                    "off" => Apodization::Off,
-                    "gentle" => Apodization::Gentle,
-                    other => panic!("Unknown apodization: {other}"),
-                }
+                a.apodization = Apodization::from_name(&val)
+                    .unwrap_or_else(|| panic!("Unknown apodization: {val}"))
             }
             "--stages" => a.stages = Some(val.parse().expect("Invalid stages")),
             "--base-hz" => a.base_hz = val.parse().expect("Invalid base-hz"),
@@ -172,27 +157,12 @@ fn phase_name(p: FilterPhase) -> &'static str {
     }
 }
 
-fn apod_name(a: Apodization) -> &'static str {
-    match a {
-        Apodization::Off => "off",
-        Apodization::Gentle => "gentle",
-    }
-}
-
-fn preset_name(p: FilterPreset) -> &'static str {
-    match p {
-        FilterPreset::Balanced => "balanced",
-        FilterPreset::Reference => "reference",
-        FilterPreset::LowLatency => "low-latency",
-    }
-}
-
 fn require_stages(a: &Args) -> usize {
     a.stages.expect("--stages is required for cascade modes")
 }
 
 fn new_cascade(a: &Args, stages: usize) -> HalfBandCascade {
-    HalfBandCascade::new(a.preset, a.phase, a.apodization, stages, TILE_BASEBAND)
+    HalfBandCascade::new(a.phase, a.apodization, stages, TILE_BASEBAND)
 }
 
 fn cascade_impulse(a: &Args) {
@@ -219,10 +189,9 @@ fn cascade_impulse(a: &Args) {
     write_json(
         &a.out_json,
         &format!(
-            r#"{{"mode":"cascade-impulse","preset":"{}","phase":"{}","apodization":"{}","stages":{},"mult":{},"n_bb":{},"base_hz":{},"group_delay_output_samples":{}}}"#,
-            preset_name(a.preset),
+            r#"{{"mode":"cascade-impulse","phase":"{}","apodization":"{}","stages":{},"mult":{},"n_bb":{},"base_hz":{},"group_delay_output_samples":{}}}"#,
             phase_name(a.phase),
-            apod_name(a.apodization),
+            a.apodization.name(),
             stages,
             mult,
             a.n_bb,
@@ -267,10 +236,9 @@ fn cascade_tone(a: &Args) {
     write_json(
         &a.out_json,
         &format!(
-            r#"{{"mode":"cascade-tone","preset":"{}","phase":"{}","apodization":"{}","stages":{},"mult":{},"n_bb":{},"base_hz":{},"amplitude":{},"tones":[{}]}}"#,
-            preset_name(a.preset),
+            r#"{{"mode":"cascade-tone","phase":"{}","apodization":"{}","stages":{},"mult":{},"n_bb":{},"base_hz":{},"amplitude":{},"tones":[{}]}}"#,
             phase_name(a.phase),
-            apod_name(a.apodization),
+            a.apodization.name(),
             stages,
             mult,
             a.n_bb,

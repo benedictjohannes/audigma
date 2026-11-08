@@ -16,7 +16,7 @@ fn handle(input_rate: u32) -> DaemonControlHandle {
         input_rate,
         DaemonOutputFormat::Pcm,
         192000,
-        "balanced",
+        "linear, apodization off",
         -3.0,
     )
 }
@@ -40,19 +40,11 @@ fn test_ipc_roundtrip() {
     };
     assert_eq!(telem.input_rate_hz, 48000);
     assert_eq!(telem.preamp_db, -3.0);
+    assert_eq!(telem.filter, "linear, apodization off");
 
     let resp = ControlClient::send(&inst, IpcRequest::SetVolume { volume_db: -4.5 }).unwrap();
     assert!(matches!(resp, IpcResponse::Ok));
     assert_eq!(control.get_volume(), -4.5);
-
-    let resp = ControlClient::send(
-        &inst,
-        IpcRequest::SetPreset {
-            preset: "reference".to_string(),
-        },
-    )
-    .unwrap();
-    assert!(matches!(resp, IpcResponse::Ok));
 
     let resp = ControlClient::send(&inst, IpcRequest::Stop).unwrap();
     assert!(matches!(resp, IpcResponse::Ok));

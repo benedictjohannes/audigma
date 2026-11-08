@@ -30,7 +30,7 @@ use crate::transport::{
 use crate::worker::{
     InputDspConfig, InputResampling, InputTileControls, TargetDsdConfig, WorkerSetup,
 };
-use audigma_dsp::config::{DspConfiguration, FilterPreset, SampleFormat, TargetRateSpec};
+use audigma_dsp::config::{DspConfiguration, SampleFormat, TargetRateSpec};
 use audigma_dsp::ftz::ScopedFtzDaz;
 use audigma_dsp::modulator::TpdfDither;
 use audigma_dsp::rates::PcmRateHz;
@@ -215,7 +215,8 @@ pub struct DaemonTelemetry {
     pub input_rate_hz: u32,
     pub output_format: DaemonOutputFormat,
     pub output_rate_hz: u32,
-    pub preset: String,
+    /// Active interpolation filter, e.g. `"linear, apodization off"`.
+    pub filter: String,
     pub volume_db: f64,
     pub volume_percent: f64,
     pub volume_mode: DaemonVolumeMode,
@@ -269,7 +270,7 @@ struct TelemetryState {
     input_rate_hz: AtomicU32,
     output_format: AtomicU8,
     output_rate_hz: AtomicU32,
-    preset: String,
+    filter: String,
     preamp_db: AtomicU64,
     volume_db: AtomicU64,
     volume_percent: AtomicU64,
@@ -305,7 +306,6 @@ pub struct DaemonControlHandle {
     volume_percent: Arc<AtomicU64>,
     volume_mode: Arc<AtomicU8>,
     is_muted: Arc<AtomicBool>,
-    target_preset: Arc<Mutex<Option<String>>>,
     telemetry: Arc<TelemetryState>,
 }
 
@@ -314,7 +314,7 @@ impl DaemonControlHandle {
         input_rate: u32,
         output_format: DaemonOutputFormat,
         output_rate: u32,
-        preset: &str,
+        filter: &str,
         preamp_db: f64,
     ) -> Self {
         let telemetry = TelemetryState {
@@ -322,7 +322,7 @@ impl DaemonControlHandle {
             input_rate_hz: AtomicU32::new(input_rate),
             output_format: AtomicU8::new(output_format as u8),
             output_rate_hz: AtomicU32::new(output_rate),
-            preset: preset.to_string(),
+            filter: filter.to_string(),
             preamp_db: AtomicU64::new(preamp_db.to_bits()),
             volume_db: AtomicU64::new(0.0f64.to_bits()),
             volume_percent: AtomicU64::new(100.0f64.to_bits()),
@@ -356,7 +356,6 @@ impl DaemonControlHandle {
             volume_percent: Arc::new(AtomicU64::new(100.0f64.to_bits())),
             volume_mode: Arc::new(AtomicU8::new(DaemonVolumeMode::Software as u8)),
             is_muted: Arc::new(AtomicBool::new(false)),
-            target_preset: Arc::new(Mutex::new(None)),
             telemetry: Arc::new(telemetry),
         }
     }
@@ -437,12 +436,6 @@ impl DaemonControlHandle {
     }
 
     #[inline]
-    pub fn set_preset(&self, name: &str) {
-        let mut p = self.target_preset.lock().unwrap();
-        *p = Some(name.to_string());
-    }
-
-    #[inline]
     pub fn state(&self) -> DaemonState {
         DaemonState::from_u8(self.telemetry.state.load(Ordering::Relaxed))
     }
@@ -477,7 +470,7 @@ impl DaemonControlHandle {
                 self.telemetry.output_format.load(Ordering::Relaxed),
             ),
             output_rate_hz: self.telemetry.output_rate_hz.load(Ordering::Relaxed),
-            preset: self.telemetry.preset.clone(),
+            filter: self.telemetry.filter.clone(),
             volume_db: load_f64(&self.telemetry.volume_db),
             volume_percent: load_f64(&self.telemetry.volume_percent),
             volume_mode: self.get_volume_mode(),
@@ -668,7 +661,6 @@ impl DspSession {
     fn configure(
         &mut self,
         channels: usize,
-        preset: FilterPreset,
         phase: audigma_dsp::config::FilterPhase,
         apodization: audigma_dsp::config::Apodization,
         topology: PipelineTopology,
@@ -687,7 +679,6 @@ impl DspSession {
         }
         match self.processor {
             Some(ref mut processor) => processor.reconfigure(
-                preset,
                 phase,
                 apodization,
                 topology,
@@ -699,7 +690,6 @@ impl DspSession {
             None => {
                 self.processor = Some(TileProcessor::new_with_input(
                     channels,
-                    preset,
                     phase,
                     apodization,
                     topology,
@@ -814,7 +804,6 @@ impl LivePipeline {
     ) -> Result<StreamExitReason, EngineError> {
         let _ftz = ScopedFtzDaz::new();
         let target_spec = self.plan.stream_spec.target;
-        let preset = self.plan.dsp_config.preset;
         let num_channels = self.plan.stream_spec.channels as usize;
 
         const TILE_BASEBAND_FRAMES: usize = 256;
@@ -862,7 +851,6 @@ impl LivePipeline {
 
         let processor = session.configure(
             num_channels,
-            preset,
             self.plan.dsp_config.phase,
             self.plan.dsp_config.apodization,
             self.topology,

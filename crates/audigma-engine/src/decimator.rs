@@ -1,6 +1,5 @@
 //! Multi-channel power-of-two half-band FIR decimation cascade with partial-chunk residue tracking.
 
-use audigma_dsp::config::FilterPreset;
 use audigma_dsp::fir::HalfBandDecimationCascade;
 
 use crate::traits::EngineError;
@@ -23,20 +22,14 @@ pub struct ChannelDecimatorPool {
 impl ChannelDecimatorPool {
     /// Creates a new multi-channel decimation cascade pool.
     ///
-    /// - `preset`: Filter preset determining transition steepness.
     /// - `stages`: Number of 2x half-band decimation stages ($2^{\text{stages}}$ divider).
     /// - `channels`: Channel count (typically 2 for stereo).
     /// - `max_input_frames`: Maximum input frames processed per channel in a single call.
-    pub fn new(
-        preset: FilterPreset,
-        stages: usize,
-        channels: usize,
-        max_input_frames: usize,
-    ) -> Self {
+    pub fn new(stages: usize, channels: usize, max_input_frames: usize) -> Self {
         let divider = 1usize << stages;
         let scratch_capacity = max_input_frames.max(16384);
         let decimators = (0..channels)
-            .map(|_| HalfBandDecimationCascade::new(preset, stages, scratch_capacity))
+            .map(|_| HalfBandDecimationCascade::new(stages, scratch_capacity))
             .collect();
         let residue = (0..channels).map(|_| Vec::with_capacity(divider)).collect();
         let scratch = (0..channels).map(|_| vec![0.0; scratch_capacity]).collect();
@@ -213,7 +206,7 @@ mod tests {
     #[test]
     fn test_channel_decimator_exact_aligned() {
         // 4x decimation (stages = 2)
-        let mut pool = ChannelDecimatorPool::new(FilterPreset::Balanced, 2, 2, 4096);
+        let mut pool = ChannelDecimatorPool::new(2, 2, 4096);
         assert_eq!(pool.stages(), 2);
         assert_eq!(pool.divider(), 4);
 
@@ -233,7 +226,7 @@ mod tests {
     #[test]
     fn test_channel_decimator_unaligned_residue_accumulation() {
         // 4x decimation (divider = 4)
-        let mut pool = ChannelDecimatorPool::new(FilterPreset::Balanced, 2, 1, 4096);
+        let mut pool = ChannelDecimatorPool::new(2, 1, 4096);
 
         let mut out = vec![0.0; 100];
 

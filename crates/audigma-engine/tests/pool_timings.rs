@@ -1,7 +1,7 @@
 //! Worker execution and dispatch histograms: one sample per compute tile, persisted
 //! across `reconfigure`, none for reset/reconfigure commands.
 
-use audigma_dsp::config::{Apodization, FilterPhase, FilterPreset};
+use audigma_dsp::config::{Apodization, FilterPhase};
 use audigma_engine::timing::{MaxSlot, TimingTracker};
 use audigma_engine::worker::ChannelWorkerPool;
 
@@ -12,7 +12,6 @@ const FRAMES: usize = 256;
 fn pool_records_one_sample_per_worker_and_dispatch_per_tile() {
     let mut pool = ChannelWorkerPool::new(
         CHANNELS,
-        FilterPreset::Balanced,
         FilterPhase::Linear,
         Apodization::Off,
         2,
@@ -39,16 +38,8 @@ fn pool_records_one_sample_per_worker_and_dispatch_per_tile() {
     assert!(r.worker.max_us >= r.worker.p50_us);
     assert!(r.dispatch.max_us >= r.worker.p50_us.min(1));
 
-    pool.reconfigure(
-        FilterPreset::Balanced,
-        FilterPhase::Linear,
-        Apodization::Off,
-        3,
-        FRAMES,
-        None,
-        None,
-    )
-    .unwrap();
+    pool.reconfigure(FilterPhase::Linear, Apodization::Off, 3, FRAMES, None, None)
+        .unwrap();
     pool.process_tile_pcm(&inputs).unwrap();
     let r = tracker.window();
     assert_eq!(r.dispatch.count, 1, "reconfigure is not a timed tile");

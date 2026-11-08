@@ -37,28 +37,18 @@ impl FileAudioInput {
         Self::open_with_dsd_gain(path, 6.0)
     }
 
-    /// Opens an audio file for decoding with specified DSD decimation gain in dB and default balanced preset.
+    /// Opens an audio file for decoding with specified DSD decimation gain in dB.
     pub fn open_with_dsd_gain<P: AsRef<Path>>(
         path: P,
         dsd_gain_db: f64,
     ) -> Result<Self, EngineError> {
-        Self::open_with_dsd_config(path, dsd_gain_db, audigma_dsp::FilterPreset::Balanced)
+        Self::open_with_dsd_full_config(path, dsd_gain_db, None)
     }
 
-    /// Opens an audio file for decoding with specified DSD decimation gain and filter preset.
-    pub fn open_with_dsd_config<P: AsRef<Path>>(
-        path: P,
-        dsd_gain_db: f64,
-        preset: audigma_dsp::FilterPreset,
-    ) -> Result<Self, EngineError> {
-        Self::open_with_dsd_full_config(path, dsd_gain_db, preset, None)
-    }
-
-    /// Opens an audio file for decoding with specified DSD decimation gain, filter preset, and max intermediate rate limit.
+    /// Opens an audio file for decoding with specified DSD decimation gain and max intermediate rate limit.
     pub fn open_with_dsd_full_config<P: AsRef<Path>>(
         path: P,
         dsd_gain_db: f64,
-        preset: audigma_dsp::FilterPreset,
         max_intermediate_rate_hz: Option<PcmRateHz>,
     ) -> Result<Self, EngineError> {
         let path_ref = path.as_ref();
@@ -101,9 +91,9 @@ impl FileAudioInput {
                 source: FileInputSource::Dsf {
                     reader,
                     info,
-                    decimator_l: HalfBandDecimationCascade::new(preset, stages, max_frames)
+                    decimator_l: HalfBandDecimationCascade::new(stages, max_frames)
                         .with_gain_db(dsd_gain_db),
-                    decimator_r: HalfBandDecimationCascade::new(preset, stages, max_frames)
+                    decimator_r: HalfBandDecimationCascade::new(stages, max_frames)
                         .with_gain_db(dsd_gain_db),
                     dsd_scratch_l: vec![0; max_frames / 8],
                     dsd_scratch_r: vec![0; max_frames / 8],

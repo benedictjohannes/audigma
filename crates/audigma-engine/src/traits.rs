@@ -71,7 +71,6 @@ pub struct VolumeUpdate {
 /// the intermediate PCM rate advertised by `AudioInput::info()`.
 #[derive(Debug, Clone, Copy)]
 pub struct DsdDecodeConfig {
-    pub preset: audigma_dsp::FilterPreset,
     pub decimation_stages: usize,
     pub gain_db: f64,
 }
@@ -494,7 +493,6 @@ impl AudioInput for MockAudioInput {
             .dsd_bit_rate?
             .power_of_two_decimation_stages_to(self.info.sample_rate)?;
         Some(DsdDecodeConfig {
-            preset: audigma_dsp::FilterPreset::Balanced,
             decimation_stages: stages as usize,
             gain_db: 0.0,
         })

@@ -25,9 +25,6 @@ pub enum CliError {
     #[error("volume error: {0}")]
     Volume(String),
 
-    #[error("unknown preset '{name}'")]
-    PresetNotFound { name: String },
-
     #[error("unknown audio backend '{backend}'; supported backends: alsa, pipewire")]
     UnknownBackend { backend: String },
 

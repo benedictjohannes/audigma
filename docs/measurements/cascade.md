@@ -1,6 +1,6 @@
 # audigma — Cascade Measurements
 
-> **Generated:** `2026-11-08 07:51:14Z`  
+> **Generated:** `2026-11-08 09:52:03Z`  
 > **Evaluated on:** `AMD Ryzen AI 7 350 w/ Radeon 860M (x86_64)` running `CachyOS (Linux 7.3.1-1-cachyos)`  
 > **Rust compiler:** `rustc 1.98.0 (88d9e12ae 2026-08-18)`  
 > **Hardware FTZ/DAZ:** `Active (hardware-verified)`  
@@ -17,70 +17,98 @@ Measured through `HalfBandCascade` (harness mode `cascade-impulse`): a unit impu
 FFT-ed with 512 baseband frames (zero padded x8). The cascade is linear and time-invariant from the baseband
 input, so this response describes it completely. No pass/fail thresholds are applied here; values are reported for audit
 step 5. "Image rejection" is the worst level inside the bands `k*44.1 kHz +- 20 kHz` (k = 1, 2, ...) that must be removed;
-"droop" is the gain at that frequency relative to DC.
+"droop" is the gain at that frequency relative to DC. Every filter is designed for >= 140 dB (`design_halfband.py`); apodization
+is `off` (half-band, stopband 24.1 kHz) or the pass edge of an apodizing stage 0 whose stopband is 22.05 kHz.
+
+### Stage designs (`design_halfband.py`)
+
+Interpolation stage k outputs at 88.2 kHz x 2^k; pass 20 kHz, stop at the mirror `fs/2 - 20 kHz`. The decimator runs the same
+designs from its output backwards (its last stage is stage 0).
+
+| Stage | Output rate | Taps | Stopband from | Design rejection, linear (dB) | Design rejection, minimum (dB) |
+|---:|---:|---:|---:|---:|---:|
+| 0 | 88.2 kHz | 199 | 24.1 kHz | 145.7 | 145.7 |
+| 1 | 176.4 kHz | 31 | 68.2 kHz | 150.9 | 150.9 |
+| 2 | 352.8 kHz | 19 | 156.4 kHz | 160.1 | 160.1 |
+| 3 | 705.6 kHz | 15 | 332.8 kHz | 177.8 | 177.8 |
+| 4 | 1,411.2 kHz | 11 | 685.6 kHz | 170.3 | 170.3 |
+| 5 | 2,822.4 kHz | 11 | 1,391.2 kHz | 195.6 | 195.6 |
+| 6 | 5,644.8 kHz | 7 | 2,802.4 kHz | 162.0 | 162.0 |
+| 7 | 11,289.6 kHz | 7 | 5,624.8 kHz | 186.1 | 186.1 |
+| 8 | 22,579.2 kHz | 7 | 11,269.6 kHz | 210.2 | 210.2 |
+
+| Apodizing stage 0, pass edge | Taps | Design rejection >= 22.05 kHz, linear (dB) | minimum (dB) |
+|---:|---:|---:|---:|
+| 18000 Hz | 209 | 143.0 | 143.0 |
+| 18500 Hz | 237 | 143.0 | 143.0 |
+| 19000 Hz | 277 | 143.0 | 143.0 |
+| 20000 Hz | 409 | 141.8 | 141.8 |
+
+### Every stage against the design
+
+The design cascade is rebuilt in Python from the `design_halfband.py` taps of each stage (zero-stuff by 2, filter with 2h) and
+compared sample by sample with the measured impulse response, after the best integer alignment. Deviation is relative to the
+response peak; tolerance 1e-12.
+
+| Phase | Apod. | K = 1 | K = 2 | K = 3 | K = 4 | K = 6 | K = 9 | Match |
+|---|---|---:|---:|---:|---:|---:|---:|:---:|
+| linear | off | 0.0e+00 | 2.2e-16 | 2.2e-16 | 3.3e-16 | 3.3e-16 | 5.6e-16 | yes |
+| linear | 18000 Hz | 0.0e+00 | 2.4e-16 | 3.7e-16 | 3.7e-16 | 4.9e-16 | 6.1e-16 | yes |
+| linear | 18500 Hz | 0.0e+00 | 1.2e-16 | 1.2e-16 | 1.8e-16 | 2.4e-16 | 4.8e-16 | yes |
+| linear | 19000 Hz | 0.0e+00 | 3.6e-16 | 3.6e-16 | 3.6e-16 | 6.0e-16 | 7.2e-16 | yes |
+| linear | 20000 Hz | 0.0e+00 | 2.3e-16 | 3.5e-16 | 3.5e-16 | 4.7e-16 | 8.2e-16 | yes |
+| minimum | off | 0.0e+00 | 1.6e-16 | 3.2e-16 | 4.8e-16 | 8.0e-16 | 9.6e-16 | yes |
+| minimum | 18000 Hz | 0.0e+00 | 1.8e-16 | 2.7e-16 | 4.5e-16 | 7.1e-16 | 7.1e-16 | yes |
+| minimum | 18500 Hz | 0.0e+00 | 1.8e-16 | 3.6e-16 | 5.3e-16 | 5.3e-16 | 1.1e-15 | yes |
+| minimum | 19000 Hz | 0.0e+00 | 3.6e-16 | 3.5e-16 | 3.5e-16 | 7.1e-16 | 8.9e-16 | yes |
+| minimum | 20000 Hz | 0.0e+00 | 3.5e-16 | 3.5e-16 | 3.5e-16 | 5.3e-16 | 8.8e-16 | yes |
 
 ### Stage 0 (K = 1) against the design
 
-| Preset | Phase | Apod. | Design ripple (dB) | Measured ripple (dB) | Design rejection (dB) | Measured rejection (dB) | Match |
-|---|---|---|---:|---:|---:|---:|:---:|
-| `balanced` | linear | off | 0.000005 | 0.000005 | 124.8 | 124.8 | yes |
-| `balanced` | linear | gentle | 0.000006 | 0.000006 | 123.4 | 123.4 | yes |
-| `balanced` | minimum | off | 0.000005 | 0.000005 | 124.8 | 124.8 | yes |
-| `balanced` | minimum | gentle | 0.000008 | 0.000008 | 123.4 | 123.4 | yes |
-| `reference` | linear | off | 0.000001 | 0.000001 | 141.4 | 141.5 | yes |
-| `reference` | linear | gentle | 0.000001 | 0.000001 | 143.0 | 143.0 | yes |
-| `reference` | minimum | off | 0.000001 | 0.000001 | 141.4 | 141.5 | yes |
-| `reference` | minimum | gentle | 0.000001 | 0.000001 | 143.0 | 143.0 | yes |
-| `low-latency` | linear | off | 0.000084 | 0.000084 | 100.3 | 100.3 | yes |
-| `low-latency` | linear | gentle | 0.000057 | 0.000057 | 104.1 | 104.2 | yes |
-| `low-latency` | minimum | off | 0.000089 | 0.000088 | 100.3 | 100.3 | yes |
-| `low-latency` | minimum | gentle | 0.000057 | 0.000057 | 104.1 | 104.2 | yes |
+| Phase | Apod. | Design ripple (dB) | Measured ripple (dB) | Design rejection (dB) | Measured rejection (dB) | Match |
+|---|---|---:|---:|---:|---:|:---:|
+| linear | off | 4.50e-07 | 4.47e-07 | 145.7 | 145.8 | yes |
+| linear | 18000 Hz | 6.37e-07 | 6.37e-07 | 143.0 | 143.0 | yes |
+| linear | 18500 Hz | 6.25e-07 | 6.23e-07 | 143.0 | 143.2 | yes |
+| linear | 19000 Hz | 6.17e-07 | 6.04e-07 | 143.0 | 143.2 | yes |
+| linear | 20000 Hz | 7.39e-07 | 5.83e-07 | 141.8 | 141.8 | yes |
+| minimum | off | 1.86e-06 | 1.79e-06 | 145.7 | 145.8 | yes |
+| minimum | 18000 Hz | 6.38e-07 | 6.38e-07 | 143.0 | 143.0 | yes |
+| minimum | 18500 Hz | 2.64e-06 | 2.63e-06 | 143.0 | 143.2 | yes |
+| minimum | 19000 Hz | 1.43e-06 | 1.43e-06 | 143.0 | 143.1 | yes |
+| minimum | 20000 Hz | 2.51e-06 | 2.31e-06 | 141.8 | 141.8 | yes |
 
-Bands: `off` passband 0-20 kHz, stopband 24.1 kHz-Nyquist; `gentle` passband 0-17.5 kHz, stopband 22.05 kHz-Nyquist (the design's own definition). Match = rejection within 1.0 dB and ripple within 0.0001 dB of the design. The tails of all impulse records are below 1e-12 of the energy, so 512 frames capture the full response.
+Bands: `off` passband 0-20 kHz, stopband 24.1 kHz-Nyquist; apodizing passband 0-edge, stopband 22.05 kHz-Nyquist (the design's own definition). Match = rejection within 1.0 dB and ripple within 0.0001 dB of the design. The tails of all impulse records are below 1e-12 of the energy, so 512 frames capture the full response.
 
 ### Full cascade at DSD64 (K = 6, 64x), all filter settings
 
-| Preset | Phase | Apod. | Ripple 0-20 kHz (dB) | Droop @ 17.5 kHz (dB) | Droop @ 20 kHz (dB) | Gain @ 22.05 kHz (dB) | Image rejection, band 1 (dB) | Worst image rejection (dB) | Group delay @ 1 kHz (ms) | @ 20 kHz (ms) |
-|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| `balanced` | linear | off | 0.000010 | -0.000 | -0.000 | -6.0 | 124.8 | 124.8 | 1.152 | 1.152 |
-| `balanced` | linear | gentle | 8.725975 | -0.000 | -8.816 | -172.5 | 129.1 | 129.0 | 1.049 | 1.049 |
-| `balanced` | minimum | off | 0.000013 | -0.000 | -0.000 | -6.0 | 124.8 | 124.8 | 0.081 | 0.274 |
-| `balanced` | minimum | gentle | 8.725983 | -0.000 | -8.816 | -157.2 | 129.1 | 129.0 | 0.094 | 0.583 |
-| `reference` | linear | off | 0.000002 | 0.000 | 0.000 | -6.0 | 141.5 | 141.5 | 1.310 | 1.310 |
-| `reference` | linear | gentle | 8.962247 | 0.000 | -9.061 | -143.8 | 148.5 | 146.6 | 1.219 | 1.219 |
-| `reference` | minimum | off | 0.000002 | 0.000 | 0.000 | -6.0 | 141.5 | 141.5 | 0.091 | 0.303 |
-| `reference` | minimum | gentle | 8.962247 | -0.000 | -9.061 | -143.8 | 148.5 | 146.6 | 0.106 | 0.671 |
-| `low-latency` | linear | off | 0.000082 | 0.000 | -0.000 | -6.0 | 100.3 | 100.3 | 0.925 | 0.925 |
-| `low-latency` | linear | gentle | 8.433049 | -0.000 | -8.513 | -106.5 | 110.7 | 110.7 | 0.869 | 0.869 |
-| `low-latency` | minimum | off | 0.000082 | 0.000 | -0.000 | -6.0 | 100.3 | 100.3 | 0.069 | 0.232 |
-| `low-latency` | minimum | gentle | 8.433050 | -0.000 | -8.513 | -106.5 | 110.7 | 110.7 | 0.080 | 0.482 |
+| Phase | Apod. | Ripple 0-20 kHz (dB) | Gain @ 17.5 kHz (dB) | Gain @ 20 kHz (dB) | Gain @ 22.05 kHz (dB) | Image rejection, band 1 (dB) | Worst image rejection (dB) | Group delay @ 1 kHz (ms) | @ 20 kHz (ms) |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| linear | off | 0.000001 | -0.000 | -0.000 | -6.0 | 145.8 | 145.8 | 1.271 | 1.271 |
+| linear | 18000 Hz | 5.616201 | -0.000 | -5.698 | -160.3 | 149.8 | 149.8 | 1.316 | 1.316 |
+| linear | 18500 Hz | 2.747538 | -0.000 | -2.803 | -145.3 | 149.9 | 149.9 | 1.475 | 1.475 |
+| linear | 19000 Hz | 0.785499 | -0.000 | -0.812 | -172.0 | 151.6 | 151.6 | 1.701 | 1.701 |
+| linear | 20000 Hz | 0.000001 | -0.000 | -0.000 | -141.8 | 154.4 | 152.1 | 2.450 | 2.450 |
+| minimum | off | 0.000002 | -0.000 | -0.000 | -6.0 | 145.8 | 145.8 | 0.086 | 0.298 |
+| minimum | 18000 Hz | 5.616201 | -0.000 | -5.698 | -160.2 | 149.8 | 149.8 | 0.100 | 0.703 |
+| minimum | 18500 Hz | 2.747541 | -0.000 | -2.803 | -145.3 | 149.9 | 149.9 | 0.100 | 0.719 |
+| minimum | 19000 Hz | 0.785502 | -0.000 | -0.812 | -170.8 | 151.6 | 151.6 | 0.100 | 0.708 |
+| minimum | 20000 Hz | 0.000002 | -0.000 | -0.000 | -141.8 | 154.4 | 152.1 | 0.100 | 0.589 |
 
 ### Stage count (K) scaling, `linear` / `off`
 
 K = 1..4 are the PCM tiers (88.2k..705.6k), K = 6 is DSD64 and K = 9 is DSD512.
 
-| Preset | K | Output rate | DC gain (dB) | Ripple 0-20 kHz (dB) | Worst image rejection (dB) | Image rejection per band 1, 2, 3 (dB) | Group delay @ 1 kHz (ms) |
-|---|---:|---:|---:|---:|---:|---|---:|
-| `balanced` | 1 | 88.2 kHz | 0.000000 | 0.000005 | 124.8 | 124.8 | 0.998 |
-| `balanced` | 2 | 176.4 kHz | 0.000000 | 0.000005 | 124.8 | 124.8, 128.2 | 1.077 |
-| `balanced` | 3 | 352.8 kHz | 0.000000 | 0.000006 | 124.8 | 124.8, 129.0, 200.6 | 1.117 |
-| `balanced` | 4 | 705.6 kHz | 0.000000 | 0.000008 | 124.8 | 124.8, 129.0, 200.8 | 1.137 |
-| `balanced` | 6 | 2,822.4 kHz | 0.000000 | 0.000010 | 124.8 | 124.8, 129.0, 200.8 | 1.152 |
-| `balanced` | 9 | 22,579.2 kHz | 0.000000 | 0.000010 | 124.8 | 124.8, 129.0, 200.8 | 1.156 |
-| `reference` | 1 | 88.2 kHz | -0.000000 | 0.000001 | 141.5 | 141.5 | 1.134 |
-| `reference` | 2 | 176.4 kHz | 0.000000 | 0.000001 | 141.5 | 141.5, 145.4 | 1.224 |
-| `reference` | 3 | 352.8 kHz | 0.000000 | 0.000002 | 141.5 | 141.5, 145.9, 224.9 | 1.270 |
-| `reference` | 4 | 705.6 kHz | 0.000000 | 0.000002 | 141.5 | 141.5, 145.9, 225.0 | 1.293 |
-| `reference` | 6 | 2,822.4 kHz | -0.000000 | 0.000002 | 141.5 | 141.5, 145.9, 225.0 | 1.310 |
-| `reference` | 9 | 22,579.2 kHz | 0.000000 | 0.000002 | 141.5 | 141.5, 145.9, 225.0 | 1.314 |
-| `low-latency` | 1 | 88.2 kHz | 0.000000 | 0.000084 | 100.3 | 100.3 | 0.794 |
-| `low-latency` | 2 | 176.4 kHz | 0.000000 | 0.000084 | 100.3 | 100.3, 110.0 | 0.862 |
-| `low-latency` | 3 | 352.8 kHz | 0.000000 | 0.000082 | 100.3 | 100.3, 110.8, 168.6 | 0.896 |
-| `low-latency` | 4 | 705.6 kHz | 0.000000 | 0.000082 | 100.3 | 100.3, 110.8, 168.8 | 0.913 |
-| `low-latency` | 6 | 2,822.4 kHz | 0.000000 | 0.000082 | 100.3 | 100.3, 110.8, 168.8 | 0.925 |
-| `low-latency` | 9 | 22,579.2 kHz | 0.000000 | 0.000082 | 100.3 | 100.3, 110.8, 168.8 | 0.929 |
+| K | Output rate | DC gain (dB) | Ripple 0-20 kHz (dB) | Worst image rejection (dB) | Image rejection per band 1, 2, 3 (dB) | Group delay @ 1 kHz (ms) |
+|---:|---:|---:|---:|---:|---|---:|
+| 1 | 88.2 kHz | 1.93e-15 | 4.47e-07 | 145.8 | 145.8 | 1.134 |
+| 2 | 176.4 kHz | 0.00e+00 | 6.88e-07 | 145.8 | 145.8, 150.9 | 1.224 |
+| 3 | 352.8 kHz | 0.00e+00 | 7.42e-07 | 145.8 | 145.8, 152.1, 199.7 | 1.253 |
+| 4 | 705.6 kHz | 1.93e-15 | 7.45e-07 | 145.8 | 145.8, 152.1, 200.7 | 1.264 |
+| 6 | 2,822.4 kHz | 0.00e+00 | 7.54e-07 | 145.8 | 145.8, 152.1, 200.8 | 1.271 |
+| 9 | 22,579.2 kHz | 0.00e+00 | 7.85e-07 | 145.8 | 145.8, 152.1, 200.8 | 1.272 |
 
-Worst image rejection over all 72 combinations (3 presets x 2 phases x 2 apodizations x K in [1, 2, 3, 4, 6, 9]): **100.3 dB**; largest DC-gain deviation 1.54e-14 dB.
+Worst image rejection over all 60 combinations (2 phases x 5 apodizations x K in [1, 2, 3, 4, 6, 9]): **145.8 dB**; largest DC-gain deviation 5.79e-15 dB.
 
 ---
 
@@ -91,32 +119,28 @@ frames, Nuttall window). "Predicted" is `|H(f)|` of the impulse response above e
 impulse method (tile boundaries, state handling, FTZ/DAZ); the spur column is the strongest component outside the tone, so it is the
 actual image/alias level seen with a real signal.
 
-| Preset | Phase | Apod. | K | Max measured-predicted gain difference (dB) | Gain @ 20 kHz measured (dB) | Gain @ 22 kHz measured (dB) | Worst spur, tones <= 20 kHz (dBc) | Spur frequency (kHz) | Agrees |
-|---|---|---|---:|---:|---:|---:|---:|---:|:---:|
-| `balanced` | linear | off | 1 | 2.12e-09 | -0.0000 | -5.389 | -126.2 | 26.09 | yes |
-| `balanced` | linear | off | 6 | 2.12e-09 | -0.0000 | -5.389 | -126.2 | 26.09 | yes |
-| `balanced` | linear | gentle | 1 | 4.96e-08 | -8.8776 | -109.479 | -139.2 | 24.08 | yes |
-| `balanced` | linear | gentle | 6 | 4.94e-08 | -8.8776 | -109.479 | -128.6 | 68.18 | yes |
-| `balanced` | minimum | off | 1 | 2.12e-09 | -0.0000 | -5.389 | -126.2 | 26.09 | yes |
-| `balanced` | minimum | off | 6 | 2.12e-09 | -0.0000 | -5.389 | -126.2 | 26.09 | yes |
-| `balanced` | minimum | gentle | 1 | 4.96e-08 | -8.8776 | -109.480 | -139.2 | 24.08 | yes |
-| `balanced` | minimum | gentle | 6 | 4.95e-08 | -8.8776 | -109.480 | -128.6 | 68.18 | yes |
-| `reference` | linear | off | 1 | 2.24e-09 | -0.0000 | -5.349 | -142.8 | 34.09 | yes |
-| `reference` | linear | off | 6 | 2.24e-09 | 0.0000 | -5.349 | -143.3 | 34.09 | yes |
-| `reference` | linear | gentle | 1 | 4.83e-08 | -9.1285 | -121.207 | -147.4 | 24.08 | yes |
-| `reference` | linear | gentle | 6 | 4.76e-08 | -9.1285 | -121.207 | -147.4 | 24.08 | yes |
-| `reference` | minimum | off | 1 | 2.24e-09 | -0.0000 | -5.349 | -142.8 | 34.09 | yes |
-| `reference` | minimum | off | 6 | 2.24e-09 | 0.0000 | -5.349 | -143.3 | 34.09 | yes |
-| `reference` | minimum | gentle | 1 | 4.80e-08 | -9.1285 | -121.207 | -147.4 | 24.08 | yes |
-| `reference` | minimum | gentle | 6 | 4.85e-08 | -9.1285 | -121.207 | -147.4 | 24.08 | yes |
-| `low-latency` | linear | off | 1 | 1.90e-09 | -0.0001 | -5.454 | -99.2 | 24.08 | yes |
-| `low-latency` | linear | off | 6 | 1.91e-09 | -0.0000 | -5.455 | -99.2 | 24.08 | yes |
-| `low-latency` | linear | gentle | 1 | 3.57e-08 | -8.5668 | -90.839 | -110.1 | 24.08 | yes |
-| `low-latency` | linear | gentle | 6 | 3.57e-08 | -8.5668 | -90.840 | -110.1 | 24.08 | yes |
-| `low-latency` | minimum | off | 1 | 1.90e-09 | -0.0001 | -5.454 | -99.2 | 24.08 | yes |
-| `low-latency` | minimum | off | 6 | 1.91e-09 | -0.0001 | -5.455 | -99.2 | 24.08 | yes |
-| `low-latency` | minimum | gentle | 1 | 3.57e-08 | -8.5668 | -90.839 | -110.1 | 24.08 | yes |
-| `low-latency` | minimum | gentle | 6 | 3.57e-08 | -8.5668 | -90.840 | -110.1 | 24.08 | yes |
+| Phase | Apod. | K | Max measured-predicted gain difference (dB) | Gain @ 20 kHz measured (dB) | Gain @ 22 kHz measured (dB) | Worst spur, tones <= 20 kHz (dBc) | Spur frequency (kHz) | Agrees |
+|---|---|---:|---:|---:|---:|---:|---:|:---:|
+| linear | off | 1 | 2.24e-09 | -0.0000 | -5.349 | -142.1 | 24.08 | yes |
+| linear | off | 6 | 2.24e-09 | -0.0000 | -5.349 | -142.1 | 24.08 | yes |
+| linear | 18000 Hz | 1 | 5.97e-08 | -5.7526 | -123.116 | -147.9 | 24.08 | yes |
+| linear | 18000 Hz | 6 | 5.84e-08 | -5.7526 | -123.116 | -147.9 | 24.08 | yes |
+| linear | 18500 Hz | 1 | 5.60e-08 | -2.8413 | -117.871 | -147.0 | 24.08 | yes |
+| linear | 18500 Hz | 6 | 5.67e-08 | -2.8413 | -117.871 | -147.0 | 24.08 | yes |
+| linear | 19000 Hz | 1 | 6.60e-08 | -0.8292 | -117.674 | -150.5 | 24.08 | yes |
+| linear | 19000 Hz | 6 | 6.49e-08 | -0.8292 | -117.674 | -150.5 | 24.08 | yes |
+| linear | 20000 Hz | 1 | 4.21e-08 | -0.0000 | -107.223 | -158.9 | 26.09 | yes |
+| linear | 20000 Hz | 6 | 7.01e-08 | -0.0000 | -107.223 | -151.8 | 68.18 | yes |
+| minimum | off | 1 | 2.24e-09 | -0.0000 | -5.349 | -142.1 | 24.08 | yes |
+| minimum | off | 6 | 2.24e-09 | -0.0000 | -5.349 | -142.1 | 24.08 | yes |
+| minimum | 18000 Hz | 1 | 5.91e-08 | -5.7526 | -123.115 | -147.9 | 24.08 | yes |
+| minimum | 18000 Hz | 6 | 5.87e-08 | -5.7526 | -123.116 | -147.9 | 24.08 | yes |
+| minimum | 18500 Hz | 1 | 5.57e-08 | -2.8413 | -117.871 | -147.0 | 24.08 | yes |
+| minimum | 18500 Hz | 6 | 5.68e-08 | -2.8413 | -117.871 | -147.0 | 24.08 | yes |
+| minimum | 19000 Hz | 1 | 6.54e-08 | -0.8292 | -117.676 | -150.5 | 24.08 | yes |
+| minimum | 19000 Hz | 6 | 6.44e-08 | -0.8292 | -117.676 | -150.5 | 24.08 | yes |
+| minimum | 20000 Hz | 1 | 7.06e-08 | -0.0000 | -107.224 | -158.9 | 26.09 | yes |
+| minimum | 20000 Hz | 6 | 7.07e-08 | -0.0000 | -107.224 | -151.8 | 68.18 | yes |
 
 Agreement tolerance: 0.001 dB.
 
@@ -124,38 +148,30 @@ Agreement tolerance: 0.001 dB.
 
 ## End-to-End Cascade + Modulator Verification
 
-Test conditions: Baseband PCM 1 kHz coherent tone at -6.0 dBFS upsampled via `HalfBandCascade` (2^K linear-phase interpolation) directly into `Modulator`.
+Test conditions: Baseband PCM 1 kHz coherent tone at -6.0 dBFS upsampled via `HalfBandCascade` (2^K linear-phase interpolation, apodization `off` or pass edge 20 kHz) directly into `Modulator`.
 
 ### 5th-Order Modulator Pipeline
 
-| Target Rate | Preset | Cascade Stages | In-Band SNR | Analysis floor | SINAD (dB) | THD (dB) | Ultrasonic 20–100 kHz | Worst spur (dBc) | Max abs x5 | Verdict |
+| Target Rate | Apodization | Cascade Stages | In-Band SNR | Analysis floor | SINAD (dB) | THD (dB) | Ultrasonic 20–100 kHz | Worst spur (dBc) | Max abs x5 | Verdict |
 |---|---|:---:|---:|---:|---:|---:|---:|---:|---:|:---:|
-| `DSD64` | `balanced` | 6 | **115.12 dB** | 133 dB | 114.51 | -123.33 | -24.82 dB | -132.6 | 0.8591 | **PASS** |
-| `DSD64` | `reference` | 6 | **114.93 dB** | 133 dB | 114.30 | -123.01 | -25.02 dB | -130.9 | 0.9162 | **PASS** |
-| `DSD64` | `low-latency` | 6 | **115.18 dB** | 133 dB | 114.56 | -123.34 | -24.85 dB | -131.1 | 0.9223 | **PASS** |
-| `DSD128` | `balanced` | 7 | **147.97 dB** | 171 dB | 146.92 | -153.59 | -53.65 dB | -162.3 | 0.8266 | **PASS** |
-| `DSD128` | `reference` | 7 | **148.00 dB** | 171 dB | 146.88 | -153.31 | -53.55 dB | -161.6 | 0.9017 | **PASS** |
-| `DSD128` | `low-latency` | 7 | **148.34 dB** | 171 dB | 147.23 | -153.70 | -53.56 dB | -162.3 | 0.8577 | **PASS** |
-| `DSD256` | `balanced` | 8 | **181.51 dB** | 200 dB | 179.52 | -183.86 | -86.95 dB | -191.7 | 0.8762 | **PASS** |
-| `DSD256` | `reference` | 8 | **181.08 dB** | 200 dB | 179.05 | -183.32 | -86.71 dB | -191.6 | 0.8562 | **PASS** |
-| `DSD256` | `low-latency` | 8 | **181.15 dB** | 200 dB | 179.33 | -184.00 | -86.66 dB | -190.4 | 0.8661 | **PASS** |
-| `DSD512` | `balanced` | 9 | **215.66 dB** | 235 dB | 211.62 | -213.80 | -120.40 dB | -225.1 | 0.7831 | **PASS** |
-| `DSD512` | `reference` | 9 | **215.05 dB** | 235 dB | 211.19 | -213.49 | -119.70 dB | -223.6 | 0.7302 | **PASS** |
-| `DSD512` | `low-latency` | 9 | **215.22 dB** | 235 dB | 211.54 | -213.98 | -110.97 dB | -225.1 | 0.8692 | **PASS** |
+| `DSD64` | `off` | 6 | **115.14 dB** | 133 dB | 114.52 | -123.25 | -24.93 dB | -131.6 | 0.8472 | **PASS** |
+| `DSD64` | `20000` | 6 | **115.23 dB** | 133 dB | 114.59 | -123.24 | -24.78 dB | -130.9 | 0.8854 | **PASS** |
+| `DSD128` | `off` | 7 | **148.21 dB** | 171 dB | 147.15 | -153.78 | -53.56 dB | -161.1 | 0.8928 | **PASS** |
+| `DSD128` | `20000` | 7 | **147.97 dB** | 171 dB | 147.02 | -154.08 | -53.55 dB | -161.8 | 0.8567 | **PASS** |
+| `DSD256` | `off` | 8 | **181.68 dB** | 200 dB | 179.57 | -183.71 | -86.67 dB | -194.6 | 0.8842 | **PASS** |
+| `DSD256` | `20000` | 8 | **181.49 dB** | 200 dB | 179.71 | -184.44 | -86.63 dB | -194.1 | 0.7935 | **PASS** |
+| `DSD512` | `off` | 9 | **214.97 dB** | 235 dB | 211.11 | -213.41 | -119.93 dB | -224.0 | 0.8358 | **PASS** |
+| `DSD512` | `20000` | 9 | **215.87 dB** | 235 dB | 211.74 | -213.87 | -119.74 dB | -227.5 | 0.9058 | **PASS** |
 
 ### 7th-Order Modulator Pipeline
 
-| Target Rate | Preset | Cascade Stages | In-Band SNR | Analysis floor | SINAD (dB) | THD (dB) | Ultrasonic 20–100 kHz | Worst spur (dBc) | Max abs x7 | Verdict |
+| Target Rate | Apodization | Cascade Stages | In-Band SNR | Analysis floor | SINAD (dB) | THD (dB) | Ultrasonic 20–100 kHz | Worst spur (dBc) | Max abs x7 | Verdict |
 |---|---|:---:|---:|---:|---:|---:|---:|---:|---:|:---:|
-| `DSD64` | `balanced` | 6 | **133.94 dB** | 150 dB | 133.29 | -141.86 | -20.01 dB | -150.3 | 0.9001 | **PASS** |
-| `DSD64` | `reference` | 6 | **134.09 dB** | 150 dB | 133.41 | -141.78 | -20.01 dB | -148.4 | 0.8324 | **PASS** |
-| `DSD64` | `low-latency` | 6 | **133.88 dB** | 150 dB | 133.21 | -141.66 | -19.96 dB | -149.1 | 0.9030 | **PASS** |
-| `DSD128` | `balanced` | 7 | **179.05 dB** | 201 dB | 177.92 | -184.32 | -46.04 dB | -191.9 | 0.9218 | **PASS** |
-| `DSD128` | `reference` | 7 | **179.09 dB** | 201 dB | 177.83 | -183.82 | -45.85 dB | -191.4 | 0.8579 | **PASS** |
-| `DSD128` | `low-latency` | 7 | **178.95 dB** | 201 dB | 177.86 | -184.42 | -46.05 dB | -191.8 | 0.8922 | **PASS** |
-| `DSD256` | `balanced` | 8 | **224.48 dB** | 242 dB | 222.57 | -227.07 | -91.27 dB | -235.8 | 0.8435 | **PASS** |
-| `DSD256` | `reference` | 8 | **224.71 dB** | 242 dB | 222.63 | -226.84 | -91.15 dB | -236.4 | 0.9045 | **PASS** |
-| `DSD256` | `low-latency` | 8 | **224.54 dB** | 242 dB | 222.34 | -226.34 | -91.50 dB | -236.1 | 0.8454 | **PASS** |
-| `DSD512` | `balanced` | 9 | **269.99 dB** | 281 dB | 266.07 | -268.33 | -135.94 dB | -280.9 | 0.6705 | **PASS** |
-| `DSD512` | `reference` | 9 | **270.48 dB** | 281 dB | 266.17 | -268.18 | -136.80 dB | -281.1 | 0.7327 | **PASS** |
-| `DSD512` | `low-latency` | 9 | **269.22 dB** | 281 dB | 265.27 | -267.52 | -111.54 dB | -275.9 | 0.8513 | **PASS** |
+| `DSD64` | `off` | 6 | **134.00 dB** | 150 dB | 133.38 | -142.10 | -19.91 dB | -150.7 | 0.8816 | **PASS** |
+| `DSD64` | `20000` | 6 | **133.85 dB** | 150 dB | 133.21 | -141.83 | -19.90 dB | -147.6 | 0.9064 | **PASS** |
+| `DSD128` | `off` | 7 | **179.01 dB** | 201 dB | 177.70 | -183.53 | -45.83 dB | -192.2 | 0.8226 | **PASS** |
+| `DSD128` | `20000` | 7 | **178.94 dB** | 201 dB | 177.76 | -184.00 | -45.88 dB | -192.3 | 0.8323 | **PASS** |
+| `DSD256` | `off` | 8 | **224.12 dB** | 242 dB | 222.02 | -226.20 | -91.23 dB | -232.7 | 0.8887 | **PASS** |
+| `DSD256` | `20000` | 8 | **224.35 dB** | 242 dB | 221.96 | -225.69 | -91.50 dB | -236.1 | 0.8573 | **PASS** |
+| `DSD512` | `off` | 9 | **270.09 dB** | 281 dB | 266.01 | -268.16 | -136.02 dB | -280.1 | 0.9001 | **PASS** |
+| `DSD512` | `20000` | 9 | **269.78 dB** | 281 dB | 265.95 | -268.27 | -136.97 dB | -276.9 | 0.6912 | **PASS** |

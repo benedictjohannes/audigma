@@ -1,26 +1,17 @@
 """Invariant compliance table and conclusion (tail of the index report)."""
 
-from .cascade_filters import PRESETS, PHASES
 from .common import ORDERS, Section
 
-# Design.md section 4.2 goals per preset: (passband ripple dB or None if "declared per rate", stopband rejection dB).
-PRESET_GOALS = {"balanced": (0.01, 120.0), "reference": (0.001, 140.0), "low-latency": (None, 100.0)}
+# Design.md section 4.2: every interpolation filter is designed for >= 140 dB image rejection.
+REJECTION_GOAL_DB = 140.0
 
 
-def filter_goal_rows(cascade_filters_res):
-    """Measures the implemented cascade (off apodization, both phases, every K) against the section 4.2 goals."""
+def filter_goal(cascade_filters_res):
+    """Worst image rejection and passband deviation of the implemented cascade (every phase, apodization and K)."""
     impulse = cascade_filters_res["impulse"]
-    rows, ok = [], True
-    for preset in PRESETS:
-        ripple_goal, rej_goal = PRESET_GOALS[preset]
-        keys = [k for k in impulse if k[0] == preset and k[2] == "off"]
-        ripple = max(impulse[k]["ripple_db"] for k in keys)
-        rej = min(impulse[k]["worst_image_db"] for k in keys)
-        r_ok = ripple_goal is None or ripple <= ripple_goal
-        j_ok = rej >= rej_goal
-        ok = ok and r_ok and j_ok
-        rows.append((preset, ripple, ripple_goal, rej, rej_goal))
-    return rows, ok
+    rej = min(m["worst_image_db"] for m in impulse.values())
+    ripple_off = max(m["ripple_db"] for key, m in impulse.items() if key[1] == "off")
+    return rej, ripple_off, rej >= REJECTION_GOAL_DB
 
 
 def render(env_info, direct_results, stability_results, bench_stats, cascade_filters_res, failed_so_far, stability_ok):
@@ -39,14 +30,14 @@ def render(env_info, direct_results, stability_results, bench_stats, cascade_fil
     if not osr_compliant:
         failed_checks.append("Baseband OSR Calculation invariant")
 
-    # Half-band cascade against the Design.md section 4.2 goals, measured on the implemented cascade.
-    goal_rows, filters_ok = filter_goal_rows(cascade_filters_res)
-    ripple_str = " | ".join(
-        f"{p}: {rip:.6f} dB (goal {'declared per rate' if g is None else f'<= {g} dB'})" for p, rip, g, _, _ in goal_rows
+    # Half-band cascade against the Design.md section 4.2 goal, measured on the implemented cascade.
+    rej, ripple_off, filters_ok = filter_goal(cascade_filters_res)
+    rej_str = (
+        f"{rej:.1f} dB worst over all phases, apodizations and K (goal >= {REJECTION_GOAL_DB:.0f} dB); "
+        f"passband deviation with `off` {ripple_off:.1e} dB (fixed by the rejection, no separate goal)"
     )
-    rej_str = " | ".join(f"{p}: {rej:.1f} dB (goal >= {g:.0f} dB)" for p, _, _, rej, g in goal_rows)
     if not filters_ok:
-        failed_checks.append("Cascade passband ripple / image rejection goals (Design.md section 4.2)")
+        failed_checks.append("Cascade image rejection goal (Design.md section 4.2)")
 
     stability_compliant = stability_ok
 
@@ -63,10 +54,7 @@ def render(env_info, direct_results, stability_results, bench_stats, cascade_fil
 
     rows = [
         ("Baseband OSR Calculation", "`Design.md §4.1`", osr_val_str, osr_compliant),
-        ("Cascade Passband Ripple (implemented, `off`, all K)", "`Design.md §4.2`", ripple_str, all(
-            g is None or rip <= g for _, rip, g, _, _ in goal_rows)),
-        ("Cascade Image Rejection (implemented, `off`, all K)", "`Design.md §4.2`", rej_str, all(
-            rej >= g for _, _, _, rej, g in goal_rows)),
+        ("Cascade Image Rejection (implemented, all settings, all K)", "`Design.md §4.2`", rej_str, filters_ok),
         ("Modulator Stability Envelope", "`Design.md §4.3`", "Bounded states across silence, DC (+0.5), multitone, step overload recovery", stability_compliant),
         ("DSD Silence Byte Invariant", "`Design.md §1.3`", silence_val_str, silence_byte_compliant),
         ("Hardware FTZ/DAZ", "`Design.md §4.1`", env_info["ftz_daz_status"], env_info["ftz_daz_active"] is True),

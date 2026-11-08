@@ -74,8 +74,13 @@ fn test_disconnecting_output_sink_triggers_device_disconnected_error() {
 
     // Output will disconnect after ~2048 bytes
     let mut mock_out = DisconnectingOutputSink::new(2048);
-    let control =
-        DaemonControlHandle::new(44100, DaemonOutputFormat::Dsd, 11289600, "balanced", 0.0);
+    let control = DaemonControlHandle::new(
+        44100,
+        DaemonOutputFormat::Dsd,
+        11289600,
+        "linear, apodization off",
+        0.0,
+    );
 
     let res = pipeline.run_streaming(&mut mock_in, &mut mock_out, control);
     assert!(res.is_err());
@@ -144,7 +149,13 @@ fn test_wait_for_alsa_device_timeout() {
 
 #[test]
 fn test_telemetry_extended_fields_serializable() {
-    let control = DaemonControlHandle::new(48000, DaemonOutputFormat::Pcm, 96000, "balanced", 0.0);
+    let control = DaemonControlHandle::new(
+        48000,
+        DaemonOutputFormat::Pcm,
+        96000,
+        "linear, apodization off",
+        0.0,
+    );
     control.set_state(DaemonState::WaitingForDevice);
     control.set_disconnect_info(Some("hw:CARD=JA11,DEV=0".to_string()), Some(1500));
 

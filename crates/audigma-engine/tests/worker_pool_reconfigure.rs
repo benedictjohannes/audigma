@@ -1,7 +1,7 @@
 //! A persistent `ChannelWorkerPool` reconfigured for a new rate must keep its
 //! worker threads and produce output identical to a freshly built pool.
 
-use audigma_dsp::config::{Apodization, DitherType, FilterPhase, FilterPreset, OverloadPolicy};
+use audigma_dsp::config::{Apodization, DitherType, FilterPhase, OverloadPolicy};
 use audigma_dsp::rates::DsdBitRateHz;
 use audigma_engine::worker::{ChannelWorkerPool, TargetDsdConfig};
 use std::sync::Arc;
@@ -14,7 +14,7 @@ const FRAMES: usize = 256;
 struct Cfg {
     stages: usize,
     dsd: Option<DsdBitRateHz>,
-    preset: FilterPreset,
+    apodization: Apodization,
 }
 
 fn dsd_cfg(rate: DsdBitRateHz) -> TargetDsdConfig {
@@ -30,9 +30,8 @@ fn dsd_cfg(rate: DsdBitRateHz) -> TargetDsdConfig {
 fn build(cfg: &Cfg, hook: Option<audigma_engine::ThreadInitHook>) -> ChannelWorkerPool {
     ChannelWorkerPool::new(
         CHANNELS,
-        cfg.preset,
         FilterPhase::Linear,
-        Apodization::Off,
+        cfg.apodization,
         cfg.stages,
         FRAMES,
         cfg.dsd.map(dsd_cfg),
@@ -47,9 +46,8 @@ fn build(cfg: &Cfg, hook: Option<audigma_engine::ThreadInitHook>) -> ChannelWork
 
 fn reconfigure(pool: &mut ChannelWorkerPool, cfg: &Cfg) {
     pool.reconfigure(
-        cfg.preset,
         FilterPhase::Linear,
-        Apodization::Off,
+        cfg.apodization,
         cfg.stages,
         FRAMES,
         cfg.dsd.map(dsd_cfg),
@@ -103,23 +101,23 @@ fn reconfigure_keeps_threads_and_matches_fresh_pool() {
     let first = Cfg {
         stages: 6,
         dsd: Some(DsdBitRateHz::DSD64),
-        preset: FilterPreset::Balanced,
+        apodization: Apodization::Off,
     };
     let sequence = [
         Cfg {
             stages: 8,
             dsd: Some(DsdBitRateHz::DSD256),
-            preset: FilterPreset::Reference,
+            apodization: Apodization::PassEdge19000,
         },
         Cfg {
             stages: 3,
             dsd: None,
-            preset: FilterPreset::Balanced,
+            apodization: Apodization::Off,
         },
         Cfg {
             stages: 9,
             dsd: Some(DsdBitRateHz::DSD512),
-            preset: FilterPreset::Balanced,
+            apodization: Apodization::Off,
         },
         // Back to a smaller shape: buffers shrink again.
         first.clone(),
@@ -163,7 +161,6 @@ fn each_worker_receives_its_own_placement_and_non_spinning_pool_still_works() {
         .collect();
     let mut pool = ChannelWorkerPool::new(
         CHANNELS,
-        FilterPreset::Balanced,
         FilterPhase::Linear,
         Apodization::Off,
         6,
@@ -208,7 +205,6 @@ fn build_with(
 ) -> Result<ChannelWorkerPool, audigma_engine::traits::EngineError> {
     ChannelWorkerPool::new(
         CHANNELS,
-        FilterPreset::Balanced,
         FilterPhase::Linear,
         Apodization::Off,
         6,

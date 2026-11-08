@@ -1,10 +1,5 @@
 //! Handler for `audigma benchmark` subcommand.
 
-use std::f64::consts::PI;
-use std::path::PathBuf;
-use std::time::Instant;
-
-use audigma_dsp::presets::by_name;
 use audigma_dsp::rates::PcmRateHz;
 use audigma_engine::traits::{AudioInput, DecoderInput};
 use audigma_engine::{ChannelWorkerPool, MockAudioInput, OfflinePipeline, TargetDsdConfig};
@@ -13,6 +8,9 @@ use audigma_format::decoder::AudioDecoder;
 use audigma_settings::{OutputContainer, Settings};
 use clap::Args;
 use serde_json::json;
+use std::f64::consts::PI;
+use std::path::PathBuf;
+use std::time::Instant;
 
 use crate::error::CliError;
 
@@ -21,10 +19,6 @@ pub struct BenchmarkArgs {
     /// Optional input audio file (if omitted, uses a deterministic 10s synthetic stereo signal)
     #[arg(short = 'i', long = "input")]
     pub input: Option<PathBuf>,
-
-    /// Resampler & filter preset ("balanced", "reference", "low-latency")
-    #[arg(short = 'p', long = "preset")]
-    pub preset: Option<String>,
 
     /// Optional TOML configuration file path
     #[arg(short = 'c', long = "config")]
@@ -36,7 +30,7 @@ pub struct BenchmarkArgs {
 }
 
 pub fn run_benchmark(args: BenchmarkArgs) -> Result<(), CliError> {
-    let mut settings = if let Some(ref cfg_path) = args.config {
+    let settings = if let Some(ref cfg_path) = args.config {
         let content = std::fs::read_to_string(cfg_path)?;
         let s = Settings::from_toml_str(&content)?;
         s.validate()?;
@@ -44,26 +38,6 @@ pub fn run_benchmark(args: BenchmarkArgs) -> Result<(), CliError> {
     } else {
         Settings::default_offline(OutputContainer::Dsf)
     };
-
-    if let Some(ref preset_name) = args.preset {
-        let preset_def = by_name(preset_name).ok_or_else(|| CliError::PresetNotFound {
-            name: preset_name.clone(),
-        })?;
-        if let Some(ref mut resampler) = settings.resampler {
-            resampler.preset = preset_def.preset;
-        } else {
-            let r = audigma_settings::ResamplerConfig {
-                preset: preset_def.preset,
-                ..Default::default()
-            };
-            settings.resampler = Some(r);
-        }
-    } else if args.config.is_none() {
-        // Default standalone benchmark preset is "balanced" (standard live real-time DSP preset)
-        if let Some(ref mut resampler) = settings.resampler {
-            resampler.preset = audigma_dsp::config::FilterPreset::Balanced;
-        }
-    }
 
     const BENCH_SECONDS: usize = 10;
     const SAMPLE_RATE_HZ: u32 = 44_100;
@@ -150,14 +124,12 @@ pub fn run_benchmark(args: BenchmarkArgs) -> Result<(), CliError> {
 
     // 2.A: Single-Threaded Sequential Baseline (Stereo L + R on 1 thread)
     let mut seq_cascade_l = audigma_dsp::fir::HalfBandCascade::new(
-        plan.dsp_config.preset,
         plan.dsp_config.phase,
         plan.dsp_config.apodization,
         stages,
         BLOCK_FRAMES,
     );
     let mut seq_cascade_r = audigma_dsp::fir::HalfBandCascade::new(
-        plan.dsp_config.preset,
         plan.dsp_config.phase,
         plan.dsp_config.apodization,
         stages,
@@ -245,7 +217,6 @@ pub fn run_benchmark(args: BenchmarkArgs) -> Result<(), CliError> {
 
     let mut worker_pool = ChannelWorkerPool::new(
         2,
-        plan.dsp_config.preset,
         plan.dsp_config.phase,
         plan.dsp_config.apodization,
         stages,
@@ -312,7 +283,7 @@ pub fn run_benchmark(args: BenchmarkArgs) -> Result<(), CliError> {
 
     if args.json {
         let json_val = json!({
-            "preset": plan.preset_def.name,
+            "filter": plan.dsp_config.filter_description(),
             "input_rate_hz": input_rate.get(),
             "target_format": format!("{:?}", report.target_format),
             "dsp_worker_throughput_x_realtime": worker_throughput_x,
@@ -333,7 +304,10 @@ pub fn run_benchmark(args: BenchmarkArgs) -> Result<(), CliError> {
         println!("{}", serde_json::to_string_pretty(&json_val).unwrap());
     } else {
         println!("=======================================================");
-        println!("audigma benchmark: {}", plan.preset_def.name);
+        println!(
+            "audigma benchmark: {}",
+            plan.dsp_config.filter_description()
+        );
         println!("=======================================================");
         println!("  Input Rate:            {} Hz", input_rate.get());
         println!("  Target Format:         {:?}", report.target_format);

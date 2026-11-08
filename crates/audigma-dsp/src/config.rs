@@ -32,39 +32,6 @@ pub enum TargetFormat {
     Dsd,
 }
 
-/// Canonical filter & modulator quality preset (`Design.md §4.2`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-pub enum FilterPreset {
-    #[default]
-    #[serde(rename = "balanced")]
-    Balanced,
-    #[serde(rename = "reference")]
-    Reference,
-    #[serde(rename = "low-latency")]
-    LowLatency,
-}
-
-impl FilterPreset {
-    /// Strictly resolves one of the three canonical preset names (`"balanced" | "reference" | "low-latency"`).
-    pub fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "balanced" => Some(Self::Balanced),
-            "reference" => Some(Self::Reference),
-            "low-latency" => Some(Self::LowLatency),
-            _ => None,
-        }
-    }
-
-    /// Returns the canonical TOML/CLI preset string.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Balanced => "balanced",
-            Self::Reference => "reference",
-            Self::LowLatency => "low-latency",
-        }
-    }
-}
-
 /// FIR impulse response phase characteristic (`Design.md §4.2`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -73,12 +40,124 @@ pub enum FilterPhase {
     Minimum,
 }
 
-/// Pre-ringing / post-Nyquist steepness apodization control (`Design.md §4.2`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+/// Stage-0 apodization (`Design.md §4.2`): `Off` uses the brick-wall half-band (pass 20 kHz, stop 24.1 kHz);
+/// a pass edge selects an apodizing low-pass from that edge to a 22.05 kHz stopband (the source Nyquist).
+///
+/// Edges are for 44.1 kHz-family sources; the 48 kHz family runs the same tables, so they scale by 48/44.1.
+/// TOML: `"off"`, `18000`, `18500`, `19000`, `20000`, or `"gentle"` (alias for `19000`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Apodization {
+    #[default]
     Off,
-    Gentle,
+    PassEdge18000,
+    PassEdge18500,
+    PassEdge19000,
+    PassEdge20000,
+}
+
+impl Apodization {
+    /// Every apodizing pass edge in Hz, in ascending order.
+    pub const PASS_EDGES_HZ: [u32; 4] = [18_000, 18_500, 19_000, 20_000];
+
+    /// Every setting, `Off` first.
+    pub const ALL: [Self; 5] = [
+        Self::Off,
+        Self::PassEdge18000,
+        Self::PassEdge18500,
+        Self::PassEdge19000,
+        Self::PassEdge20000,
+    ];
+
+    /// The pass edge in Hz (44.1 kHz family), or `None` for `Off`.
+    pub const fn pass_edge_hz(self) -> Option<u32> {
+        match self {
+            Self::Off => None,
+            Self::PassEdge18000 => Some(18_000),
+            Self::PassEdge18500 => Some(18_500),
+            Self::PassEdge19000 => Some(19_000),
+            Self::PassEdge20000 => Some(20_000),
+        }
+    }
+
+    /// Resolves a pass edge in Hz; only the four supported edges are accepted.
+    pub const fn from_pass_edge_hz(hz: u32) -> Option<Self> {
+        match hz {
+            18_000 => Some(Self::PassEdge18000),
+            18_500 => Some(Self::PassEdge18500),
+            19_000 => Some(Self::PassEdge19000),
+            20_000 => Some(Self::PassEdge20000),
+            _ => None,
+        }
+    }
+
+    /// Resolves `"off"`, `"gentle"` (alias for 19000) or a supported pass edge written as a number.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "off" => Some(Self::Off),
+            "gentle" => Some(Self::PassEdge19000),
+            other => other.parse().ok().and_then(Self::from_pass_edge_hz),
+        }
+    }
+
+    /// Canonical name: `"off"` or the pass edge in Hz.
+    pub fn name(self) -> String {
+        self.pass_edge_hz()
+            .map_or_else(|| "off".to_string(), |hz| hz.to_string())
+    }
+}
+
+impl std::fmt::Display for Apodization {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.name())
+    }
+}
+
+impl Serialize for Apodization {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self.pass_edge_hz() {
+            None => serializer.serialize_str("off"),
+            Some(hz) => serializer.serialize_u32(hz),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Apodization {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ApodizationVisitor;
+
+        const EXPECTED: &str = r#""off", "gentle", 18000, 18500, 19000 or 20000"#;
+
+        impl serde::de::Visitor<'_> for ApodizationVisitor {
+            type Value = Apodization;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(EXPECTED)
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Apodization, E> {
+                match v {
+                    "off" => Ok(Apodization::Off),
+                    "gentle" => Ok(Apodization::PassEdge19000),
+                    _ => Err(E::invalid_value(serde::de::Unexpected::Str(v), &EXPECTED)),
+                }
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Apodization, E> {
+                u32::try_from(v)
+                    .ok()
+                    .and_then(Apodization::from_pass_edge_hz)
+                    .ok_or_else(|| E::invalid_value(serde::de::Unexpected::Unsigned(v), &EXPECTED))
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Apodization, E> {
+                u64::try_from(v)
+                    .map_err(|_| E::invalid_value(serde::de::Unexpected::Signed(v), &EXPECTED))
+                    .and_then(|v| self.visit_u64(v))
+            }
+        }
+
+        deserializer.deserialize_any(ApodizationVisitor)
+    }
 }
 
 /// Dither topology for integer PCM quantization and 1-bit DSM (`Design.md §4.2–§4.3`).
@@ -122,7 +201,6 @@ pub struct StreamSpec {
 /// Concrete, resolved DSP pipeline configuration (`Design.md §2`, `§4.2–§4.4`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DspConfiguration {
-    pub preset: FilterPreset,
     pub phase: FilterPhase,
     pub apodization: Apodization,
     pub modulator_order: u8,
@@ -137,6 +215,32 @@ pub struct DspConfiguration {
 }
 
 impl DspConfiguration {
+    /// A configuration with the given filter and gain settings and defaults for the rest.
+    ///
+    /// It has no modulator limits (PCM: full scale, no headroom); a DSD target applies them with
+    /// `apply_modulator_limits` once its order and bit rate are known.
+    pub const fn new(
+        phase: FilterPhase,
+        apodization: Apodization,
+        preamp_db: f64,
+        user_volume_db: f64,
+        overload_policy: OverloadPolicy,
+    ) -> Self {
+        Self {
+            phase,
+            apodization,
+            modulator_order: crate::defaults::DEFAULT_MODULATOR_ORDER,
+            preamp_db,
+            user_volume_db,
+            profile_headroom_db: 0.0,
+            max_stable_input_dbfs: 0.0,
+            safety_margin_db: crate::defaults::DEFAULT_SAFETY_MARGIN_DB,
+            dither: DitherType::Tpdf,
+            dither_tpdf_seed: None,
+            overload_policy,
+        }
+    }
+
     /// Sets the input limit `L` of the selected modulator (`modulator_order` at `bit_rate`) and the matching
     /// profile headroom `L - M`, so a 0 dBFS PCM peak reaches the modulator at `L - M` (`Design.md §4.3-§4.4`).
     pub fn apply_modulator_limits(
@@ -147,6 +251,19 @@ impl DspConfiguration {
         self.max_stable_input_dbfs = limit;
         self.profile_headroom_db = limit - self.safety_margin_db;
         Ok(())
+    }
+
+    /// Human-readable filter summary for logs and telemetry, e.g. `"linear, apodization off"`
+    /// or `"minimum, apodization 19000 Hz"`.
+    pub fn filter_description(&self) -> String {
+        let phase = match self.phase {
+            FilterPhase::Linear => "linear",
+            FilterPhase::Minimum => "minimum",
+        };
+        match self.apodization.pass_edge_hz() {
+            None => format!("{phase}, apodization off"),
+            Some(hz) => format!("{phase}, apodization {hz} Hz"),
+        }
     }
 
     /// Returns the total configured static gain in dB (`preamp_db + user_volume_db + profile_headroom_db`).
@@ -202,11 +319,10 @@ impl DspConfiguration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::presets::PRESET_REFERENCE;
 
     #[test]
     fn test_headroom_inequality_and_two_pass_gain() {
-        let mut cfg = PRESET_REFERENCE.to_default_dsp_config(
+        let mut cfg = DspConfiguration::new(
             FilterPhase::Linear,
             Apodization::Off,
             0.0,
@@ -234,7 +350,7 @@ mod tests {
 
     #[test]
     fn test_modulator_limits_follow_order_and_rate() {
-        let mut cfg = PRESET_REFERENCE.to_default_dsp_config(
+        let mut cfg = DspConfiguration::new(
             FilterPhase::Linear,
             Apodization::Off,
             0.0,
@@ -259,8 +375,36 @@ mod tests {
     }
 
     #[test]
+    fn test_apodization_names_and_serde() {
+        #[derive(Deserialize, Serialize)]
+        struct Wrap {
+            apodization: Apodization,
+        }
+        let parse =
+            |v: &str| toml::from_str::<Wrap>(&format!("apodization = {v}")).map(|w| w.apodization);
+        assert_eq!(parse(r#""off""#).unwrap(), Apodization::Off);
+        assert_eq!(parse(r#""gentle""#).unwrap(), Apodization::PassEdge19000);
+        assert_eq!(parse("18000").unwrap(), Apodization::PassEdge18000);
+        assert_eq!(parse("18500").unwrap(), Apodization::PassEdge18500);
+        assert_eq!(parse("20000").unwrap(), Apodization::PassEdge20000);
+        for bad in ["17500", "19500", "-1", r#""19000""#, r#""on""#, "19000.0"] {
+            assert!(parse(bad).is_err(), "{bad} must be rejected");
+        }
+        for a in Apodization::ALL {
+            let text = toml::to_string(&Wrap { apodization: a }).unwrap();
+            assert_eq!(toml::from_str::<Wrap>(&text).unwrap().apodization, a);
+            assert_eq!(Apodization::from_name(&a.name()), Some(a));
+        }
+        assert_eq!(
+            Apodization::from_name("gentle"),
+            Some(Apodization::PassEdge19000)
+        );
+        assert_eq!(Apodization::from_name("17500"), None);
+    }
+
+    #[test]
     fn test_volume_unity_and_linear_gain_computation() {
-        let mut cfg = PRESET_REFERENCE.to_default_dsp_config(
+        let mut cfg = DspConfiguration::new(
             FilterPhase::Linear,
             Apodization::Off,
             0.0,

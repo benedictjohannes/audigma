@@ -5,30 +5,14 @@ use std::io::Write;
 use std::process::Command;
 
 #[test]
-fn test_cli_presets_list_and_show() {
+fn test_cli_presets_subcommand_is_gone() {
     let bin = env!("CARGO_BIN_EXE_audigma");
-
-    let output_list = Command::new(bin)
+    let output = Command::new(bin)
         .arg("presets")
         .arg("list")
         .output()
         .expect("failed to run audigma presets list");
-    assert!(output_list.status.success());
-    let list_str = String::from_utf8_lossy(&output_list.stdout);
-    assert!(list_str.contains("balanced"));
-    assert!(list_str.contains("reference"));
-    assert!(list_str.contains("low-latency"));
-
-    let output_show = Command::new(bin)
-        .arg("presets")
-        .arg("show")
-        .arg("reference")
-        .output()
-        .expect("failed to run audigma presets show reference");
-    assert!(output_show.status.success());
-    let show_str = String::from_utf8_lossy(&output_show.stdout);
-    assert!(show_str.contains("Preset: reference"));
-    assert!(show_str.contains("140.0 dB"));
+    assert!(!output.status.success());
 }
 
 #[test]
@@ -46,7 +30,8 @@ rate_family = "44100"
 dsd_rate = "dsd256"
 
 [resampler]
-preset = "reference"
+phase = "minimum"
+apodization = "gentle"
 "#;
     let mut f = File::create(&cfg_path).unwrap();
     f.write_all(toml.as_bytes()).unwrap();
@@ -74,7 +59,8 @@ preset = "reference"
         .expect("failed to run audigma config explain");
     assert!(output_explain.status.success());
     let explain_json = String::from_utf8_lossy(&output_explain.stdout);
-    assert!(explain_json.contains("\"preset\": \"reference\""));
+    assert!(explain_json.contains("\"phase\": \"minimum\""));
+    assert!(explain_json.contains("\"apodization\": 19000"));
     assert!(explain_json.contains("\"input_rate_hz\": 44100"));
 
     let _ = std::fs::remove_file(cfg_path);

@@ -4,7 +4,7 @@ use std::f64::consts::PI;
 
 use audigma_dsp::{
     Apodization, CrfbModulator, CrfbModulator7, DitherType, DsdBitRateHz, FilterPhase,
-    FilterPreset, HalfBandCascade, Modulator, OverloadPolicy, ScopedFtzDaz, get_crfb_coefficients,
+    HalfBandCascade, Modulator, OverloadPolicy, ScopedFtzDaz, get_crfb_coefficients,
     get_crfb7_coefficients,
 };
 
@@ -135,23 +135,11 @@ fn test_overload_policy_recovery() {
 }
 
 #[test]
-fn test_cascade_and_modulator_end_to_end_presets() {
+fn test_cascade_and_modulator_end_to_end_filters() {
     let _ftz = ScopedFtzDaz::new();
-    let presets = [
-        FilterPreset::Balanced,
-        FilterPreset::Reference,
-        FilterPreset::LowLatency,
-    ];
-    let modes = [
-        (FilterPhase::Linear, Apodization::Off),
-        (FilterPhase::Linear, Apodization::Gentle),
-        (FilterPhase::Minimum, Apodization::Off),
-        (FilterPhase::Minimum, Apodization::Gentle),
-    ];
-
-    for preset in presets {
-        for (phase, apodization) in modes {
-            let mut cascade = HalfBandCascade::new(preset, phase, apodization, 6, 64); // 64x to DSD64
+    for phase in [FilterPhase::Linear, FilterPhase::Minimum] {
+        for apodization in Apodization::ALL {
+            let mut cascade = HalfBandCascade::new(phase, apodization, 6, 64); // 64x to DSD64
             let coeffs = *get_crfb_coefficients(DsdBitRateHz::DSD64).unwrap();
             let mut modulator =
                 CrfbModulator::new(coeffs, DitherType::Tpdf, OverloadPolicy::MuteRecover);
@@ -176,7 +164,7 @@ fn test_cascade_and_modulator_end_to_end_presets() {
             assert_eq!(
                 modulator.overload_count(),
                 0,
-                "{preset:?}/{phase:?}/{apodization:?} overloaded"
+                "{phase:?}/{apodization:?} overloaded"
             );
             for &s in &modulator.state() {
                 assert!(s.abs() < CrfbModulator::STABILITY_THRESHOLD);
@@ -241,18 +229,11 @@ fn test_all_rates_silence_stability_order7() {
 }
 
 #[test]
-fn test_cascade_and_modulator7_end_to_end_presets() {
+fn test_cascade_and_modulator7_end_to_end_phases() {
     let _ftz = ScopedFtzDaz::new();
-    let presets = [
-        FilterPreset::Balanced,
-        FilterPreset::Reference,
-        FilterPreset::LowLatency,
-    ];
-
-    for preset in presets {
+    for phase in [FilterPhase::Linear, FilterPhase::Minimum] {
         // Test 128x to DSD128 with 7th-order modulator
-        let mut cascade =
-            HalfBandCascade::new(preset, FilterPhase::Linear, Apodization::Off, 7, 64);
+        let mut cascade = HalfBandCascade::new(phase, Apodization::Off, 7, 64);
         let mut modulator = Modulator::new(
             7,
             DsdBitRateHz::DSD128,
@@ -281,7 +262,7 @@ fn test_cascade_and_modulator7_end_to_end_presets() {
         assert_eq!(
             modulator.overload_count(),
             0,
-            "7th-order preset {preset:?} overloaded"
+            "7th-order {phase:?} overloaded"
         );
         for &s in modulator.state_slice() {
             assert!(s.abs() < CrfbModulator7::STABILITY_THRESHOLD);
@@ -295,13 +276,7 @@ fn test_cascade_and_modulator_dsd512_end_to_end() {
 
     for order in [5, 7] {
         // Test 512x upsampling (9 stages) from 44.1 kHz baseband to DSD512 (22.5792 MHz)
-        let mut cascade = HalfBandCascade::new(
-            FilterPreset::Balanced,
-            FilterPhase::Linear,
-            Apodization::Off,
-            9,
-            64,
-        );
+        let mut cascade = HalfBandCascade::new(FilterPhase::Linear, Apodization::Off, 9, 64);
         let mut modulator = Modulator::new(
             order,
             DsdBitRateHz::DSD512,

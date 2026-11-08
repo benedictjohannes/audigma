@@ -491,7 +491,6 @@ impl OfflinePipeline {
         worker_setup: Option<crate::worker::WorkerSetup>,
     ) -> Result<Self, EngineError> {
         let plan = settings.explain_for_input_rate(input_rate)?;
-        let preset = plan.dsp_config.preset;
 
         let topology = PipelineTopology::resolve(input_rate, plan.stream_spec.target)?;
         let intermediate_rate = topology.intermediate_rate;
@@ -500,7 +499,6 @@ impl OfflinePipeline {
         const TILE_BASEBAND_FRAMES: usize = 512;
         let decimator = if topology.decimation_stages > 0 {
             Some(ChannelDecimatorPool::new(
-                preset,
                 topology.decimation_stages,
                 2,
                 TILE_BASEBAND_FRAMES * topology.decimation_divider() * 4,
@@ -522,7 +520,6 @@ impl OfflinePipeline {
 
         let processor = TileProcessor::new(
             2,
-            preset,
             plan.dsp_config.phase,
             plan.dsp_config.apodization,
             topology,

@@ -1,7 +1,7 @@
 //! Worker count is decoupled from channel count: channels map round-robin onto workers
 //! (`channel % workers`) and the output is identical to one worker per channel.
 
-use audigma_dsp::config::{Apodization, DitherType, FilterPhase, FilterPreset, OverloadPolicy};
+use audigma_dsp::config::{Apodization, DitherType, FilterPhase, OverloadPolicy};
 use audigma_dsp::rates::DsdBitRateHz;
 use audigma_engine::timing::{MaxSlot, TimingTracker};
 use audigma_engine::worker::{ChannelWorkerPool, TargetDsdConfig};
@@ -25,7 +25,6 @@ fn dsd_cfg() -> TargetDsdConfig {
 fn build(workers: Option<usize>, dsd: bool, hook: Option<ThreadInitHook>) -> ChannelWorkerPool {
     ChannelWorkerPool::new(
         CHANNELS,
-        FilterPreset::Balanced,
         FilterPhase::Linear,
         Apodization::Off,
         6,
@@ -109,7 +108,6 @@ fn reconfigure_with_fewer_workers_matches_fresh_pool_and_keeps_threads() {
     let mut pool = build(Some(2), true, Some(hook));
     run(&mut pool, true, 4);
     pool.reconfigure(
-        FilterPreset::Reference,
         FilterPhase::Linear,
         Apodization::Off,
         7,
@@ -121,7 +119,6 @@ fn reconfigure_with_fewer_workers_matches_fresh_pool_and_keeps_threads() {
     let got = run(&mut pool, true, 5);
     let mut fresh = ChannelWorkerPool::new(
         CHANNELS,
-        FilterPreset::Reference,
         FilterPhase::Linear,
         Apodization::Off,
         7,
@@ -173,7 +170,6 @@ fn inline_mode_matches_threaded_pool_and_reconfigures() {
     let mut pool = build(Some(0), true, None);
     run(&mut pool, true, 3);
     pool.reconfigure(
-        FilterPreset::Reference,
         FilterPhase::Linear,
         Apodization::Off,
         7,
@@ -185,7 +181,6 @@ fn inline_mode_matches_threaded_pool_and_reconfigures() {
     let after = run(&mut pool, true, 3);
     let mut fresh = ChannelWorkerPool::new(
         CHANNELS,
-        FilterPreset::Reference,
         FilterPhase::Linear,
         Apodization::Off,
         7,

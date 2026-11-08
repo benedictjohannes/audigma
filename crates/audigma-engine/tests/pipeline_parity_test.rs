@@ -1,7 +1,9 @@
 //! Parity test suite ensuring `OfflinePipeline` and `LivePipeline` share identical rate planning,
 //! stage resolution, gain staging, carrier format derivation, and passthrough eligibility.
 
-use audigma_dsp::config::{Apodization, FilterPhase, OverloadPolicy, TargetRateSpec};
+use audigma_dsp::config::{
+    Apodization, DspConfiguration, FilterPhase, OverloadPolicy, TargetRateSpec,
+};
 use audigma_dsp::rates::{DsdBitRateHz, PcmRateHz};
 use audigma_engine::pipeline_topology::is_dsd_passthrough_eligible;
 use audigma_engine::{IdleCarrierFormat, LivePipeline, OfflinePipeline};
@@ -24,7 +26,7 @@ preamp_db = -3.0
 overload_policy = "mute-recover"
 
 [resampler]
-preset = "balanced"
+phase = "linear"
 
 [output]
 backend = "alsa"
@@ -211,7 +213,7 @@ fn test_parity_dsd_passthrough_shared_rules() {
     let target = TargetRateSpec::Dsd { bit_rate };
 
     let dsd_info = AudioStreamInfo::new_dsd(bit_rate, 2, None);
-    let mut dsp_cfg = audigma_dsp::presets::PRESET_BALANCED.to_default_dsp_config(
+    let mut dsp_cfg = DspConfiguration::new(
         FilterPhase::Linear,
         Apodization::Off,
         0.0,

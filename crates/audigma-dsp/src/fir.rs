@@ -9,12 +9,11 @@
 //!   (44.1k <-> 48k at any tier, anti-aliased when downsampling) and ASRC drift tracking (256 phases,
 //!   cubic interpolation between them). Banks are built from a closed-form prototype at construction.
 
-use crate::config::{Apodization, FilterPhase, FilterPreset};
+use crate::config::{Apodization, FilterPhase};
 use crate::rates::PcmRateHz;
 use crate::tables::{
     HalfBandTaps, SRC_ASRC_PHASES, SRC_CUTOFF, SRC_KAISER_BETA, SRC_TAPS_UNITY,
-    get_halfband_stage0_filter, get_halfband_stage0_taps, get_halfband_stage1_filter,
-    get_halfband_stage1_taps,
+    get_halfband_odd_taps, get_interpolation_stage_filter,
 };
 use thiserror::Error;
 
@@ -88,8 +87,10 @@ impl HalfBandStage {
         // The high-rate stages use these short kernels. Dispatch once per tile so
         // LLVM can unroll their tap loops without changing accumulation order.
         match self.num_odd_taps {
-            6 => self.process_tile_kernel::<6>(input, output),
-            7 => self.process_tile_kernel::<7>(input, output),
+            2 => self.process_tile_kernel::<2>(input, output),
+            3 => self.process_tile_kernel::<3>(input, output),
+            4 => self.process_tile_kernel::<4>(input, output),
+            5 => self.process_tile_kernel::<5>(input, output),
             8 => self.process_tile_kernel::<8>(input, output),
             _ => self.process_tile_kernel::<0>(input, output),
         }
@@ -309,7 +310,8 @@ impl CascadeStage {
 ///
 /// Intermediate buffer sizes are bounded by the configured input tile size and
 /// rate multiplier; cache residency depends on those sizes and the host CPU.
-/// Stage 0 uses steep transition taps, while Stage 1+ use relaxed transition taps (`Design.md §4.2`).
+/// Every stage has its own half-band design (pass 20 kHz, stop at the mirror of the stage's
+/// output rate); apodization replaces stage 0 only (`Design.md §4.2`).
 #[derive(Debug, Clone)]
 pub struct HalfBandCascade {
     stages: Vec<CascadeStage>,
@@ -322,32 +324,21 @@ pub struct HalfBandCascade {
 impl HalfBandCascade {
     /// Creates a new power-of-two interpolation cascade.
     ///
-    /// - `preset`: Filter preset determining Stage 0 and Stage 1+ coefficients.
     /// - `phase`: Linear- or minimum-phase coefficient family.
-    /// - `apodization`: Off (brick-wall) or gentle Stage 0 roll-off.
+    /// - `apodization`: Off (brick-wall half-band) or an apodizing stage-0 pass edge.
     /// - `stages`: Number of 2x stages (e.g. 8 stages for 256x upsampling to DSD256, 9 stages for 512x to DSD512).
     /// - `max_input_frames`: Maximum baseband frames processed in a single tile (e.g. 32 to 1024).
     pub fn new(
-        preset: FilterPreset,
         phase: FilterPhase,
         apodization: Apodization,
         stages: usize,
         max_input_frames: usize,
     ) -> Self {
-        let mut stage_vec = Vec::with_capacity(stages);
-        if stages > 0 {
-            // Stage 0: steep transition, selected by phase and apodization.
-            stage_vec.push(CascadeStage::from_taps(get_halfband_stage0_filter(
-                preset,
-                phase,
-                apodization,
-            )));
-            // Stage 1+: relaxed transition. Apodization only affects Stage 0.
-            let s1_taps = get_halfband_stage1_filter(preset, phase);
-            for _ in 1..stages {
-                stage_vec.push(CascadeStage::from_taps(s1_taps));
-            }
-        }
+        let stage_vec = (0..stages)
+            .map(|stage| {
+                CascadeStage::from_taps(get_interpolation_stage_filter(stage, phase, apodization))
+            })
+            .collect();
 
         // The final stage writes directly to the caller's output. Size each
         // ping-pong buffer only for the largest intermediate it actually holds.
@@ -597,8 +588,9 @@ impl HalfBandDecimationStage {
 
 /// Multistage power-of-two ($2^M$) decimation cascade using bounded tile streaming (`Design.md §1.6`, `§4.2`).
 ///
-/// Early stages use relaxed transition taps (`Stage 1+`), while the final stage into baseband
-/// uses steep transition taps (`Stage 0`), protecting the audio baseband from ultrasonic noise aliasing.
+/// The interpolation designs run in reverse: the last stage (into the output rate) uses the stage-0
+/// half-band, the one before it stage 1, and so on, so each stage rejects exactly what would alias
+/// into the output passband. Decimation is always linear phase.
 #[derive(Debug, Clone)]
 pub struct HalfBandDecimationCascade {
     stages: Vec<HalfBandDecimationStage>,
@@ -612,27 +604,12 @@ pub struct HalfBandDecimationCascade {
 impl HalfBandDecimationCascade {
     /// Creates a new multistage decimation cascade.
     ///
-    /// - `preset`: Filter preset determining Stage 0 and Stage 1+ coefficients.
     /// - `stages`: Number of 2x decimation stages (e.g. 5 stages for 32x decimation from DSD256 to 352.8k DXD).
     /// - `max_input_frames`: Maximum high-rate samples or unpacked DSD bits processed in a single tile.
-    pub fn new(preset: FilterPreset, stages: usize, max_input_frames: usize) -> Self {
-        let mut stage_vec = Vec::with_capacity(stages);
-        if stages == 1 {
-            // Single stage: steep transition
-            stage_vec.push(HalfBandDecimationStage::new(get_halfband_stage0_taps(
-                preset,
-            )));
-        } else if stages > 1 {
-            // Early stages (0..stages-1): relaxed transition
-            let s1_taps = get_halfband_stage1_taps(preset);
-            for _ in 0..(stages - 1) {
-                stage_vec.push(HalfBandDecimationStage::new(s1_taps));
-            }
-            // Final stage: steep transition into baseband
-            stage_vec.push(HalfBandDecimationStage::new(get_halfband_stage0_taps(
-                preset,
-            )));
-        }
+    pub fn new(stages: usize, max_input_frames: usize) -> Self {
+        let stage_vec = (0..stages)
+            .map(|i| HalfBandDecimationStage::new(get_halfband_odd_taps(stages - 1 - i)))
+            .collect();
 
         Self {
             stages: stage_vec,
@@ -1277,19 +1254,15 @@ mod tests {
 
     #[test]
     fn test_short_halfband_kernels_bit_exact() {
-        for preset in [
-            FilterPreset::LowLatency,
-            FilterPreset::Balanced,
-            FilterPreset::Reference,
-        ] {
-            let taps = get_halfband_stage1_taps(preset);
+        for stage in 1..crate::tables::HALFBAND_MAX_STAGES {
+            let taps = get_halfband_odd_taps(stage);
             let mut specialized = HalfBandStage::new(taps);
             let mut generic = specialized.clone();
             let input: Vec<f64> = (0..257)
                 .map(|i| ((i * 7919 % 65521) as f64 / 65521.0 - 0.5) * 0.9)
                 .collect();
             // Irregular tile boundaries exercise history wraparound as well as
-            // all three fixed tap counts, including empty and oversized output.
+            // every specialised tap count, including empty and oversized output.
             for tile in std::iter::once(&input[..0]).chain(input.chunks(13)) {
                 let mut actual = vec![-1.0; tile.len() * 2 + 3];
                 let mut expected = actual.clone();
@@ -1298,7 +1271,7 @@ mod tests {
                     .process_tile_kernel::<0>(tile, &mut expected)
                     .unwrap();
                 for (a, b) in actual.iter().zip(&expected) {
-                    assert_eq!(a.to_bits(), b.to_bits(), "preset {preset:?}");
+                    assert_eq!(a.to_bits(), b.to_bits(), "stage {stage}");
                 }
             }
             assert_eq!(specialized.head, generic.head);
@@ -1314,13 +1287,7 @@ mod tests {
     fn test_cascade_scratch_sizes_and_tile_boundaries() {
         let input: Vec<f64> = (0..37).map(|i| (i as f64 * 0.17).sin() * 0.4).collect();
         for stages in 0..=9 {
-            let mut tiled = HalfBandCascade::new(
-                FilterPreset::Balanced,
-                FilterPhase::Linear,
-                Apodization::Off,
-                stages,
-                13,
-            );
+            let mut tiled = HalfBandCascade::new(FilterPhase::Linear, Apodization::Off, stages, 13);
             let expected_a = (0..stages.saturating_sub(1))
                 .filter(|i| i % 2 == 0)
                 .map(|i| 13 * (1 << (i + 1)))
@@ -1334,13 +1301,8 @@ mod tests {
             assert_eq!(tiled.scratch_a.len(), expected_a);
             assert_eq!(tiled.scratch_b.len(), expected_b);
 
-            let mut whole = HalfBandCascade::new(
-                FilterPreset::Balanced,
-                FilterPhase::Linear,
-                Apodization::Off,
-                stages,
-                input.len(),
-            );
+            let mut whole =
+                HalfBandCascade::new(FilterPhase::Linear, Apodization::Off, stages, input.len());
             let multiplier = tiled.rate_multiplier();
             let mut actual = vec![0.0; input.len() * multiplier];
             let mut expected = actual.clone();
@@ -1360,17 +1322,17 @@ mod tests {
 
     #[test]
     fn test_halfband_stage_dc_gain_and_ramp() {
-        let taps = get_halfband_stage0_taps(FilterPreset::Balanced);
+        let taps = get_halfband_odd_taps(0);
         let mut stage = HalfBandStage::new(taps);
 
         // Constant DC input: DC gain must be exactly 1.0
-        // Stage 0 balanced has 44 odd taps (2K = 88 input samples memory = 176 output samples)
+        // Stage 0 has 50 odd taps (2K = 100 input samples memory = 200 output samples)
         let dc_in = [1.0; 256];
         let mut dc_out = [0.0; 512];
         stage.process_tile(&dc_in, &mut dc_out).unwrap();
 
-        // After filter delay clears (> 176 output samples), all samples should equal 1.0
-        let tail = &dc_out[200..500];
+        // After filter delay clears (> 200 output samples), all samples should equal 1.0
+        let tail = &dc_out[256..500];
         for &s in tail {
             assert!(
                 (s - 1.0).abs() < 1e-6,
@@ -1381,13 +1343,7 @@ mod tests {
 
     #[test]
     fn test_halfband_cascade_256x_dsd256() {
-        let mut cascade = HalfBandCascade::new(
-            FilterPreset::Balanced,
-            FilterPhase::Linear,
-            Apodization::Off,
-            8,
-            32,
-        );
+        let mut cascade = HalfBandCascade::new(FilterPhase::Linear, Apodization::Off, 8, 32);
         assert_eq!(cascade.rate_multiplier(), 256);
         assert_eq!(cascade.num_stages(), 8);
 
@@ -1400,13 +1356,7 @@ mod tests {
 
     #[test]
     fn test_halfband_cascade_512x_dsd512() {
-        let mut cascade = HalfBandCascade::new(
-            FilterPreset::Balanced,
-            FilterPhase::Linear,
-            Apodization::Off,
-            9,
-            32,
-        );
+        let mut cascade = HalfBandCascade::new(FilterPhase::Linear, Apodization::Off, 9, 32);
         assert_eq!(cascade.rate_multiplier(), 512);
         assert_eq!(cascade.num_stages(), 9);
 
@@ -1419,13 +1369,13 @@ mod tests {
 
     #[test]
     fn test_polyphase_stage_matches_zero_stuffed_convolution() {
-        let taps = match get_halfband_stage0_filter(
-            FilterPreset::Balanced,
+        let taps = match get_interpolation_stage_filter(
+            0,
             FilterPhase::Linear,
-            Apodization::Gentle,
+            Apodization::PassEdge19000,
         ) {
             HalfBandTaps::General(taps) => taps,
-            HalfBandTaps::Symmetric(_) => panic!("gentle apodization must use general taps"),
+            HalfBandTaps::Symmetric(_) => panic!("apodization must use general taps"),
         };
         let mut stage = PolyphaseInterpolationStage::new(taps);
 
@@ -1455,29 +1405,19 @@ mod tests {
 
     #[test]
     fn test_phase_apodization_modes_dc_unity() {
-        let modes = [
-            (FilterPhase::Linear, Apodization::Off),
-            (FilterPhase::Linear, Apodization::Gentle),
-            (FilterPhase::Minimum, Apodization::Off),
-            (FilterPhase::Minimum, Apodization::Gentle),
-        ];
-
-        for preset in [
-            FilterPreset::Balanced,
-            FilterPreset::Reference,
-            FilterPreset::LowLatency,
-        ] {
-            for (phase, apodization) in modes {
-                let mut cascade = HalfBandCascade::new(preset, phase, apodization, 3, 256);
-                let input = [1.0f64; 256];
-                let mut output = [0.0f64; 2048];
+        for phase in [FilterPhase::Linear, FilterPhase::Minimum] {
+            for apodization in Apodization::ALL {
+                let mut cascade = HalfBandCascade::new(phase, apodization, 3, 512);
+                let input = [1.0f64; 512];
+                let mut output = [0.0f64; 4096];
                 cascade.process_tile(&input, &mut output).unwrap();
 
-                for (idx, &sample) in output[900..].iter().enumerate() {
+                // The longest stage 0 (409 taps at 2x) has settled after ~205 input frames.
+                for (idx, &sample) in output[2000..].iter().enumerate() {
                     assert!(
                         (sample - 1.0).abs() < 1e-6,
-                        "{preset:?}/{phase:?}/{apodization:?}: sample {} = {sample}",
-                        idx + 900
+                        "{phase:?}/{apodization:?}: sample {} = {sample}",
+                        idx + 2000
                     );
                 }
             }
@@ -1486,55 +1426,42 @@ mod tests {
 
     #[test]
     fn test_minimum_phase_is_causal_and_front_loaded() {
-        for preset in [
-            FilterPreset::Balanced,
-            FilterPreset::Reference,
-            FilterPreset::LowLatency,
-        ] {
-            for apodization in [Apodization::Off, Apodization::Gentle] {
-                let mut cascade =
-                    HalfBandCascade::new(preset, FilterPhase::Minimum, apodization, 1, 512);
-                let mut input = [0.0f64; 512];
-                let mut output = [0.0f64; 1024];
-                input[128] = 1.0;
-                cascade.process_tile(&input, &mut output).unwrap();
+        for apodization in Apodization::ALL {
+            let mut cascade = HalfBandCascade::new(FilterPhase::Minimum, apodization, 1, 512);
+            let mut input = [0.0f64; 512];
+            let mut output = [0.0f64; 1024];
+            input[128] = 1.0;
+            cascade.process_tile(&input, &mut output).unwrap();
 
-                // Strict causality: no output before the input impulse arrives.
-                for (idx, &sample) in output[..256].iter().enumerate() {
-                    assert_eq!(
-                        sample, 0.0,
-                        "{preset:?}/{apodization:?}: pre-impulse sample {idx} is non-zero"
-                    );
-                }
-
-                let peak_idx = (256..output.len())
-                    .max_by(|&a, &b| output[a].abs().total_cmp(&output[b].abs()))
-                    .unwrap();
-                assert!(
-                    peak_idx - 256 < 16,
-                    "{preset:?}/{apodization:?}: minimum-phase impulse peak at offset {}",
-                    peak_idx - 256
-                );
-
-                let pre_energy: f64 = output[256..peak_idx].iter().map(|s| s.abs()).sum();
-                let post_energy: f64 = output[peak_idx + 1..].iter().map(|s| s.abs()).sum();
-                assert!(
-                    pre_energy < 0.5 * post_energy,
-                    "{preset:?}/{apodization:?}: energy is not front-loaded (pre={pre_energy}, post={post_energy})"
+            // Strict causality: no output before the input impulse arrives.
+            for (idx, &sample) in output[..256].iter().enumerate() {
+                assert_eq!(
+                    sample, 0.0,
+                    "{apodization:?}: pre-impulse sample {idx} is non-zero"
                 );
             }
+
+            let peak_idx = (256..output.len())
+                .max_by(|&a, &b| output[a].abs().total_cmp(&output[b].abs()))
+                .unwrap();
+            assert!(
+                peak_idx - 256 < 16,
+                "{apodization:?}: minimum-phase impulse peak at offset {}",
+                peak_idx - 256
+            );
+
+            let pre_energy: f64 = output[256..peak_idx].iter().map(|s| s.abs()).sum();
+            let post_energy: f64 = output[peak_idx + 1..].iter().map(|s| s.abs()).sum();
+            assert!(
+                pre_energy < 0.5 * post_energy,
+                "{apodization:?}: energy is not front-loaded (pre={pre_energy}, post={post_energy})"
+            );
         }
     }
 
     #[test]
     fn test_linear_phase_remains_symmetric() {
-        let mut cascade = HalfBandCascade::new(
-            FilterPreset::Balanced,
-            FilterPhase::Linear,
-            Apodization::Off,
-            1,
-            512,
-        );
+        let mut cascade = HalfBandCascade::new(FilterPhase::Linear, Apodization::Off, 1, 512);
         let mut input = [0.0f64; 512];
         let mut output = [0.0f64; 1024];
         input[128] = 1.0;
@@ -1554,91 +1481,72 @@ mod tests {
         }
     }
 
-    fn normalized_tail_energy(taps: &[f64], offset: usize) -> f64 {
-        let peak_idx = taps
+    /// Gain in dB of stage-0 taps (at 2x the source rate) at `freq` as a fraction of that 2x rate.
+    fn stage0_gain_db(taps: HalfBandTaps, freq: f64) -> f64 {
+        let full: Vec<f64> = match taps {
+            HalfBandTaps::General(taps) => taps.to_vec(),
+            HalfBandTaps::Symmetric(odd) => {
+                let center = 2 * odd.len() - 1;
+                let mut full = vec![0.0; 2 * center + 1];
+                full[center] = 0.5;
+                for (idx, &tap) in odd.iter().enumerate() {
+                    full[center - (2 * idx + 1)] = tap;
+                    full[center + (2 * idx + 1)] = tap;
+                }
+                full
+            }
+        };
+        let (re, im) = full
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.abs().total_cmp(&b.abs()))
-            .map(|(idx, _)| idx)
-            .unwrap();
-        let peak = taps[peak_idx].abs();
-        taps[peak_idx + offset..]
-            .iter()
-            .map(|tap| tap.abs())
-            .fold(0.0f64, f64::max)
-            / peak
+            .fold((0.0, 0.0), |(re, im), (n, &h)| {
+                let w = 2.0 * std::f64::consts::PI * freq * n as f64;
+                (re + h * w.cos(), im - h * w.sin())
+            });
+        20.0 * (re * re + im * im).sqrt().log10()
     }
 
     #[test]
-    fn test_gentle_apodization_suppresses_far_tail() {
-        for preset in [
-            FilterPreset::Balanced,
-            FilterPreset::Reference,
-            FilterPreset::LowLatency,
-        ] {
-            for phase in [FilterPhase::Linear, FilterPhase::Minimum] {
-                let off = match get_halfband_stage0_filter(preset, phase, Apodization::Off) {
-                    HalfBandTaps::General(taps) => taps,
-                    HalfBandTaps::Symmetric(taps) => taps,
-                };
-                let gentle = match get_halfband_stage0_filter(preset, phase, Apodization::Gentle) {
-                    HalfBandTaps::General(taps) => taps,
-                    HalfBandTaps::Symmetric(_) => panic!("gentle must use general taps"),
-                };
-
-                // Compare the effective full impulse responses. For the symmetric
-                // half-band prototype the odd taps are symmetric around the centre.
-                let off_tail = if matches!(
-                    get_halfband_stage0_filter(preset, phase, Apodization::Off),
-                    HalfBandTaps::Symmetric(_)
-                ) {
-                    let center = (off.len() * 2) - 1;
-                    let mut full = vec![0.0; center + 2 * off.len()];
-                    full[center] = 1.0;
-                    for (idx, &tap) in off.iter().enumerate() {
-                        let delta = 2 * idx + 1;
-                        full[center - delta] = 2.0 * tap;
-                        full[center + delta] = 2.0 * tap;
-                    }
-                    normalized_tail_energy(&full, 64)
-                } else {
-                    normalized_tail_energy(off, 64)
-                };
-                let gentle_tail = normalized_tail_energy(gentle, 64);
-
+    fn test_apodization_moves_the_stopband_to_source_nyquist() {
+        // Fractions of the 2x rate (88.2 kHz): source Nyquist 22.05 kHz, and 17 kHz in the passband.
+        let nyquist = 0.25;
+        let pass = 17_000.0 / 88_200.0;
+        for phase in [FilterPhase::Linear, FilterPhase::Minimum] {
+            // The brick-wall half-band is -6 dB at fs/4, by construction.
+            let off = stage0_gain_db(
+                get_interpolation_stage_filter(0, phase, Apodization::Off),
+                nyquist,
+            );
+            assert!(
+                (off + 6.02).abs() < 0.01,
+                "{phase:?}: off at Nyquist {off} dB"
+            );
+            for apodization in &Apodization::ALL[1..] {
+                let taps = get_interpolation_stage_filter(0, phase, *apodization);
+                let at_nyquist = stage0_gain_db(taps, nyquist);
                 assert!(
-                    gentle_tail <= off_tail,
-                    "{preset:?}/{phase:?}: gentle tail {gentle_tail} exceeds off tail {off_tail}"
+                    at_nyquist < -crate::defaults::FILTER_REJECTION_TARGET_DB,
+                    "{phase:?}/{apodization:?}: {at_nyquist} dB at the source Nyquist"
                 );
-                if phase == FilterPhase::Linear {
-                    assert!(
-                        gentle_tail < 0.5 * off_tail,
-                        "{preset:?}/{phase:?}: gentle tail {gentle_tail} not sufficiently below off tail {off_tail}"
-                    );
-                }
+                let in_band = stage0_gain_db(taps, pass);
+                assert!(
+                    in_band.abs() < 1e-5,
+                    "{phase:?}/{apodization:?}: {in_band} dB at 17 kHz"
+                );
             }
         }
     }
 
     #[test]
     fn test_minimum_phase_group_delay_is_lower() {
-        for preset in [
-            FilterPreset::Balanced,
-            FilterPreset::Reference,
-            FilterPreset::LowLatency,
-        ] {
-            let linear =
-                HalfBandCascade::new(preset, FilterPhase::Linear, Apodization::Off, 1, 128);
-            let minimum =
-                HalfBandCascade::new(preset, FilterPhase::Minimum, Apodization::Off, 1, 128);
-            assert!(
-                minimum.total_group_delay_output_samples()
-                    < linear.total_group_delay_output_samples(),
-                "{preset:?}: minimum-phase delay {} is not below linear delay {}",
-                minimum.total_group_delay_output_samples(),
-                linear.total_group_delay_output_samples()
-            );
-        }
+        let linear = HalfBandCascade::new(FilterPhase::Linear, Apodization::Off, 1, 128);
+        let minimum = HalfBandCascade::new(FilterPhase::Minimum, Apodization::Off, 1, 128);
+        assert!(
+            minimum.total_group_delay_output_samples() < linear.total_group_delay_output_samples(),
+            "minimum-phase delay {} is not below linear delay {}",
+            minimum.total_group_delay_output_samples(),
+            linear.total_group_delay_output_samples()
+        );
     }
 
     #[test]
@@ -1745,7 +1653,7 @@ mod tests {
 
     #[test]
     fn test_halfband_decimation_stage_dc_gain() {
-        let taps = get_halfband_stage0_taps(FilterPreset::Balanced);
+        let taps = get_halfband_odd_taps(0);
         let mut stage = HalfBandDecimationStage::new(taps);
 
         // Constant DC input: DC gain must be exactly 1.0
@@ -1767,7 +1675,7 @@ mod tests {
     #[test]
     fn test_halfband_decimation_cascade_dsd_bytes() {
         // 5 stages = 32x decimation (e.g. DSD256 at 11.2896 MHz -> 352.8 kHz DXD)
-        let mut cascade = HalfBandDecimationCascade::new(FilterPreset::Balanced, 5, 8192);
+        let mut cascade = HalfBandDecimationCascade::new(5, 8192);
         assert_eq!(cascade.rate_divider(), 32);
         assert_eq!(cascade.num_stages(), 5);
 
@@ -1776,14 +1684,14 @@ mod tests {
         assert!(delay_inputs > 1000);
 
         // Feed full positive DC (0xFF bytes -> +1.0 floats)
-        // 512 bytes * 8 = 4096 DSD bits -> 4096 / 32 = 128 PCM frames
-        let dc_bytes = [0xFF; 512];
-        let mut pcm_out = [0.0; 128];
+        // 1024 bytes * 8 = 8192 DSD bits -> 8192 / 32 = 256 PCM frames
+        let dc_bytes = [0xFF; 1024];
+        let mut pcm_out = [0.0; 256];
         let written = cascade.process_dsd_bytes(&dc_bytes, &mut pcm_out).unwrap();
-        assert_eq!(written, 128);
+        assert_eq!(written, 256);
 
-        // After filter delay clears (> 60 decimated samples), output should equal 1.0
-        let tail = &pcm_out[80..128];
+        // The final 199-tap stage fills after ~100 output samples; then the output equals 1.0
+        let tail = &pcm_out[120..256];
         for &s in tail {
             assert!(
                 (s - 1.0).abs() < 1e-4,
@@ -1792,15 +1700,14 @@ mod tests {
         }
 
         // Test with +6.02 dB (2.0x linear) Scarlet Book normalization gain
-        let mut cascade_gain =
-            HalfBandDecimationCascade::new(FilterPreset::Balanced, 5, 8192).with_linear_gain(2.0);
+        let mut cascade_gain = HalfBandDecimationCascade::new(5, 8192).with_linear_gain(2.0);
         assert_eq!(cascade_gain.linear_gain(), 2.0);
-        let mut pcm_gain_out = [0.0; 128];
+        let mut pcm_gain_out = [0.0; 256];
         let written_gain = cascade_gain
             .process_dsd_bytes(&dc_bytes, &mut pcm_gain_out)
             .unwrap();
-        assert_eq!(written_gain, 128);
-        for &s in &pcm_gain_out[80..128] {
+        assert_eq!(written_gain, 256);
+        for &s in &pcm_gain_out[120..256] {
             assert!(
                 (s - 2.0).abs() < 1e-4,
                 "Decimated DSD DC sample with 2.0x gain {s} deviates from 2.0"

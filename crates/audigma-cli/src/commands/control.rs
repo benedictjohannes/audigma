@@ -44,9 +44,6 @@ pub enum SetCommands {
         #[arg(allow_hyphen_values = true)]
         value: String,
     },
-
-    /// Switch active DSP preset (balanced, reference, low-latency)
-    Preset { name: String },
 }
 
 /// Picks the instance a control command targets.
@@ -82,7 +79,7 @@ fn print_telemetry(telem: &audigma_engine::DaemonTelemetry) {
         "  Output Target:       {} @ {} Hz",
         telem.output_format, telem.output_rate_hz
     );
-    println!("  Active Preset:       {}", telem.preset);
+    println!("  Filter:              {}", telem.filter);
     let vol_pct = telem.volume_percent;
     let mute_str = if telem.is_muted { " [MUTED]" } else { "" };
     println!(
@@ -242,7 +239,6 @@ pub fn run_set(args: SetArgs) -> Result<(), CliError> {
                 },
             }
         }
-        SetCommands::Preset { name } => IpcRequest::SetPreset { preset: name },
     };
 
     match ControlClient::send(&target, req) {

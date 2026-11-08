@@ -44,16 +44,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Diff R: {diff_r} mismatches / 4096");
 
     // 3. Test decimation of dsf_l vs pw_l
-    let mut decimator1 = audigma_dsp::fir::HalfBandDecimationCascade::new(
-        audigma_dsp::FilterPreset::Balanced,
-        4,
-        65536,
-    );
-    let mut decimator2 = audigma_dsp::fir::HalfBandDecimationCascade::new(
-        audigma_dsp::FilterPreset::Balanced,
-        4,
-        65536,
-    );
+    let mut decimator1 = audigma_dsp::fir::HalfBandDecimationCascade::new(4, 65536);
+    let mut decimator2 = audigma_dsp::fir::HalfBandDecimationCascade::new(4, 65536);
 
     let mut out1 = vec![0.0; 2048];
     let mut out2 = vec![0.0; 2048];

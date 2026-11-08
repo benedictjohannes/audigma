@@ -1,10 +1,9 @@
 //! `audigma-settings`: Schema v1 TOML configuration (`Settings`),
-//! preset resolution, and architectural invariant validation (`Design.md §6`).
+//! pipeline resolution, and architectural invariant validation (`Design.md §6`).
 
 use audigma_dsp::{
-    Apodization, DitherType, DsdMultiplier, DspConfiguration, FilterPhase, FilterPreset,
-    OverloadPolicy, PcmRateHz, PresetDefinition, RateFamily, SampleFormat, StreamSpec,
-    TargetFormat, TargetRateSpec, presets,
+    Apodization, DitherType, DsdMultiplier, DspConfiguration, FilterPhase, OverloadPolicy,
+    PcmRateHz, RateFamily, SampleFormat, StreamSpec, TargetFormat, TargetRateSpec,
 };
 use audigma_format::DsfPadMode;
 use serde::{Deserialize, Serialize};
@@ -13,7 +12,7 @@ use thiserror::Error;
 /// Supported schema version (`schema_version = 1`).
 pub const SCHEMA_VERSION_V1: u32 = 1;
 
-/// Errors returned during TOML parsing, preset resolution, or cross-field validation.
+/// Errors returned during TOML parsing, pipeline resolution, or cross-field validation.
 #[derive(Debug, Error)]
 pub enum SettingsError {
     #[error("TOML parse error: {0}")]
@@ -200,7 +199,6 @@ pub fn is_valid_channel_position(token: &str) -> bool {
 #[serde(deny_unknown_fields)]
 pub struct DsdInputConfig {
     pub max_intermediate_rate_hz: Option<PcmRateHz>,
-    pub decimation_preset: Option<FilterPreset>,
     pub gain_db: Option<f64>,
 }
 
@@ -299,17 +297,6 @@ impl InputConfig {
     /// Returns whether DSD format ingestion is allowed (defaults to false).
     pub fn allow_dsd(&self) -> bool {
         self.allow_dsd.unwrap_or(false)
-    }
-
-    /// Returns the resolved DSD decimation filter preset.
-    ///
-    /// If `[input.dsd].decimation_preset` is set, it takes precedence.
-    /// Otherwise, falls back to `fallback_preset` (typically from `[resampler].preset`).
-    pub fn dsd_decimation_preset(&self, fallback_preset: FilterPreset) -> FilterPreset {
-        self.dsd
-            .as_ref()
-            .and_then(|d| d.decimation_preset)
-            .unwrap_or(fallback_preset)
     }
 
     /// Returns the configured maximum intermediate PCM rate for DSD decimation, if set.
@@ -418,8 +405,6 @@ impl Default for GainConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResamplerConfig {
-    #[serde(default)]
-    pub preset: FilterPreset,
     #[serde(default = "default_filter_phase")]
     pub phase: FilterPhase,
     #[serde(default = "default_apodization")]
@@ -443,7 +428,6 @@ const fn default_modulator_order() -> u8 {
 impl Default for ResamplerConfig {
     fn default() -> Self {
         Self {
-            preset: FilterPreset::Balanced,
             phase: FilterPhase::Linear,
             apodization: Apodization::Off,
             modulator_order: 5,
@@ -702,7 +686,6 @@ pub struct Settings {
 /// Concrete resolution produced by `Settings::explain_for_input_rate` (`audigma config explain`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedPipelinePlan {
-    pub preset_def: &'static PresetDefinition,
     pub stream_spec: StreamSpec,
     pub dsp_config: DspConfiguration,
 }
@@ -762,7 +745,6 @@ impl Settings {
                     overload_policy: OverloadPolicy::Error,
                 }),
                 resampler: Some(ResamplerConfig {
-                    preset: FilterPreset::Reference,
                     phase: FilterPhase::Linear,
                     apodization: Apodization::Off,
                     modulator_order: 5,
@@ -820,7 +802,6 @@ impl Settings {
                     overload_policy: OverloadPolicy::Error,
                 }),
                 resampler: Some(ResamplerConfig {
-                    preset: FilterPreset::Reference,
                     phase: FilterPhase::Linear,
                     apodization: Apodization::Off,
                     modulator_order: 5,
@@ -878,7 +859,6 @@ impl Settings {
                     overload_policy: OverloadPolicy::Error,
                 }),
                 resampler: Some(ResamplerConfig {
-                    preset: FilterPreset::Reference,
                     phase: FilterPhase::Linear,
                     apodization: Apodization::Off,
                     modulator_order: 5,
@@ -936,7 +916,6 @@ impl Settings {
                     overload_policy: OverloadPolicy::Error,
                 }),
                 resampler: Some(ResamplerConfig {
-                    preset: FilterPreset::Balanced,
                     phase: FilterPhase::Linear,
                     apodization: Apodization::Off,
                     modulator_order: 5,
@@ -1132,24 +1111,6 @@ impl Settings {
         warnings
     }
 
-    /// Returns the resolved DSD decimation filter preset across this configuration.
-    ///
-    /// Resolution order:
-    /// 1. `[input.dsd].decimation_preset` if configured.
-    /// 2. `[resampler].preset` if configured.
-    /// 3. `FilterPreset::Balanced` (default).
-    pub fn resolved_dsd_decimation_preset(&self) -> FilterPreset {
-        let fallback = self
-            .resampler
-            .as_ref()
-            .map(|r| r.preset)
-            .unwrap_or_default();
-        self.input
-            .as_ref()
-            .map(|i| i.dsd_decimation_preset(fallback))
-            .unwrap_or(fallback)
-    }
-
     /// Returns the configured maximum intermediate PCM rate for DSD decimation, if set.
     pub fn resolved_dsd_max_intermediate_rate_hz(&self) -> Option<PcmRateHz> {
         self.input
@@ -1157,7 +1118,7 @@ impl Settings {
             .and_then(|i| i.dsd_max_intermediate_rate_hz())
     }
 
-    /// Resolves the concrete `PresetDefinition`, `StreamSpec`, and `DspConfiguration`
+    /// Resolves the concrete `StreamSpec` and `DspConfiguration`
     /// from `[target]` + `rate_family` (`Design.md §6.1`).
     pub fn explain_for_input_rate(
         &self,
@@ -1172,7 +1133,6 @@ impl Settings {
             .target
             .as_ref()
             .ok_or(SettingsError::UnresolvedTargetRate(input_rate))?;
-        let preset_def = presets::by_preset(resampler.preset);
 
         let target_spec = match target.format {
             TargetFormat::Pcm => {
@@ -1204,7 +1164,7 @@ impl Settings {
             }
         };
 
-        let mut dsp_config = preset_def.to_default_dsp_config(
+        let mut dsp_config = DspConfiguration::new(
             resampler.phase,
             resampler.apodization,
             gain.preamp_db,
@@ -1217,7 +1177,7 @@ impl Settings {
         dsp_config.dither_tpdf_seed = target.dither_tpdf_seed;
         dsp_config.modulator_order = resampler.modulator_order;
         // The input limit and headroom belong to the selected modulator (order and bit rate). PCM output
-        // has no modulator, so only full scale limits it (the preset default: no headroom, L = 0 dBFS).
+        // has no modulator, so only full scale limits it (the default: no headroom, L = 0 dBFS).
         if let TargetRateSpec::Dsd { bit_rate } = target_spec {
             dsp_config.apply_modulator_limits(bit_rate).map_err(|_| {
                 SettingsError::Validation("no modulator for this order and DSD rate")
@@ -1225,7 +1185,6 @@ impl Settings {
         }
 
         Ok(ResolvedPipelinePlan {
-            preset_def,
             stream_spec: StreamSpec {
                 input_rate,
                 channels,
@@ -1422,13 +1381,11 @@ rate_family = "source"
 dsd_rate = "dsd256"
 
 [resampler]
-preset = "reference"
 "#;
         let settings = Settings::from_toml_str(toml).unwrap();
         let plan_44k = settings
             .explain_for_input_rate(PcmRateHz::PCM_44100)
             .unwrap();
-        assert_eq!(plan_44k.preset_def, &presets::PRESET_REFERENCE);
         assert_eq!(
             plan_44k.stream_spec.target,
             TargetRateSpec::Dsd {
@@ -1439,7 +1396,6 @@ preset = "reference"
         let plan_48k = settings
             .explain_for_input_rate(PcmRateHz::PCM_48000)
             .unwrap();
-        assert_eq!(plan_48k.preset_def, &presets::PRESET_REFERENCE);
         assert_eq!(
             plan_48k.stream_spec.target,
             TargetRateSpec::Dsd {
@@ -1480,7 +1436,6 @@ preamp_db = -3.0
 overload_policy = "mute-recover"
 
 [resampler]
-preset = "balanced"
 phase = "linear"
 apodization = "off"
 
@@ -1502,7 +1457,6 @@ mode = "shared-graph"
         let plan = settings
             .explain_for_input_rate(PcmRateHz::PCM_48000)
             .unwrap();
-        assert_eq!(plan.preset_def, &presets::PRESET_BALANCED);
         assert_eq!(
             plan.stream_spec.target,
             TargetRateSpec::Pcm {
@@ -1547,7 +1501,6 @@ preamp_db = 0.0
 overload_policy = "mute-recover"
 
 [resampler]
-preset = "balanced"
 phase = "minimum"
 apodization = "off"
 modulator_order = 5
@@ -1562,7 +1515,6 @@ max_correction_ppm = 500
         let plan = settings
             .explain_for_input_rate(PcmRateHz::PCM_44100)
             .unwrap();
-        assert_eq!(plan.preset_def, &presets::PRESET_BALANCED);
         assert_eq!(plan.dsp_config.phase, FilterPhase::Minimum);
         assert_eq!(plan.dsp_config.modulator_order, 5);
         assert_eq!(
@@ -1590,7 +1542,6 @@ format = "dsd"
 dsd_rate = "dsd256"
 
 [resampler]
-preset = "reference"
 modulator_order = 7
 "#;
         let settings = Settings::from_toml_str(toml).unwrap();
@@ -1611,7 +1562,6 @@ format = "dsd"
 dsd_rate = "dsd256"
 
 [resampler]
-preset = "balanced"
 modulator_order = 6
 "#;
         let err = Settings::from_toml_str(toml).unwrap_err();
@@ -1640,7 +1590,6 @@ peak_analysis = "two-pass"
 overload_policy = "error"
 
 [resampler]
-preset = "reference"
 phase = "linear"
 apodization = "off"
 modulator_order = 5
@@ -1685,7 +1634,6 @@ dsd_rate = "dsd128"
 overload_policy = "error"
 
 [resampler]
-preset = "balanced"
 phase = "linear"
 apodization = "off"
 modulator_order = 5
@@ -1738,7 +1686,6 @@ preamp_db = -3.0
 overload_policy = "error"
 
 [resampler]
-preset = "reference"
 "#;
         let settings = Settings::from_toml_str(flac_toml).unwrap();
         assert_eq!(
@@ -2350,7 +2297,6 @@ backend = "pipewire"
 allow_dsd = true
 [input.dsd]
 max_intermediate_rate_hz = 352800
-decimation_preset = "reference"
 gain_db = 6.0
 [target]
 format = "pcm"
@@ -2361,49 +2307,9 @@ pcm_rate_hz = 96000
         assert!(input.allow_dsd());
         let dsd = input.dsd.as_ref().unwrap();
         assert_eq!(dsd.max_intermediate_rate_hz, Some(PcmRateHz::PCM_352800));
-        assert_eq!(dsd.decimation_preset, Some(FilterPreset::Reference));
-        assert_eq!(
-            settings.resolved_dsd_decimation_preset(),
-            FilterPreset::Reference
-        );
         assert_eq!(dsd.gain_db, Some(6.0));
         assert_eq!(input.dsd_gain_db(), 6.0);
         assert!((input.dsd_linear_gain() - 10.0_f64.powf(6.0 / 20.0)).abs() < 1e-6);
-
-        // Fallback to [resampler].preset when [input.dsd].decimation_preset is omitted
-        let fallback_toml = r#"
-schema_version = 1
-[input]
-backend = "pipewire"
-allow_dsd = true
-[input.dsd]
-gain_db = 6.0
-[resampler]
-preset = "reference"
-[target]
-format = "pcm"
-pcm_rate_hz = 96000
-"#;
-        let s_fallback = Settings::from_toml_str(fallback_toml).unwrap();
-        assert_eq!(
-            s_fallback.resolved_dsd_decimation_preset(),
-            FilterPreset::Reference
-        );
-
-        // Default to FilterPreset::Balanced when neither is set
-        let default_toml = r#"
-schema_version = 1
-[input]
-backend = "pipewire"
-[target]
-format = "pcm"
-pcm_rate_hz = 96000
-"#;
-        let s_default = Settings::from_toml_str(default_toml).unwrap();
-        assert_eq!(
-            s_default.resolved_dsd_decimation_preset(),
-            FilterPreset::Balanced
-        );
 
         // Invalid gain_db rejection
         let invalid_toml = r#"
@@ -2464,11 +2370,46 @@ phase = "minimum"
         .unwrap();
         let gain = settings.gain.unwrap();
         assert_eq!(gain.overload_policy, OverloadPolicy::MuteRecover);
-        assert_eq!(settings.resampler.unwrap().preset, FilterPreset::Balanced);
+        let resampler = settings.resampler.unwrap();
+        assert_eq!(resampler.phase, FilterPhase::Minimum);
+        assert_eq!(resampler.apodization, Apodization::Off);
+        assert_eq!(resampler.modulator_order, 5);
     }
 
     #[test]
-    fn test_preset_headroom_applies_to_dsd_but_not_pcm() {
+    fn test_resampler_apodization_values_and_removed_preset() {
+        let parse = |resampler: &str| {
+            Settings::from_toml_str(&format!(
+                "schema_version = 1\n[target]\nformat = \"dsd\"\ndsd_rate = \"dsd64\"\n[resampler]\n{resampler}\n"
+            ))
+        };
+        let apodization = |value: &str| {
+            parse(&format!("apodization = {value}")).map(|s| s.resampler.unwrap().apodization)
+        };
+        assert_eq!(apodization(r#""off""#).unwrap(), Apodization::Off);
+        assert_eq!(
+            apodization(r#""gentle""#).unwrap(),
+            Apodization::PassEdge19000
+        );
+        assert_eq!(apodization("18000").unwrap(), Apodization::PassEdge18000);
+        assert_eq!(apodization("18500").unwrap(), Apodization::PassEdge18500);
+        assert_eq!(apodization("19000").unwrap(), Apodization::PassEdge19000);
+        assert_eq!(apodization("20000").unwrap(), Apodization::PassEdge20000);
+        for bad in ["17500", "21000", r#""on""#, r#""18000""#] {
+            assert!(apodization(bad).is_err(), "apodization = {bad} must fail");
+        }
+        // The filter presets are gone: the old keys are unknown fields now.
+        assert!(parse(r#"preset = "balanced""#).is_err());
+        assert!(
+            Settings::from_toml_str(
+                "schema_version = 1\n[input]\nbackend = \"pipewire\"\n[input.dsd]\ndecimation_preset = \"reference\"\n[target]\nformat = \"pcm\"\npcm_rate_hz = 96000\n"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_modulator_headroom_applies_to_dsd_but_not_pcm() {
         let mut settings = Settings::default_offline(OutputContainer::Dsf);
         let dsd = settings
             .explain_for_input_rate(PcmRateHz::PCM_44100)

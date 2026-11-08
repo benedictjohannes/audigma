@@ -80,7 +80,8 @@ pub fn run_config(args: ConfigArgs) -> Result<(), CliError> {
                 let json_val = json!({
                     "config_file": path.display().to_string(),
                     "input_rate_hz": input_rate,
-                    "preset": plan.preset_def.name,
+                    "phase": plan.dsp_config.phase,
+                    "apodization": plan.dsp_config.apodization,
                     "target_spec": format!("{:?}", plan.stream_spec.target),
                     "total_configured_gain_db": plan.dsp_config.total_configured_gain_db(),
                     "preamp_db": plan.dsp_config.preamp_db,
@@ -93,7 +94,7 @@ pub fn run_config(args: ConfigArgs) -> Result<(), CliError> {
             } else {
                 println!("Configuration: {}", path.display());
                 println!("Input Rate:    {} Hz", input_rate);
-                println!("Preset:        {}", plan.preset_def.name);
+                println!("Filter:        {}", plan.dsp_config.filter_description());
                 println!("Target:        {:?}", plan.stream_spec.target);
                 println!(
                     "Total Gain:    {:.2} dB (preamp: {:.2} dB, headroom: {:.2} dB)",

@@ -65,8 +65,13 @@ fn test_volume_hardware_mode_routes_to_bridge() {
     let mut mock_in = MockAudioInput::new(info, vec![0.1; frames], vec![0.1; frames], false);
     let mut mock_out = TestOutputSink::default();
 
-    let control =
-        DaemonControlHandle::new(44100, DaemonOutputFormat::Dsd, 11289600, "balanced", 0.0);
+    let control = DaemonControlHandle::new(
+        44100,
+        DaemonOutputFormat::Dsd,
+        11289600,
+        "linear, apodization off",
+        0.0,
+    );
     control.set_volume_mode(DaemonVolumeMode::Hardware);
     let ctrl_thread = control.clone();
 
@@ -112,8 +117,13 @@ fn test_dynamic_volume_from_input_driver_interception() {
     let mock_in = MockAudioInput::new(info, vec![0.1; frames], vec![0.1; frames], false);
     let mut mock_out = TestOutputSink::default();
 
-    let control =
-        DaemonControlHandle::new(44100, DaemonOutputFormat::Dsd, 11289600, "balanced", 0.0);
+    let control = DaemonControlHandle::new(
+        44100,
+        DaemonOutputFormat::Dsd,
+        11289600,
+        "linear, apodization off",
+        0.0,
+    );
     control.set_volume_mode(DaemonVolumeMode::Hardware);
     let ctrl_thread = control.clone();
 
@@ -159,8 +169,13 @@ fn test_software_volume_mode_does_not_call_hardware_bridge() {
     let mut mock_in = MockAudioInput::new(info, vec![0.1; frames], vec![0.1; frames], false);
     let mut mock_out = TestOutputSink::default();
 
-    let control =
-        DaemonControlHandle::new(44100, DaemonOutputFormat::Dsd, 11289600, "balanced", 0.0);
+    let control = DaemonControlHandle::new(
+        44100,
+        DaemonOutputFormat::Dsd,
+        11289600,
+        "linear, apodization off",
+        0.0,
+    );
     control.set_volume_mode(DaemonVolumeMode::Software);
     let ctrl_thread = control.clone();
 
@@ -197,8 +212,13 @@ fn test_none_volume_mode_ignores_volume() {
     let mut mock_in = MockAudioInput::new(info, vec![0.1; frames], vec![0.1; frames], false);
     let mut mock_out = TestOutputSink::default();
 
-    let control =
-        DaemonControlHandle::new(44100, DaemonOutputFormat::Dsd, 11289600, "balanced", 0.0);
+    let control = DaemonControlHandle::new(
+        44100,
+        DaemonOutputFormat::Dsd,
+        11289600,
+        "linear, apodization off",
+        0.0,
+    );
     control.set_volume_mode(DaemonVolumeMode::None);
     let ctrl_thread = control.clone();
 
@@ -235,8 +255,13 @@ fn test_volume_percentage_alsamixer_curve_on_hardware_bridge() {
     let mock_in = MockAudioInput::new(info, vec![0.1; frames], vec![0.1; frames], false);
     let mut mock_out = TestOutputSink::default();
 
-    let control =
-        DaemonControlHandle::new(44100, DaemonOutputFormat::Dsd, 11289600, "balanced", 0.0);
+    let control = DaemonControlHandle::new(
+        44100,
+        DaemonOutputFormat::Dsd,
+        11289600,
+        "linear, apodization off",
+        0.0,
+    );
     control.set_volume_mode(DaemonVolumeMode::Hardware);
     let ctrl_thread = control.clone();
 
@@ -286,8 +311,13 @@ fn test_volume_percentage_alsamixer_curve_on_hardware_bridge() {
 
 #[test]
 fn test_daemon_set_volume_clamps_to_supported_range() {
-    let control =
-        DaemonControlHandle::new(44_100, DaemonOutputFormat::Pcm, 192_000, "balanced", 0.0);
+    let control = DaemonControlHandle::new(
+        44_100,
+        DaemonOutputFormat::Pcm,
+        192_000,
+        "linear, apodization off",
+        0.0,
+    );
 
     control.set_volume(1_000.0);
     assert_eq!(control.get_volume(), audigma_dsp::MAX_VOLUME_DB);

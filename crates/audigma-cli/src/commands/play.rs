@@ -4,7 +4,6 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use audigma_dsp::config::{SampleFormat, TargetRateSpec};
-use audigma_dsp::presets::by_name;
 use audigma_dsp::rates::PcmRateHz;
 use audigma_engine::traits::AudioInput;
 use audigma_engine::{IdleCarrierFormat, LifecycleController, OfflinePipeline, StreamSink};
@@ -28,10 +27,6 @@ pub struct PlayArgs {
     /// Target ALSA hardware device (e.g. "hw:CARD=K17,DEV=0" or "hw:CARD=JA11,DEV=0")
     #[arg(short = 'd', long = "device")]
     pub device: Option<String>,
-
-    /// Resampler & filter preset ("balanced", "reference", "low-latency")
-    #[arg(short = 'p', long = "preset")]
-    pub preset: Option<String>,
 
     /// Optional playback volume in dB (e.g. -3.0) or percentage (e.g. 80%),
     /// using the same syntax as `audigma set volume`
@@ -107,7 +102,7 @@ pub fn run_play(args: PlayArgs) -> Result<(), CliError> {
         );
     }
 
-    // 3. Apply common CLI ergonomics (device, preset). Volume is parsed here but
+    // 3. Apply common CLI ergonomics (device). Volume is parsed here but
     //    applied later as the runtime user-volume component, not as a
     //    `[gain] preamp_db` override: the configured preamp is calibration, while
     //    `-v` is the user-facing playback volume.
@@ -125,15 +120,6 @@ pub fn run_play(args: PlayArgs) -> Result<(), CliError> {
 
     if let Some(ref dev) = args.device {
         apply_toml_override(&mut toml_table, "output.device", dev)?;
-    }
-    if let Some(ref p) = args.preset {
-        let preset = by_name(p).ok_or_else(|| CliError::PresetNotFound { name: p.clone() })?;
-        let preset_str = match preset.preset {
-            audigma_dsp::FilterPreset::Balanced => "balanced",
-            audigma_dsp::FilterPreset::Reference => "reference",
-            audigma_dsp::FilterPreset::LowLatency => "low-latency",
-        };
-        apply_toml_override(&mut toml_table, "resampler.preset", preset_str)?;
     }
 
     // 4. Apply ad-hoc CLI overrides (-O key=value)
@@ -183,14 +169,9 @@ pub fn run_play(args: PlayArgs) -> Result<(), CliError> {
             .as_ref()
             .map(|i| i.dsd_gain_db())
             .unwrap_or(6.0);
-        let dsd_preset = settings.resolved_dsd_decimation_preset();
         let max_intermediate = settings.resolved_dsd_max_intermediate_rate_hz();
-        let file_input = FileAudioInput::open_with_dsd_full_config(
-            &args.input,
-            dsd_gain_db,
-            dsd_preset,
-            max_intermediate,
-        )?;
+        let file_input =
+            FileAudioInput::open_with_dsd_full_config(&args.input, dsd_gain_db, max_intermediate)?;
         let rate = file_input.info().sample_rate;
         (Box::new(file_input), rate)
     };
@@ -254,10 +235,7 @@ pub fn run_play(args: PlayArgs) -> Result<(), CliError> {
                 );
             }
         }
-        eprintln!(
-            "  Filter Preset: {:?} (phase: {:?})",
-            plan.dsp_config.preset, plan.dsp_config.phase
-        );
+        eprintln!("  Filter:        {}", plan.dsp_config.filter_description());
         eprintln!(
             "  Gain:          preamp {:.2} dB + volume {:.2} dB + headroom {:.2} dB = {:.2} dB",
             plan.dsp_config.preamp_db,

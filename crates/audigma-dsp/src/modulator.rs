@@ -11,7 +11,7 @@
 //!   resetting integrators and substituting balanced DSD idle (`0x69`) upon instability.
 
 use crate::config::{DitherType, OverloadPolicy};
-use crate::presets::{DSD_IDLE_BYTE, DSD_IDLE_U32_BE};
+use crate::defaults::{DSD_IDLE_BYTE, DSD_IDLE_U32_BE};
 use crate::rates::DsdBitRateHz;
 use crate::tables::{CrfbCoefficients5, CrfbCoefficients7};
 use smallvec::SmallVec;

@@ -6,6 +6,15 @@ from datetime import datetime, timezone
 from .common import DSD_RATES, ORDERS, REPORT_DIR, Section, run_harness
 
 BENCH_JSON = REPORT_DIR / "benchmark.json"
+# `off` (199-tap half-band stage 0) and the longest apodizing stage 0 (pass edge 20 kHz).
+BENCH_APODS = ["off", "20000"]
+
+
+def _filter_label(b):
+    """Filter column of a benchmark row; results saved before the presets were removed carry `preset`."""
+    if "apodization" in b:
+        return f"apodization {b['apodization']}"
+    return f"preset {b.get('preset', '?')} (old run)"
 
 
 def run(harness_bin):
@@ -14,21 +23,21 @@ def run(harness_bin):
     for order in ORDERS:
         print(f"\n>> Benchmark Order {order}:")
         for rate_str in DSD_RATES:
-            for preset in ["balanced", "reference"]:
+            for apod in BENCH_APODS:
                 meta, _ = run_harness(
                     harness_bin,
-                    f"bench_{rate_str}_{preset}_ord{order}",
+                    f"bench_{rate_str}_{apod}_ord{order}",
                     [
                         "--mode", "benchmark",
                         "--rate", rate_str,
                         "--order", str(order),
-                        "--preset", preset,
+                        "--apodization", apod,
                         "--pin",
                     ],
                 )
                 bench_results[order].append(meta)
                 print(
-                    f"  [Order {order}] {rate_str.upper():7s} [{preset:9s}]: "
+                    f"  [Order {order}] {rate_str.upper():7s} [{apod:5s}]: "
                     f"Throughput = {meta['throughput_x_realtime']:5.2f}x real-time, "
                     f"Block duration = {meta['audio_block_duration_micros']:6.1f} us, "
                     f"p99.9 = {meta['p999_micros']:6.1f} us ({meta['p999_percent_of_budget']:4.1f}% of budget)"
@@ -78,16 +87,16 @@ Benchmark parameters: {bench_blocks:,} blocks per configuration (p99.9 = {bench_
         report += f"""
 ### 5.{order // 3} {order}th-Order Modulator Benchmarks
 
-| Target Rate | Preset | Audio Block Time (us) | Avg Latency (us) | p99.9 Latency (us) | p99.9 Budget Used | Throughput (x Real-Time) | Goal (>= 2x, <= 70%) |
+| Target Rate | Filter | Audio Block Time (us) | Avg Latency (us) | p99.9 Latency (us) | p99.9 Budget Used | Throughput (x Real-Time) | Goal (>= 2x, <= 70%) |
 |---|---|---:|---:|---:|---:|---:|:---:|
 """
         for b in bench_results[order]:
             is_pass = b["throughput_x_realtime"] >= 2.0 and b["p999_percent_of_budget"] <= 70.0
             verdict = "**PASS**" if is_pass else "**FAIL**"
             if not is_pass:
-                failed_checks.append(f"Benchmark Order {order} {b['rate']} [{b['preset']}]")
+                failed_checks.append(f"Benchmark Order {order} {b['rate']} [{_filter_label(b)}]")
             report += (
-                f"| `{b['rate'].upper()}` | `{b['preset']}` | {b['audio_block_duration_micros']:.1f} | "
+                f"| `{b['rate'].upper()}` | {_filter_label(b)} | {b['audio_block_duration_micros']:.1f} | "
                 f"{b['avg_micros']:.1f} | {b['p999_micros']:.1f} | **{b['p999_percent_of_budget']:.1f}%** | "
                 f"**{b['throughput_x_realtime']:.2f}x** | {verdict} |\n"
             )

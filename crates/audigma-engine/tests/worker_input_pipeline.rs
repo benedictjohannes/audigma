@@ -3,9 +3,7 @@
 
 use audigma_dsp::fir::{HalfBandCascade, HalfBandDecimationCascade, PolyphaseResampler};
 use audigma_dsp::modulator::Modulator;
-use audigma_dsp::{
-    Apodization, DitherType, DsdBitRateHz, FilterPhase, FilterPreset, OverloadPolicy, PcmRateHz,
-};
+use audigma_dsp::{Apodization, DitherType, DsdBitRateHz, FilterPhase, OverloadPolicy, PcmRateHz};
 use audigma_engine::decimator::ChannelDecimatorPool;
 use audigma_engine::lifecycle::FrameGain;
 use audigma_engine::pipeline_topology::PipelineTopology;
@@ -40,7 +38,6 @@ impl SerialChannel {
     #[allow(clippy::too_many_arguments)]
     fn new(
         config: InputDspConfig,
-        preset: FilterPreset,
         phase: FilterPhase,
         apodization: Apodization,
         stages: usize,
@@ -52,7 +49,6 @@ impl SerialChannel {
         let output_capacity = pool.output_frame_capacity();
         let dsd_decoder = config.dsd.map(|dsd| {
             HalfBandDecimationCascade::new(
-                dsd.preset,
                 dsd.decimation_stages,
                 pool.input_dsd_byte_capacity() * 8,
             )
@@ -61,9 +57,8 @@ impl SerialChannel {
         let dsd_alignment = config
             .dsd
             .map_or(1, |dsd| (1usize << dsd.decimation_stages).div_ceil(8));
-        let pcm_decimator = (config.pcm_decimation_stages > 0).then(|| {
-            ChannelDecimatorPool::new(preset, config.pcm_decimation_stages, 1, input_capacity)
-        });
+        let pcm_decimator = (config.pcm_decimation_stages > 0)
+            .then(|| ChannelDecimatorPool::new(config.pcm_decimation_stages, 1, input_capacity));
         let resampler = match config.resampling {
             InputResampling::None => None,
             InputResampling::Rational {
@@ -93,7 +88,7 @@ impl SerialChannel {
             dsd_residue: Vec::new(),
             pcm_decimator,
             resampler,
-            cascade: HalfBandCascade::new(preset, phase, apodization, stages, output_capacity),
+            cascade: HalfBandCascade::new(phase, apodization, stages, output_capacity),
             modulator,
             input_capacity,
             output_capacity,
@@ -247,11 +242,9 @@ fn pcm_input_workers_match_serial_decimation_gain_and_src() {
                     dsd: None,
                     resampling,
                 };
-                let preset = FilterPreset::Reference;
-                let apodization = Apodization::Gentle;
+                let apodization = Apodization::PassEdge19000;
                 let mut pool = ChannelWorkerPool::new_with_input(
                     2,
-                    preset,
                     phase,
                     apodization,
                     2,
@@ -262,9 +255,7 @@ fn pcm_input_workers_match_serial_decimation_gain_and_src() {
                 )
                 .unwrap();
                 let mut serial: Vec<_> = (0..2)
-                    .map(|ch| {
-                        SerialChannel::new(config, preset, phase, apodization, 2, None, ch, &pool)
-                    })
+                    .map(|ch| SerialChannel::new(config, phase, apodization, 2, None, ch, &pool))
                     .collect();
                 let left: Vec<_> = (0..pool.input_frame_capacity())
                     .map(|i| (i as f64 * 0.17).sin() * 0.2)
@@ -325,11 +316,7 @@ fn pcm_input_workers_match_serial_decimation_gain_and_src() {
 
 #[test]
 fn dsd64_to_dsd512_workers_match_serial_pipeline_bit_exactly() {
-    for preset in [
-        FilterPreset::LowLatency,
-        FilterPreset::Balanced,
-        FilterPreset::Reference,
-    ] {
+    for apodization in [Apodization::Off, Apodization::PassEdge18500] {
         for order in [5, 7] {
             for (phase, rate, pcm_rate) in [
                 (
@@ -346,7 +333,6 @@ fn dsd64_to_dsd512_workers_match_serial_pipeline_bit_exactly() {
                 let config = InputDspConfig {
                     pcm_decimation_stages: 0,
                     dsd: Some(DsdDecodeConfig {
-                        preset,
                         decimation_stages: 4,
                         gain_db: -3.0,
                     }),
@@ -365,9 +351,8 @@ fn dsd64_to_dsd512_workers_match_serial_pipeline_bit_exactly() {
                 };
                 let mut pool = ChannelWorkerPool::new_with_input(
                     2,
-                    preset,
                     phase,
-                    Apodization::Off,
+                    apodization,
                     7,
                     FRAMES,
                     Some(target.clone()),
@@ -377,16 +362,7 @@ fn dsd64_to_dsd512_workers_match_serial_pipeline_bit_exactly() {
                 .unwrap();
                 let mut serial: Vec<_> = (0..2)
                     .map(|ch| {
-                        SerialChannel::new(
-                            config,
-                            preset,
-                            phase,
-                            Apodization::Off,
-                            7,
-                            Some(&target),
-                            ch,
-                            &pool,
-                        )
+                        SerialChannel::new(config, phase, apodization, 7, Some(&target), ch, &pool)
                     })
                     .collect();
                 let left: Vec<_> = (0..512).map(|i| [0x69, 0x96, 0x5a][i % 3]).collect();
@@ -445,7 +421,6 @@ fn raw_dsd_pcm_downsampling_and_synthetic_drains_preserve_both_residues() {
     let config = InputDspConfig {
         pcm_decimation_stages: 2,
         dsd: Some(DsdDecodeConfig {
-            preset: FilterPreset::Reference,
             decimation_stages: 4,
             gain_db: 3.0,
         }),
@@ -457,7 +432,6 @@ fn raw_dsd_pcm_downsampling_and_synthetic_drains_preserve_both_residues() {
     };
     let mut pool = ChannelWorkerPool::new_with_input(
         2,
-        FilterPreset::Reference,
         FilterPhase::Linear,
         Apodization::Off,
         0,
@@ -471,7 +445,6 @@ fn raw_dsd_pcm_downsampling_and_synthetic_drains_preserve_both_residues() {
         .map(|ch| {
             SerialChannel::new(
                 config,
-                FilterPreset::Reference,
                 FilterPhase::Linear,
                 Apodization::Off,
                 0,
@@ -522,7 +495,6 @@ fn input_job_validation_does_not_consume_residue_or_change_phase() {
     let config = InputDspConfig {
         pcm_decimation_stages: 0,
         dsd: Some(DsdDecodeConfig {
-            preset: FilterPreset::Balanced,
             decimation_stages: 4,
             gain_db: 0.0,
         }),
@@ -534,7 +506,6 @@ fn input_job_validation_does_not_consume_residue_or_change_phase() {
     };
     let mut pool = ChannelWorkerPool::new_with_input(
         2,
-        FilterPreset::Balanced,
         FilterPhase::Linear,
         Apodization::Off,
         0,
@@ -594,7 +565,6 @@ fn src_downsampling_keeps_output_only_api_capacity() {
     };
     let mut pool = ChannelWorkerPool::new_with_input(
         2,
-        FilterPreset::Balanced,
         FilterPhase::Linear,
         Apodization::Off,
         2,
@@ -606,13 +576,7 @@ fn src_downsampling_keeps_output_only_api_capacity() {
     .unwrap();
     assert!(pool.output_frame_capacity() < FRAMES);
     let input: Vec<_> = (0..FRAMES).map(|i| (i as f64 * 0.17).sin() * 0.2).collect();
-    let mut reference = HalfBandCascade::new(
-        FilterPreset::Balanced,
-        FilterPhase::Linear,
-        Apodization::Off,
-        2,
-        FRAMES,
-    );
+    let mut reference = HalfBandCascade::new(FilterPhase::Linear, Apodization::Off, 2, FRAMES);
     let mut expected = vec![0.0; FRAMES * 4];
     reference.process_tile(&input, &mut expected).unwrap();
     pool.process_tile_pcm(&[&input, &input]).unwrap();
@@ -631,7 +595,6 @@ fn src_downsampling_keeps_output_only_api_capacity() {
 fn output_only_errors_keep_pcm_view_and_clear_all_channel_errors() {
     let mut pool = ChannelWorkerPool::new(
         2,
-        FilterPreset::Balanced,
         FilterPhase::Linear,
         Apodization::Off,
         9,
@@ -647,13 +610,7 @@ fn output_only_errors_keep_pcm_view_and_clear_all_channel_errors() {
     )
     .unwrap();
     let input = [f64::NAN; 31];
-    let mut reference = HalfBandCascade::new(
-        FilterPreset::Balanced,
-        FilterPhase::Linear,
-        Apodization::Off,
-        9,
-        input.len(),
-    );
+    let mut reference = HalfBandCascade::new(FilterPhase::Linear, Apodization::Off, 9, input.len());
     let mut expected = vec![0.0; input.len() * 512];
     reference.process_tile(&input, &mut expected).unwrap();
     assert!(matches!(
@@ -678,7 +635,6 @@ fn modulation_errors_still_account_for_consumed_input_residue() {
     let config = InputDspConfig {
         pcm_decimation_stages: 2,
         dsd: Some(DsdDecodeConfig {
-            preset: FilterPreset::Balanced,
             decimation_stages: 4,
             gain_db: 0.0,
         }),
@@ -686,7 +642,6 @@ fn modulation_errors_still_account_for_consumed_input_residue() {
     };
     let mut pool = ChannelWorkerPool::new_with_input(
         2,
-        FilterPreset::Balanced,
         FilterPhase::Linear,
         Apodization::Off,
         9,
@@ -758,7 +713,6 @@ fn early_dispatch_reuses_exactly_one_thread_per_channel() {
     };
     let mut pool = ChannelWorkerPool::new_with_input(
         2,
-        FilterPreset::Balanced,
         FilterPhase::Linear,
         Apodization::Off,
         0,
@@ -798,7 +752,6 @@ fn worker_termination_completes_surviving_jobs_and_rejects_reuse() {
     });
     let mut pool = ChannelWorkerPool::new_with_input(
         2,
-        FilterPreset::Balanced,
         FilterPhase::Linear,
         Apodization::Off,
         2,
@@ -861,7 +814,6 @@ fn input_dsp_timing_counts_one_job_and_uses_pre_src_duration() {
     };
     let mut processor = TileProcessor::new_with_input(
         2,
-        FilterPreset::Balanced,
         FilterPhase::Linear,
         Apodization::Off,
         topology,

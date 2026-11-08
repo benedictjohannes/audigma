@@ -5,9 +5,12 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Core DSP types, rate domains, filter/modulator presets, and PCM/DSD signal processing for audigma"
+description = "Core DSP types, rate domains, filter/modulator tables, and PCM/DSD signal processing for audigma"
 
 [dependencies]
 serde = { workspace = true }
 smallvec = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+toml = { workspace = true }

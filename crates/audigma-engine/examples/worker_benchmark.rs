@@ -11,8 +11,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use audigma_dsp::{
-    Apodization, DitherType, DsdBitRateHz, FilterPhase, FilterPreset, HalfBandCascade, Modulator,
-    OverloadPolicy, ScopedFtzDaz,
+    Apodization, DitherType, DsdBitRateHz, FilterPhase, HalfBandCascade, Modulator, OverloadPolicy,
+    ScopedFtzDaz,
 };
 use audigma_engine::worker::{ChannelWorkerPool, TargetDsdConfig};
 
@@ -46,7 +46,7 @@ fn main() {
     let mut blocks = 2000usize;
     let mut channels = 2usize;
     let mut order = 7u8;
-    let mut preset = FilterPreset::Reference;
+    let mut apodization = Apodization::Off;
     let mut rate = DsdBitRateHz::DSD512;
     let mut stages = 9;
     let mut baseband_fs = 44_100;
@@ -69,13 +69,8 @@ fn main() {
             "--worker-cpus" => {
                 worker_cpus = Some(value.split(',').map(|cpu| cpu.parse().unwrap()).collect())
             }
-            "--preset" => {
-                preset = match value.as_str() {
-                    "balanced" => FilterPreset::Balanced,
-                    "reference" => FilterPreset::Reference,
-                    "low-latency" => FilterPreset::LowLatency,
-                    _ => panic!("unknown preset"),
-                }
+            "--apodization" => {
+                apodization = Apodization::from_name(&value).expect("unknown apodization")
             }
             "--rate" => {
                 (rate, stages, baseband_fs) = match value.as_str() {
@@ -148,9 +143,8 @@ fn main() {
         });
         pool = ChannelWorkerPool::new(
             channels,
-            preset,
             FilterPhase::Linear,
-            Apodization::Off,
+            apodization,
             stages,
             frames,
             Some(config.clone()),
@@ -165,15 +159,7 @@ fn main() {
         })
     } else {
         cascades = (0..channels)
-            .map(|_| {
-                HalfBandCascade::new(
-                    preset,
-                    FilterPhase::Linear,
-                    Apodization::Off,
-                    stages,
-                    subtile_frames,
-                )
-            })
+            .map(|_| HalfBandCascade::new(FilterPhase::Linear, apodization, stages, subtile_frames))
             .collect::<Vec<_>>();
         modulators = (0..channels)
             .map(|ch| {
@@ -215,7 +201,7 @@ fn main() {
         "{}",
         serde_json::json!({
             "mode": mode, "rate_hz": rate.get(), "order": order,
-            "preset": format!("{preset:?}"), "frames": frames, "channels": channels,
+            "apodization": apodization.name(), "frames": frames, "channels": channels,
             "main_cpu": main_cpu, "worker_cpus": worker_cpus,
             "consume_output": read_output,
             "sequential_subtile_frames": if mode == "sequential" { Some(subtile_frames) } else { None },

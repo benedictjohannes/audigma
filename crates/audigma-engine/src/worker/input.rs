@@ -4,7 +4,6 @@
 use crate::decimator::ChannelDecimatorPool;
 use crate::lifecycle::FrameGain;
 use crate::traits::{DsdDecodeConfig, EngineError};
-use audigma_dsp::FilterPreset;
 use audigma_dsp::fir::{HalfBandDecimationCascade, PolyphaseResampler};
 use audigma_dsp::rates::PcmRateHz;
 
@@ -173,16 +172,14 @@ pub(super) struct InputProcessor {
 
 impl InputProcessor {
     pub(super) fn new(
-        preset: FilterPreset,
         frames: usize,
         config: InputDspConfig,
         bounds: InputBounds,
     ) -> Result<Self, EngineError> {
-        let pcm_decimator = (config.pcm_decimation_stages > 0).then(|| {
-            ChannelDecimatorPool::new(preset, config.pcm_decimation_stages, 1, bounds.pcm_frames)
-        });
+        let pcm_decimator = (config.pcm_decimation_stages > 0)
+            .then(|| ChannelDecimatorPool::new(config.pcm_decimation_stages, 1, bounds.pcm_frames));
         let dsd_decimator = config.dsd.map(|dsd| {
-            HalfBandDecimationCascade::new(dsd.preset, dsd.decimation_stages, bounds.dsd_bytes * 8)
+            HalfBandDecimationCascade::new(dsd.decimation_stages, bounds.dsd_bytes * 8)
                 .with_gain_db(dsd.gain_db)
         });
         let dsd_alignment = bounds.dsd_divider.div_ceil(8);

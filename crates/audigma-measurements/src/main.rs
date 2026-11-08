@@ -11,8 +11,8 @@ use std::time::Instant;
 mod linear_modes;
 
 use audigma_dsp::{
-    Apodization, DitherType, DsdBitRateHz, FilterPhase, FilterPreset, HalfBandCascade, Modulator,
-    OverloadPolicy, STABILITY_THRESHOLD, ScopedFtzDaz,
+    Apodization, DitherType, DsdBitRateHz, FilterPhase, HalfBandCascade, Modulator, OverloadPolicy,
+    STABILITY_THRESHOLD, ScopedFtzDaz,
 };
 
 #[derive(Debug, Clone)]
@@ -20,7 +20,7 @@ struct HarnessConfig {
     mode: String,
     rate: String,
     order: u8,
-    preset: FilterPreset,
+    apodization: Apodization,
     samples: usize,
     amp_db: f64,
     dither: DitherType,
@@ -37,7 +37,7 @@ fn parse_args() -> HarnessConfig {
         mode: "direct-sine".to_string(),
         rate: "dsd64".to_string(),
         order: 5,
-        preset: FilterPreset::Balanced,
+        apodization: Apodization::Off,
         samples: 1_048_576,
         amp_db: -6.0,
         dither: DitherType::Tpdf,
@@ -62,14 +62,10 @@ fn parse_args() -> HarnessConfig {
                 i += 1;
                 config.order = args[i].parse().expect("Invalid order");
             }
-            "--preset" => {
+            "--apodization" => {
                 i += 1;
-                config.preset = match args[i].as_str() {
-                    "balanced" => FilterPreset::Balanced,
-                    "reference" => FilterPreset::Reference,
-                    "low-latency" => FilterPreset::LowLatency,
-                    other => panic!("Unknown preset: {other}"),
-                };
+                config.apodization = Apodization::from_name(&args[i])
+                    .unwrap_or_else(|| panic!("Unknown apodization: {}", args[i]));
             }
             "--samples" => {
                 i += 1;
@@ -347,9 +343,8 @@ fn run_cascade_sine(
     let tile_expanded = TILE_BASEBAND * multiplier;
 
     let mut cascade = HalfBandCascade::new(
-        config.preset,
         FilterPhase::Linear,
-        Apodization::Off,
+        config.apodization,
         cascade_stages,
         TILE_BASEBAND,
     );
@@ -415,7 +410,7 @@ fn run_cascade_sine(
   "mode": "{}",
   "rate": "{}",
   "order": {},
-  "preset": "{:?}",
+  "apodization": "{}",
   "cascade_stages": {},
   "f_bit_hz": {},
   "k_bin": {},
@@ -428,7 +423,7 @@ fn run_cascade_sine(
             config.mode,
             config.rate,
             config.order,
-            config.preset,
+            config.apodization,
             cascade_stages,
             f_bit_hz,
             k_bin,
@@ -590,9 +585,8 @@ fn run_multitone(
     let tile_expanded = TILE_BASEBAND * multiplier;
 
     let mut cascade = HalfBandCascade::new(
-        config.preset,
         FilterPhase::Linear,
-        Apodization::Off,
+        config.apodization,
         cascade_stages,
         TILE_BASEBAND,
     );
@@ -807,9 +801,8 @@ fn run_benchmark(
     let tile_expanded = tile_baseband * multiplier;
 
     let mut cascade = HalfBandCascade::new(
-        config.preset,
         FilterPhase::Linear,
-        Apodization::Off,
+        config.apodization,
         cascade_stages,
         tile_baseband,
     );
@@ -868,7 +861,7 @@ fn run_benchmark(
   "mode": "{}",
   "rate": "{}",
   "order": {},
-  "preset": "{:?}",
+  "apodization": "{}",
   "bench_blocks": {},
   "baseband_block_frames": {},
   "audio_block_duration_micros": {:.2},
@@ -886,7 +879,7 @@ fn run_benchmark(
             config.mode,
             config.rate,
             config.order,
-            config.preset,
+            config.apodization,
             BENCH_BLOCKS,
             tile_baseband,
             audio_block_duration_micros,

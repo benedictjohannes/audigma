@@ -40,8 +40,13 @@ fn test_live_pipeline_streaming_lifecycle() {
     let mut mock_in = MockAudioInput::new(info, vec![0.1; frames], vec![0.1; frames], false);
     let mut mock_out = TestOutputSink::default();
 
-    let control =
-        DaemonControlHandle::new(44100, DaemonOutputFormat::Dsd, 11289600, "balanced", 0.0);
+    let control = DaemonControlHandle::new(
+        44100,
+        DaemonOutputFormat::Dsd,
+        11289600,
+        "linear, apodization off",
+        0.0,
+    );
     let ctrl_thread = control.clone();
 
     // Spawn runner on background thread
@@ -79,8 +84,13 @@ fn test_live_pipeline_dynamic_sample_rate_switch() {
     let mut mock_in = MockAudioInput::new(info, vec![0.1; frames], vec![0.1; frames], false);
     let mut mock_out = TestOutputSink::default();
 
-    let control =
-        DaemonControlHandle::new(44100, DaemonOutputFormat::Dsd, 11289600, "balanced", 0.0);
+    let control = DaemonControlHandle::new(
+        44100,
+        DaemonOutputFormat::Dsd,
+        11289600,
+        "linear, apodization off",
+        0.0,
+    );
 
     // Simulate an upstream rate change to 96 kHz
     mock_in.simulate_rate_change(r96);
@@ -142,7 +152,13 @@ pcm_rate_hz = 96000
     let mut mock_in = MockAudioInput::new_multichannel(info, ch_data, false);
     let mut mock_out = TestOutputSink::default();
 
-    let control = DaemonControlHandle::new(48000, DaemonOutputFormat::Pcm, 96000, "balanced", 0.0);
+    let control = DaemonControlHandle::new(
+        48000,
+        DaemonOutputFormat::Pcm,
+        96000,
+        "linear, apodization off",
+        0.0,
+    );
     let ctrl_thread = control.clone();
 
     let handle = std::thread::spawn(move || {
@@ -181,7 +197,6 @@ impl AudioInput for RawOnlyDsdInput {
 
     fn dsd_decode_config(&self) -> Option<DsdDecodeConfig> {
         Some(DsdDecodeConfig {
-            preset: audigma_dsp::FilterPreset::Balanced,
             decimation_stages: 4,
             gain_db: 0.0,
         })
@@ -267,8 +282,13 @@ fn live_raw_dsd512_conversion_preserves_fragmented_input_without_serial_decode()
     let settings =
         raw_dsd_settings("format = \"dsd\"\nrate_family = \"source\"\ndsd_rate = \"dsd512\"");
     let pipeline = LivePipeline::prepare(settings, PcmRateHz::PCM_176400).unwrap();
-    let control =
-        DaemonControlHandle::new(176400, DaemonOutputFormat::Dsd, 22579200, "balanced", 0.0);
+    let control = DaemonControlHandle::new(
+        176400,
+        DaemonOutputFormat::Dsd,
+        22579200,
+        "linear, apodization off",
+        0.0,
+    );
     let mut input = raw_only_input(control.clone(), 513, 13, false);
     let mut output = TestOutputSink::default();
     assert_eq!(
@@ -289,7 +309,13 @@ fn live_raw_dsd_pcm_downsampling_keeps_decoded_input_and_output_counts() {
         "format = \"pcm\"\nrate_family = \"source\"\npcm_rate_hz = 44100\nsample_format = \"f64\"",
     );
     let pipeline = LivePipeline::prepare(settings, PcmRateHz::PCM_176400).unwrap();
-    let control = DaemonControlHandle::new(176400, DaemonOutputFormat::Pcm, 44100, "balanced", 0.0);
+    let control = DaemonControlHandle::new(
+        176400,
+        DaemonOutputFormat::Pcm,
+        44100,
+        "linear, apodization off",
+        0.0,
+    );
     let mut input = raw_only_input(control.clone(), 2049, 31, false);
     let mut output = TestOutputSink::default();
     assert_eq!(
@@ -309,8 +335,13 @@ fn live_raw_dsd_rate_switch_drains_with_pcm_zeros_without_decoded_reads() {
     let settings =
         raw_dsd_settings("format = \"dsd\"\nrate_family = \"source\"\ndsd_rate = \"dsd512\"");
     let pipeline = LivePipeline::prepare(settings, PcmRateHz::PCM_176400).unwrap();
-    let control =
-        DaemonControlHandle::new(176400, DaemonOutputFormat::Dsd, 22579200, "balanced", 0.0);
+    let control = DaemonControlHandle::new(
+        176400,
+        DaemonOutputFormat::Dsd,
+        22579200,
+        "linear, apodization off",
+        0.0,
+    );
     let mut input = raw_only_input(control.clone(), 512, 512, true);
     let mut output = TestOutputSink::default();
     assert_eq!(
@@ -359,8 +390,13 @@ fn test_dsp_session_keeps_workers_across_streams_and_rates() {
         let info = AudioStreamInfo::new_pcm(rate, 2, Some(frames as u64), Some(32));
         let mut mock_in = MockAudioInput::new(info, vec![0.1; frames], vec![0.1; frames], false);
         let mut mock_out = TestOutputSink::default();
-        let control =
-            DaemonControlHandle::new(hz, DaemonOutputFormat::Dsd, 11289600, "balanced", 0.0);
+        let control = DaemonControlHandle::new(
+            hz,
+            DaemonOutputFormat::Dsd,
+            11289600,
+            "linear, apodization off",
+            0.0,
+        );
         let ctrl = control.clone();
         std::thread::scope(|scope| {
             let h = scope.spawn(|| {

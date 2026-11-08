@@ -16,7 +16,7 @@ fn test_cli_play_help() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("--input"));
     assert!(stdout.contains("--device"));
-    assert!(stdout.contains("--preset"));
+    assert!(!stdout.contains("--preset"));
     assert!(stdout.contains("--volume"));
     assert!(stdout.contains("--override"));
     assert!(stdout.contains("--config"));

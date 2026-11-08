@@ -4,7 +4,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use audigma_dsp::config::{Apodization, FilterPhase, FilterPreset, TargetRateSpec};
+use audigma_dsp::config::{Apodization, FilterPhase, TargetRateSpec};
 
 use crate::late::LateTileTelemetry;
 use crate::pipeline_topology::PipelineTopology;
@@ -32,7 +32,6 @@ impl TileProcessor {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         channels: usize,
-        preset: FilterPreset,
         phase: FilterPhase,
         apodization: Apodization,
         topology: PipelineTopology,
@@ -43,7 +42,6 @@ impl TileProcessor {
     ) -> Result<Self, EngineError> {
         Self::new_configured(
             channels,
-            preset,
             phase,
             apodization,
             topology,
@@ -61,7 +59,6 @@ impl TileProcessor {
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_input(
         channels: usize,
-        preset: FilterPreset,
         phase: FilterPhase,
         apodization: Apodization,
         topology: PipelineTopology,
@@ -73,7 +70,6 @@ impl TileProcessor {
     ) -> Result<Self, EngineError> {
         Self::new_configured(
             channels,
-            preset,
             phase,
             apodization,
             topology,
@@ -88,7 +84,6 @@ impl TileProcessor {
     #[allow(clippy::too_many_arguments)]
     fn new_configured(
         channels: usize,
-        preset: FilterPreset,
         phase: FilterPhase,
         apodization: Apodization,
         topology: PipelineTopology,
@@ -100,7 +95,6 @@ impl TileProcessor {
     ) -> Result<Self, EngineError> {
         let worker_pool = ChannelWorkerPool::new_with_input(
             channels,
-            preset,
             phase,
             apodization,
             topology.cascade_stages,
@@ -166,7 +160,6 @@ impl TileProcessor {
     #[allow(clippy::too_many_arguments)]
     pub fn reconfigure(
         &mut self,
-        preset: FilterPreset,
         phase: FilterPhase,
         apodization: Apodization,
         topology: PipelineTopology,
@@ -176,7 +169,6 @@ impl TileProcessor {
         input_config: Option<InputDspConfig>,
     ) -> Result<(), EngineError> {
         self.worker_pool.reconfigure(
-            preset,
             phase,
             apodization,
             topology.cascade_stages,

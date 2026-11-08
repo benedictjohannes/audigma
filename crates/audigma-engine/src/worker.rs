@@ -18,7 +18,7 @@ use crate::cpu::ThreadPlacement;
 use crate::lifecycle::FrameGain;
 use crate::timing::PoolTimings;
 use crate::traits::EngineError;
-use audigma_dsp::config::{Apodization, DitherType, FilterPhase, FilterPreset, OverloadPolicy};
+use audigma_dsp::config::{Apodization, DitherType, FilterPhase, OverloadPolicy};
 use audigma_dsp::fir::HalfBandCascade;
 use audigma_dsp::ftz::ScopedFtzDaz;
 use audigma_dsp::modulator::Modulator;
@@ -241,7 +241,7 @@ struct WorkerSlot {
     mailbox: Arc<Mutex<Option<Vec<ChannelState>>>>,
 }
 
-/// Everything one channel worker owns that depends on the active rate/preset.
+/// Everything one channel worker owns that depends on the active rate and filter.
 struct ChannelState {
     cascade: HalfBandCascade,
     modulator: Option<Modulator>,
@@ -413,7 +413,6 @@ struct PoolShape {
 #[allow(clippy::too_many_arguments)]
 fn build_channel_states(
     channels: usize,
-    preset: FilterPreset,
     phase: FilterPhase,
     apodization: Apodization,
     stages: usize,
@@ -451,7 +450,7 @@ fn build_channel_states(
     } else {
         tile_baseband_frames
     };
-    let cascade_probe = HalfBandCascade::new(preset, phase, apodization, stages, subtile_frames);
+    let cascade_probe = HalfBandCascade::new(phase, apodization, stages, subtile_frames);
     let mult = cascade_probe.rate_multiplier();
     let group_delay_output_samples = cascade_probe.total_group_delay_output_samples();
     let cascade_tile_len =
@@ -480,7 +479,7 @@ fn build_channel_states(
             dsd_out_buf: UnsafeCell::new(dsd_out_buf),
             overload_count: AtomicU64::new(0),
         });
-        let cascade = HalfBandCascade::new(preset, phase, apodization, stages, subtile_frames);
+        let cascade = HalfBandCascade::new(phase, apodization, stages, subtile_frames);
         let modulator = if let Some(dsd_cfg) = target_dsd {
             let mut m = Modulator::new(
                 dsd_cfg.modulator_order,
@@ -495,9 +494,7 @@ fn build_channel_states(
         };
         let input_processor = input_config
             .zip(input_bounds)
-            .map(|(config, bounds)| {
-                InputProcessor::new(preset, tile_baseband_frames, config, bounds)
-            })
+            .map(|(config, bounds)| InputProcessor::new(tile_baseband_frames, config, bounds))
             .transpose()?;
         states.push(ChannelState {
             cascade,
@@ -579,7 +576,6 @@ impl ChannelWorkerPool {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         channels: usize,
-        preset: FilterPreset,
         phase: FilterPhase,
         apodization: Apodization,
         stages: usize,
@@ -589,7 +585,6 @@ impl ChannelWorkerPool {
     ) -> Result<Self, EngineError> {
         Self::new_with_input(
             channels,
-            preset,
             phase,
             apodization,
             stages,
@@ -606,7 +601,6 @@ impl ChannelWorkerPool {
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_input(
         channels: usize,
-        preset: FilterPreset,
         phase: FilterPhase,
         apodization: Apodization,
         stages: usize,
@@ -617,7 +611,6 @@ impl ChannelWorkerPool {
     ) -> Result<Self, EngineError> {
         let (states, shape) = build_channel_states(
             channels,
-            preset,
             phase,
             apodization,
             stages,
@@ -814,7 +807,6 @@ impl ChannelWorkerPool {
     #[allow(clippy::too_many_arguments)]
     pub fn reconfigure(
         &mut self,
-        preset: FilterPreset,
         phase: FilterPhase,
         apodization: Apodization,
         stages: usize,
@@ -825,7 +817,6 @@ impl ChannelWorkerPool {
         self.ensure_ready()?;
         let (mut states, shape) = build_channel_states(
             self.channel_buffers.len(),
-            preset,
             phase,
             apodization,
             stages,
@@ -1295,7 +1286,6 @@ impl Drop for ChannelWorkerPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use audigma_dsp::presets::PRESET_BALANCED;
     use std::f64::consts::PI;
 
     #[test]
@@ -1305,15 +1295,9 @@ mod tests {
             let subtile_frames = 32;
             for order in [5, 7] {
                 for policy in [OverloadPolicy::Error, OverloadPolicy::MuteRecover] {
-                    let mut whole = HalfBandCascade::new(
-                        FilterPreset::Balanced,
-                        FilterPhase::Linear,
-                        Apodization::Off,
-                        stages,
-                        97,
-                    );
+                    let mut whole =
+                        HalfBandCascade::new(FilterPhase::Linear, Apodization::Off, stages, 97);
                     let mut tiled = HalfBandCascade::new(
-                        FilterPreset::Balanced,
                         FilterPhase::Linear,
                         Apodization::Off,
                         stages,
@@ -1401,16 +1385,7 @@ mod tests {
     #[test]
     fn test_zero_tile_capacity_is_rejected() {
         assert!(matches!(
-            ChannelWorkerPool::new(
-                1,
-                FilterPreset::Balanced,
-                FilterPhase::Linear,
-                Apodization::Off,
-                9,
-                0,
-                None,
-                None
-            ),
+            ChannelWorkerPool::new(1, FilterPhase::Linear, Apodization::Off, 9, 0, None, None),
             Err(EngineError::InvalidTopology { .. })
         ));
     }
@@ -1432,7 +1407,6 @@ mod tests {
 
         let mut pool = ChannelWorkerPool::new(
             CHANNELS,
-            PRESET_BALANCED.preset,
             FilterPhase::Linear,
             Apodization::Off,
             STAGES,
@@ -1443,20 +1417,10 @@ mod tests {
         .expect("worker pool creation failed");
 
         // Sequential reference
-        let mut seq_cascade_l = HalfBandCascade::new(
-            PRESET_BALANCED.preset,
-            FilterPhase::Linear,
-            Apodization::Off,
-            STAGES,
-            FRAMES,
-        );
-        let mut seq_cascade_r = HalfBandCascade::new(
-            PRESET_BALANCED.preset,
-            FilterPhase::Linear,
-            Apodization::Off,
-            STAGES,
-            FRAMES,
-        );
+        let mut seq_cascade_l =
+            HalfBandCascade::new(FilterPhase::Linear, Apodization::Off, STAGES, FRAMES);
+        let mut seq_cascade_r =
+            HalfBandCascade::new(FilterPhase::Linear, Apodization::Off, STAGES, FRAMES);
         let mut seq_mod_l = Modulator::new(
             dsd_cfg.modulator_order,
             BIT_RATE,
@@ -1534,7 +1498,6 @@ mod tests {
 
         let mut pool = ChannelWorkerPool::new(
             CHANNELS,
-            PRESET_BALANCED.preset,
             FilterPhase::Linear,
             Apodization::Off,
             STAGES,
@@ -1544,20 +1507,10 @@ mod tests {
         )
         .expect("worker pool creation failed");
 
-        let mut seq_cascade_l = HalfBandCascade::new(
-            PRESET_BALANCED.preset,
-            FilterPhase::Linear,
-            Apodization::Off,
-            STAGES,
-            FRAMES,
-        );
-        let mut seq_cascade_r = HalfBandCascade::new(
-            PRESET_BALANCED.preset,
-            FilterPhase::Linear,
-            Apodization::Off,
-            STAGES,
-            FRAMES,
-        );
+        let mut seq_cascade_l =
+            HalfBandCascade::new(FilterPhase::Linear, Apodization::Off, STAGES, FRAMES);
+        let mut seq_cascade_r =
+            HalfBandCascade::new(FilterPhase::Linear, Apodization::Off, STAGES, FRAMES);
         let mut seq_mod_l = Modulator::new(
             dsd_cfg.modulator_order,
             BIT_RATE,
@@ -1617,7 +1570,6 @@ mod tests {
 
         let mut pool = ChannelWorkerPool::new(
             CHANNELS,
-            PRESET_BALANCED.preset,
             FilterPhase::Linear,
             Apodization::Off,
             STAGES,
@@ -1651,7 +1603,6 @@ mod tests {
 
         let mut pool = ChannelWorkerPool::new(
             CHANNELS,
-            PRESET_BALANCED.preset,
             FilterPhase::Linear,
             Apodization::Off,
             STAGES,
@@ -1678,16 +1629,8 @@ mod tests {
 
     #[test]
     fn test_worker_pool_zero_channels_returns_invalid_topology() {
-        let res = ChannelWorkerPool::new(
-            0,
-            PRESET_BALANCED.preset,
-            FilterPhase::Linear,
-            Apodization::Off,
-            2,
-            128,
-            None,
-            None,
-        );
+        let res =
+            ChannelWorkerPool::new(0, FilterPhase::Linear, Apodization::Off, 2, 128, None, None);
         match res {
             Err(EngineError::InvalidTopology { message }) => {
                 assert!(message.contains("requires at least 1 channel"));

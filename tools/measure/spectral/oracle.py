@@ -5,9 +5,9 @@ from design_crfb import synthesize_crfb
 from .common import DIRECT_RATES, ORDERS
 
 try:
-    from design_halfband import design_all_presets
+    from design_halfband import design_all
 except ImportError:
-    design_all_presets = None
+    design_all = None
 
 
 def synthesize_oracle():
@@ -29,7 +29,7 @@ def synthesize_oracle():
 
 def load_halfband_design():
     """Design-side half-band results (design_halfband.py) for comparison with the implemented cascade."""
-    if design_all_presets is None:
+    if design_all is None:
         return None
     print("\n=== Evaluating half-band design (design_halfband.py) ===")
-    return design_all_presets()
+    return design_all()

@@ -6,7 +6,7 @@
 //!
 //! Wire protocol: newline-delimited JSON.
 //! - `GetStatus` -> `Telemetry`
-//! - `SetVolume` / `SetVolumePercent` / `SetPreset` / `SetMute` / `Stop` -> `Ok`
+//! - `SetVolume` / `SetVolumePercent` /  `SetMute` / `Stop` -> `Ok`
 //!
 //! The server runs on an independent I/O thread and talks to audio threads via atomics and mutexes.
 
@@ -34,7 +34,6 @@ pub enum IpcRequest {
     GetStatus,
     SetVolume { volume_db: f64 },
     SetVolumePercent { percent: f64 },
-    SetPreset { preset: String },
     SetMute { muted: bool },
     Stop,
 }
@@ -229,10 +228,6 @@ fn handle_client(reader: impl Read, mut writer: impl Write, control: &DaemonCont
             }
             Ok(IpcRequest::SetVolumePercent { percent }) => {
                 control.set_volume_percent(percent);
-                IpcResponse::Ok
-            }
-            Ok(IpcRequest::SetPreset { preset }) => {
-                control.set_preset(&preset);
                 IpcResponse::Ok
             }
             Ok(IpcRequest::SetMute { muted }) => {
