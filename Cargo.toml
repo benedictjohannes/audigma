@@ -8,6 +8,7 @@ members = [
     "crates/audigma-io",
     "crates/audigma-cli",
     "crates/audigma-log",
+    "crates/audigma-measurements",
 ]
 
 [workspace.package]

@@ -26,6 +26,8 @@ import numpy as np
 import scipy.signal as signal
 from scipy.optimize import root_scalar
 
+from dsm_analysis import analyze_record, simulate_crfb
+
 
 B_AUDIO_HZ = 20000.0
 
@@ -154,53 +156,6 @@ def synthesize_crfb(f_bit_hz, order=5, H_inf=1.40, name="DSD"):
             stable_msa = amp_db
             break
 
-    # In-band SNR measurement with coherent tone and TPDF dither (Design.md §4.3)
-    N_fft = 262144
-    N_warm = 65536 if order == 5 else 131072
-    k_bin = int(np.round(1000.0 * N_fft / f_bit_hz))
-    f_coherent = k_bin * f_bit_hz / N_fft
-    amp_test = 10.0 ** (-6.0 / 20.0)
-    tot_N = N_warm + N_fft
-    t_test = np.arange(tot_N) / f_bit_hz
-    u_test = amp_test * np.sin(2 * np.pi * f_coherent * t_test)
-
-    dither_amp = 0.005
-    rng = np.random.default_rng(12345)
-    dither = rng.triangular(-dither_amp, 0.0, dither_amp, size=tot_N)
-
-    x = np.zeros(order)
-    v_out = np.zeros(tot_N)
-    for n in range(tot_N):
-        y = x[-1] + dither[n]
-        v = 1.0 if y >= 0 else -1.0
-        v_out[n] = v
-        if order == 5:
-            x1 = x[0] - g[0] * x[1] + b1 * u_test[n] - a[0] * v
-            x2 = x[1] + c[0] * x1 - a[1] * v
-            x3 = x[2] - g[1] * x[3] + c[1] * x2 - a[2] * v
-            x4 = x[3] + c[2] * x3 - a[3] * v
-            x5 = x[4] + c[3] * x4 - a[4] * v
-            x[0] = x1; x[1] = x2; x[2] = x3; x[3] = x4; x[4] = x5
-        else:
-            x1 = x[0] - g[0] * x[1] + b1 * u_test[n] - a[0] * v
-            x2 = x[1] + c[0] * x1 - a[1] * v
-            x3 = x[2] - g[1] * x[3] + c[1] * x2 - a[2] * v
-            x4 = x[3] + c[2] * x3 - a[3] * v
-            x5 = x[4] - g[2] * x[5] + c[3] * x4 - a[4] * v
-            x6 = x[5] + c[4] * x5 - a[5] * v
-            x7 = x[6] + c[5] * x6 - a[6] * v
-            x[0] = x1; x[1] = x2; x[2] = x3; x[3] = x4; x[4] = x5; x[5] = x6; x[6] = x7
-
-    v_steady = v_out[N_warm:]
-    V = np.fft.rfft(v_steady) / N_fft
-    freqs = np.fft.rfftfreq(N_fft, 1.0 / f_bit_hz)
-    psd = 2 * np.abs(V) ** 2
-    tone_power = psd[k_bin]
-    in_band = (freqs >= 20.0) & (freqs <= 20000.0)
-    noise_bins = [b for b in np.where(in_band)[0] if b != k_bin]
-    noise_power = np.sum(psd[noise_bins])
-    snr_db = float(10 * np.log10(tone_power / noise_power))
-
     res_dict = {
         "name": name,
         "order": order,
@@ -213,10 +168,22 @@ def synthesize_crfb(f_bit_hz, order=5, H_inf=1.40, name="DSD"):
         "a": a,
         "b1": b1,
         "stable_msa_dbfs": stable_msa,
-        "measured_snr_db": snr_db,
     }
     if order == 7:
         res_dict["g3"] = float(g[2])
+
+    # In-band SNR with a coherent -6 dBFS tone and small TPDF dither (Design.md §4.3),
+    # analysed with the shared windowed method (a rectangular window is invalid here).
+    N_fft = 262144
+    N_warm = 65536 if order == 5 else 131072
+    k_bin = int(np.round(1000.0 * N_fft / f_bit_hz))
+    amp_test = 10.0 ** (-6.0 / 20.0)
+    tot_N = N_warm + N_fft
+    u_test = amp_test * np.sin(2 * np.pi * k_bin * np.arange(tot_N) / N_fft)
+    dither = np.random.default_rng(12345).triangular(-0.005, 0.0, 0.005, size=tot_N)
+    bits = simulate_crfb(res_dict, u_test.tolist(), dither.tolist())[N_warm:]
+    v_steady = np.where(bits == 1, 1.0, -1.0)
+    res_dict["measured_snr_db"] = analyze_record(v_steady, f_bit_hz, k_bin)["snr_db"]
 
     return res_dict
 

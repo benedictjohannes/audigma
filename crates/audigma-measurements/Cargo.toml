@@ -1,0 +1,20 @@
+[package]
+name = "audigma-measurements"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Measurement harness driving the production DSP types for the spectral audit (tools/measure); not shipped"
+publish = false
+
+[[bin]]
+name = "measure_harness"
+path = "src/main.rs"
+
+[dependencies]
+audigma-dsp = { path = "../audigma-dsp" }
+audigma-settings = { path = "../audigma-settings" }
+audigma-engine = { path = "../audigma-engine" }
+# Only the CPU topology / affinity code is used (benchmark pinning), not the live backends.
+audigma-io = { path = "../audigma-io", default-features = false }

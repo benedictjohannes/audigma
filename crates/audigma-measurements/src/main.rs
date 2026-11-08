@@ -1,4 +1,4 @@
-//! Measurement and benchmark harness for `audigma-dsp` spectral verification (`Design.md §8`).
+//! Measurement and benchmark harness for the `audigma-dsp` spectral verification (`Design.md §8`).
 //!
 //! Generates test signals, runs direct and cascaded DSP chains with FTZ/DAZ active,
 //! and writes raw bitstreams and JSON telemetry for analysis by `tools/measure/measure_spectral.py`.
@@ -7,6 +7,8 @@ use std::f64::consts::PI;
 use std::fs::File;
 use std::io::Write;
 use std::time::Instant;
+
+mod linear_modes;
 
 use audigma_dsp::{
     Apodization, DitherType, DsdBitRateHz, FilterPhase, FilterPreset, HalfBandCascade, Modulator,
@@ -25,6 +27,8 @@ struct HarnessConfig {
     overload_policy: OverloadPolicy,
     out_bin: Option<String>,
     out_json: Option<String>,
+    /// Pin the process to the best physical core via the runtime placement resolver.
+    pin: bool,
 }
 
 fn parse_args() -> HarnessConfig {
@@ -40,6 +44,7 @@ fn parse_args() -> HarnessConfig {
         overload_policy: OverloadPolicy::MuteRecover,
         out_bin: None,
         out_json: None,
+        pin: false,
     };
 
     let mut i = 1;
@@ -98,6 +103,9 @@ fn parse_args() -> HarnessConfig {
                 i += 1;
                 config.out_json = Some(args[i].clone());
             }
+            "--pin" => {
+                config.pin = true;
+            }
             other => panic!("Unknown argument: {other}"),
         }
         i += 1;
@@ -125,6 +133,43 @@ fn format_state_json(state: &[f64]) -> String {
     format!("[{}]", elems.join(", "))
 }
 
+/// Pins the calling thread to the core the runtime would give a single DSP worker
+/// (same resolver as `audigma run`; normal scheduling class, no real-time request).
+/// Returns a short description for the JSON report.
+fn pin_like_runtime() -> String {
+    use audigma_settings::{DspThreads, RealtimeMode, RuntimeConfig};
+    let cfg = RuntimeConfig {
+        dsp_threads: DspThreads::Count(1),
+        realtime: RealtimeMode::Off,
+        ..RuntimeConfig::default()
+    };
+    let topo = match audigma_io::read_cpu_topology() {
+        Ok(t) => t,
+        Err(e) => return format!("unpinned (topology unavailable: {e})"),
+    };
+    let placement = match audigma_engine::resolve_placement(Some(&topo), &cfg, 1) {
+        Ok(p) => p,
+        Err(e) => return format!("unpinned (placement failed: {e})"),
+    };
+    let Some(tp) = placement.dsp.first() else {
+        return "unpinned (no worker placement)".to_string();
+    };
+    match audigma_io::apply(tp) {
+        Ok(_) => match &tp.cpus {
+            Some(c) => {
+                let info = topo.cpus.iter().find(|i| Some(&i.id) == c.first());
+                let perf = info
+                    .and_then(|i| i.highest_perf)
+                    .map(|p| format!(", highest_perf {p}"))
+                    .unwrap_or_default();
+                format!("cpu {:?}{perf}", c)
+            }
+            None => "unpinned (resolver returned no cpus)".to_string(),
+        },
+        Err(e) => format!("unpinned (apply failed: {e})"),
+    }
+}
+
 fn main() {
     let _ftz = ScopedFtzDaz::new();
 
@@ -139,7 +184,16 @@ fn main() {
         return;
     }
 
+    if linear_modes::dispatch(&raw_args) {
+        return;
+    }
+
     let config = parse_args();
+    let pin_desc = if config.pin {
+        pin_like_runtime()
+    } else {
+        "unpinned (not requested)".to_string()
+    };
     let (bit_rate, f_bit_hz, cascade_stages, baseband_fs) = parse_rate(&config.rate);
 
     let mut modulator = Modulator::new(
@@ -183,7 +237,13 @@ fn main() {
             run_overload(&config, &mut modulator, f_bit_hz);
         }
         "benchmark" => {
-            run_benchmark(&config, &mut modulator, cascade_stages, baseband_fs);
+            run_benchmark(
+                &config,
+                &mut modulator,
+                cascade_stages,
+                baseband_fs,
+                &pin_desc,
+            );
         }
         other => panic!("Unknown mode: {other}"),
     }
@@ -534,7 +594,7 @@ fn run_multitone(
         TILE_BASEBAND,
     );
 
-    // Multitone: 31 tones from 50 Hz to 18 kHz with random-crest phase
+    // Multitone: 10 tones from 100 Hz to 18 kHz with staggered phases
     let freqs: [f64; 10] = [
         100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 7500.0, 10000.0, 14000.0, 18000.0,
     ];
@@ -680,6 +740,7 @@ fn run_benchmark(
     modulator: &mut Modulator,
     cascade_stages: usize,
     baseband_fs: u32,
+    pin_desc: &str,
 ) {
     let multiplier = 1usize << cascade_stages;
     let tile_baseband: usize = if multiplier >= 512 { 32 } else { 64 };
@@ -711,7 +772,8 @@ fn run_benchmark(
             .unwrap();
     }
 
-    const BENCH_BLOCKS: usize = 2000;
+    // 20k samples: p99.9 is then the 20th-worst block, not the 2nd-worst.
+    const BENCH_BLOCKS: usize = 20_000;
     let mut block_times_ns = Vec::with_capacity(BENCH_BLOCKS);
 
     let total_start = Instant::now();
@@ -758,7 +820,8 @@ fn run_benchmark(
   "p99_micros": {:.3},
   "p999_micros": {:.3},
   "max_micros": {:.3},
-  "p999_percent_of_budget": {:.2}
+  "p999_percent_of_budget": {:.2},
+  "placement": "{}"
 }}"#,
             config.mode,
             config.rate,
@@ -775,7 +838,8 @@ fn run_benchmark(
             p99_ns as f64 / 1000.0,
             p999_ns as f64 / 1000.0,
             max_ns as f64 / 1000.0,
-            p999_percent_of_budget
+            p999_percent_of_budget,
+            pin_desc
         );
         let mut f = File::create(path).unwrap();
         f.write_all(json.as_bytes()).unwrap();

@@ -26,7 +26,8 @@ pub use config::{
 pub use fir::{
     DSD_BYTE_TO_FLOATS, FirError, HalfBandCascade, HalfBandDecimationCascade,
     HalfBandDecimationStage, HalfBandStage, PolyphaseInterpolationStage, PolyphaseMode,
-    PolyphaseResampler, unpack_dsd_bytes_to_floats,
+    PolyphaseResampler, SRC_ASRC_PHASES, SRC_RATIONAL_PHASES, SRC_TAPS_PER_PHASE,
+    unpack_dsd_bytes_to_floats,
 };
 pub use ftz::ScopedFtzDaz;
 pub use modulator::{

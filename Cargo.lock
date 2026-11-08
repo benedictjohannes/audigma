@@ -206,6 +206,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "audigma-measurements"
+version = "0.1.0"
+dependencies = [
+ "audigma-dsp",
+ "audigma-engine",
+ "audigma-io",
+ "audigma-settings",
+]
+
+[[package]]
 name = "audigma-settings"
 version = "0.1.0"
 dependencies = [

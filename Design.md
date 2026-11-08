@@ -73,11 +73,12 @@ crates/
   audigma-configurator/ # Interactive TUI & one-shot Web setup wizard (uses settings + engine/io prober & benchmark)
   audigma-doctor/       # Host OS diagnosis, ALSA/PipeWire lock inspection & interactive remediation (--fix)
   audigma-cli/          # Binary crate (`audigma`): CLI subcommands, Unix control socket, foreground runner
+  audigma-measurements/ # Dev-only harness (`measure_harness`): drives the production DSP types for tools/measure; not shipped
 tools/
   design/                 # Offline scripts to synthesize FIR & Schreier NTF coefficient tables
-  measure/                # Coherent FFT & Welch spectral analysis harness
+  measure/                # Coherent windowed-FFT / impulse-response analysis and report generator (per-family reports)
 docs/
-  measurements/           # Generated SNR/SINAD/stability verification reports
+  measurements/           # Generated per-family verification reports (modulator, cascade, resampler, benchmark) + index
   hardware/               # Probed DAC capability records (e.g., FiiO K17, JadeAudio JA11)
 examples/                 # Ready-to-use TOML configs, MPD snippets, and WirePlumber rules
 ```
@@ -503,12 +504,20 @@ audigma doctor [--fix] [--json]
 
 Every filter preset and modulator order in `audigma-dsp` (`presets.rs`) is verified via automated tests in `tools/measure/`:
 
-1. **Coherent FFT & Welch Protocol:**
+1. **Coherent FFT Protocol (`tools/design/dsm_analysis.py`):**
    - Map 1-bit DSD output to `{-1.0, +1.0}`.
-   - Use coherent test frequencies ($f_{\text{tone}} = k \cdot f_{\text{bit}} / N$, e.g., $N = 1,048,576$) with Welch segment averaging to measure in-band SNR (20 Hz–20 kHz), SINAD/THD+N, and ultrasonic noise power (20–100 kHz and 100 kHz–Nyquist).
-2. **Stability & Envelope Tests:**
+   - Use coherent test frequencies ($f_{\text{tone}} = k \cdot f_{\text{bit}} / N$, $N = 1,048,576$) and one full-record periodic Nuttall window (4-term, continuous first derivative). A noise-shaped record is not periodic, so a rectangular window is invalid, and the window's far-sidelobe decay (not its first sidelobe level) sets the floor: 4-term Blackman-Harris (6 dB/octave) floors at ~145-150 dB. Measure in-band SNR (20 Hz–20 kHz), SINAD/THD+N, THD, worst non-harmonic spur, and ultrasonic noise power (20–100 kHz).
+   - **Analysis floor:** for every modulator, analyse a synthetic non-periodic record with the same NTF-shaped out-of-band noise and a known in-band level; results within 10 dB of that floor are reported as lower bounds only.
+   - **Bit-exact reference:** the direct-modulator record must equal, bit for bit, a Python run of the designed CRFB loop (`simulate_crfb`) on the same input.
+2. **Linear-Path Measurements (`crates/audigma-measurements`, harness modes `cascade-impulse`, `cascade-tone`, `src-tone`, `src-tables`):**
+   - The harness drives the production types (`HalfBandCascade`, `PolyphaseResampler`, the exported `tables`); it never re-implements DSP. Constants the analysis needs (tap and phase counts, resampling ratio) are read back from `audigma-dsp` (`SRC_TAPS_PER_PHASE`, `SRC_RATIONAL_PHASES`, `SRC_ASRC_PHASES`, `PolyphaseResampler::{input_per_output_ratio, table_phases, taps_per_phase}`), so the analysis cannot drift from the implementation.
+   - **Cascade:** the impulse response of the implemented cascade (every preset x phase x apodization, K in {1, 2, 3, 4, 6, 9}) gives passband ripple, droop, image rejection in the bands $k \cdot f_s \pm 20	ext{ kHz}$ and group delay; stage 0 must reproduce `design_halfband.py`, and coherent tones must agree with the impulse-response prediction.
+   - **Resampler:** coherent tones through `new_rational` (every 44.1k/48k matched tier, both directions) and `new_asrc` (several drifts and ratios) give gain, worst spur and residual; the exported tables must equal `design_src.py` bit for bit.
+   - Quality figures here carry **no pass/fail thresholds** until they are derived from stated requirements (DSP quality audit, threshold step). Only method checks (design match, tone vs impulse, tables vs generator) fail the run.
+   - Reports: one file per family in `docs/measurements/` (`modulator.md`, `cascade.md`, `resampler.md`, `benchmark.md`) and an index `report.md`. The benchmark is opt-in (`--benchmark`) because it needs a quiet machine; its last results are kept in `benchmark.json`.
+3. **Stability & Envelope Tests:**
    - Verify bounded integrator states across DC offsets, $-6\text{ dBFS}$ coherent tones, high-crest-factor multitone bursts, digital silence, and forced overload recovery.
-3. **Real-Time Throughput & Deadline Budget:**
+4. **Real-Time Throughput & Deadline Budget:**
    - **Offline gate (`tools/measure/` harness, `audigma benchmark`):** sustained average DSP throughput $\ge 2\times$ real-time on the host CPU, and **p99.9 worker execution time $\le 70\%$** of the audio-block duration, with zero heap allocations inside `process()`. Worker execution time is the time a worker spends processing its tile, excluding wake-up and barrier waits.
    - **Live health (`audigma run`):** the live daemon additionally pays for input DSP, worker wake-up and barrier synchronisation, so its per-tile dispatch time is reported separately and is not held to the 70% gate. Live criteria: zero xruns, starvations and dropped chunks; tiles whose dispatch time exceeds the tile budget are tolerated only while the device buffer absorbs them, and are counted and logged (`late_slice` events).
 

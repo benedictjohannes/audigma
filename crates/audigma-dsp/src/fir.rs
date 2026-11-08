@@ -877,6 +877,15 @@ impl HalfBandDecimationCascade {
     }
 }
 
+/// Taps per polyphase branch, shared by both resampler tables (derived from the tables, the source of truth).
+pub const SRC_TAPS_PER_PHASE: usize = SRC_RATIONAL_160_PHASES[0].len();
+/// Number of phases of the rational (44.1k <-> 48k) table.
+pub const SRC_RATIONAL_PHASES: usize = SRC_RATIONAL_160_PHASES.len();
+/// Number of phases of the ASRC table; the fractional position is quantised to this many steps.
+pub const SRC_ASRC_PHASES: usize = SRC_ASRC_256_PHASES.len();
+
+const _: () = assert!(SRC_ASRC_256_PHASES[0].len() == SRC_TAPS_PER_PHASE);
+
 /// Mode of operation for the polyphase resampler.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PolyphaseMode {
@@ -936,7 +945,7 @@ impl PolyphaseResampler {
             }
         };
 
-        const TAPS: usize = 48;
+        const TAPS: usize = SRC_TAPS_PER_PHASE;
         Ok(Self {
             mode: PolyphaseMode::Rational {
                 phase_step,
@@ -952,7 +961,7 @@ impl PolyphaseResampler {
     /// Creates a continuous ASRC resampler referenced to a nominal conversion ratio.
     pub fn new_asrc(in_rate: PcmRateHz, out_rate: PcmRateHz) -> Self {
         let nominal_ratio = in_rate.get() as f64 / out_rate.get() as f64;
-        const TAPS: usize = 48;
+        const TAPS: usize = SRC_TAPS_PER_PHASE;
         Self {
             mode: PolyphaseMode::Asrc {
                 nominal_ratio,
@@ -973,6 +982,33 @@ impl PolyphaseResampler {
         {
             *drift_ppm = ppm;
         }
+    }
+
+    /// Input frames consumed per output frame at the current setting (`in_rate / out_rate`, drift included).
+    pub fn input_per_output_ratio(&self) -> f64 {
+        match self.mode {
+            PolyphaseMode::Rational {
+                phase_step,
+                num_phases,
+            } => phase_step as f64 / num_phases as f64,
+            PolyphaseMode::Asrc {
+                nominal_ratio,
+                drift_ppm,
+            } => nominal_ratio * (1.0 + drift_ppm * 1e-6),
+        }
+    }
+
+    /// Number of table phases the fractional position is quantised to (160 rational, 256 ASRC).
+    pub fn table_phases(&self) -> usize {
+        match self.mode {
+            PolyphaseMode::Rational { .. } => SRC_RATIONAL_PHASES,
+            PolyphaseMode::Asrc { .. } => SRC_ASRC_PHASES,
+        }
+    }
+
+    /// Taps per polyphase branch.
+    pub fn taps_per_phase(&self) -> usize {
+        self.taps_per_phase
     }
 
     /// Resets delay line and phase accumulators to zero.
@@ -998,7 +1034,9 @@ impl PolyphaseResampler {
                 let step_f = phase_step as f64 / num_phases as f64;
                 while in_idx < input.len() && out_idx < output.len() {
                     while self.phase_acc < 1.0 && out_idx < output.len() {
-                        let phase_idx = ((self.phase_acc * 160.0).floor() as usize).min(159);
+                        let phase_idx = ((self.phase_acc * SRC_RATIONAL_PHASES as f64).floor()
+                            as usize)
+                            .min(SRC_RATIONAL_PHASES - 1);
                         let filter_phase = &SRC_RATIONAL_160_PHASES[phase_idx];
 
                         // Convolve 48 taps with delay line history
@@ -1033,7 +1071,9 @@ impl PolyphaseResampler {
                 let ratio = nominal_ratio * (1.0 + drift_ppm * 1e-6);
                 while in_idx < input.len() && out_idx < output.len() {
                     while self.phase_acc < 1.0 && out_idx < output.len() {
-                        let phase_idx = ((self.phase_acc * 256.0).floor() as usize).min(255);
+                        let phase_idx = ((self.phase_acc * SRC_ASRC_PHASES as f64).floor()
+                            as usize)
+                            .min(SRC_ASRC_PHASES - 1);
                         let filter_phase = &SRC_ASRC_256_PHASES[phase_idx];
 
                         let window_start = self.head + 1;
