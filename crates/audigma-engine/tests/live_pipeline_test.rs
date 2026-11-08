@@ -252,9 +252,9 @@ transport = "native"
 {target}
 [gain]
 overload_policy = "mute-recover"
-[clock]
-mode = "adaptive-input"
-max_correction_ppm = 500
+[resampler]
+drift_correction = "on"
+max_clock_drift_ppm = 500
 "#
     ))
     .unwrap()

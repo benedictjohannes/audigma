@@ -1,0 +1,82 @@
+# Configurator metadata for the [logging] section. Shape: see `Field` in src/meta/mod.rs.
+# `key` is relative to the section; the file name gives the section.
+
+[section]
+title = "Logging"
+summary = "Log format, level and the missed-deadline report interval."
+description = "Command-line flags and environment variables override these values."
+advanced = true
+
+[[field]]
+key = "format"
+summary = "How log lines are written to stderr."
+description = """
+- `text`: human-readable lines.
+- `json`: one JSON object per line, for log collectors.
+- `auto`: `text` when stderr is a terminal, otherwise `json`.
+
+Precedence, highest first: `--log-format`, the `AUDIGMA_LOG_FORMAT` environment variable, this setting.
+"""
+default = "text"
+
+[[field.options]]
+key = "text"
+label = "Text"
+summary = "Human-readable lines."
+
+[[field.options]]
+key = "json"
+label = "JSON"
+summary = "One JSON object per line."
+
+[[field.options]]
+key = "auto"
+label = "Auto"
+summary = "Text on a terminal, JSON otherwise."
+
+[[field]]
+key = "level"
+summary = "Minimum severity that is logged."
+description = """
+Precedence, highest first: `--log-level`, the `AUDIGMA_LOG` or `RUST_LOG` environment variables, this setting.
+
+The value is passed on as a filter, so a per-module directive such as `info,audigma::late=debug` is also accepted here. The configurator offers only the plain levels.
+"""
+default_text = "info for run; warn for the other commands"
+
+[[field.options]]
+key = "error"
+label = "Error"
+summary = "Only failures."
+
+[[field.options]]
+key = "warn"
+label = "Warn"
+summary = "Failures and warnings."
+
+[[field.options]]
+key = "info"
+label = "Info"
+summary = "Adds lifecycle events such as stream start and rate changes."
+
+[[field.options]]
+key = "debug"
+label = "Debug"
+summary = "Adds diagnostic detail."
+
+[[field.options]]
+key = "trace"
+label = "Trace"
+summary = "Everything, including per-event detail. Very verbose."
+
+[[field]]
+key = "late_tile_report_interval_ms"
+summary = "How often missed-deadline episodes are summarized (ms)."
+description = """
+When the DSP does not finish a block before its deadline, audigma does not log each miss. It aggregates them and writes one `late_slice` record per interval, with timing statistics per worker.
+
+Values below 100 ms are raised to 100 ms.
+"""
+default = 10000
+range = [100, 3600000]
+applies_to = ["run"]

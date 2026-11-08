@@ -64,6 +64,9 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
     let content = std::fs::read_to_string(&config_path)?;
     let mut settings = Settings::from_toml_str(&content)?;
     settings.validate()?;
+    for warning in settings.warnings() {
+        tracing::warn!(event = "config_warning", "{warning}");
+    }
 
     // Take the single-instance lock before touching any device or PipeWire node, so a duplicate
     // instance fails fast without disturbing the running one.

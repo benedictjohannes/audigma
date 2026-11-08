@@ -1,0 +1,55 @@
+# Catalogue of configurator assists. Shape: see `Assist` in src/meta/mod.rs.
+# A field opts in with `assist = ["<id>"]`.
+[[assist]]
+id = "alsa-detect"
+kind = "probe"
+label = "Detect ALSA devices"
+fills = ["output.device", "output.transport", "output.dop_sample_format", "output.mixer_control", "target.dsd_rate", "target.sample_format"]
+
+[[assist]]
+id = "pipewire-sinks"
+kind = "probe"
+label = "List PipeWire sinks"
+fills = ["output.target_node"]
+
+[[assist]]
+id = "capability-check"
+kind = "check"
+label = "Check against detected device"
+fills = []
+
+[[assist]]
+id = "benchmark-discover"
+kind = "benchmark"
+label = "Discover compute capability"
+fills = ["target.pcm_rate_hz", "target.dsd_rate"]
+
+[[assist]]
+id = "benchmark-validate"
+kind = "benchmark"
+label = "Validate on this machine"
+fills = []
+
+[[assist]]
+id = "quality-starting-point"
+kind = "preset"
+label = "Starting point"
+fills = ["resampler.phase", "resampler.apodization", "resampler.modulator_order"]
+
+[[assist.presets]]
+key = "neutral"
+label = "Neutral"
+summary = "Linear phase, flat to 20 kHz, 5th order. The default."
+values = { "resampler.phase" = "linear", "resampler.apodization" = "off", "resampler.modulator_order" = 5 }
+
+[[assist.presets]]
+key = "apodizing"
+label = "Apodizing"
+summary = "Minimum phase, 19 kHz edge, 5th order. No pre-ringing from this stage; about -0.8 dB at 20 kHz."
+values = { "resampler.phase" = "minimum", "resampler.apodization" = "gentle", "resampler.modulator_order" = 5 }
+
+[[assist.presets]]
+key = "low-latency"
+label = "Low latency"
+summary = "Minimum phase, flat to 20 kHz, 5th order. Delay about 0.1 ms instead of 1.3 ms."
+values = { "resampler.phase" = "minimum", "resampler.apodization" = "off", "resampler.modulator_order" = 5 }

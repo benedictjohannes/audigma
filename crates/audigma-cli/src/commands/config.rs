@@ -54,6 +54,9 @@ pub fn run_config(args: ConfigArgs) -> Result<(), CliError> {
             let settings = Settings::from_toml_str(&content)?;
             settings.validate()?;
             println!("Configuration '{}' is valid.", path.display());
+            for warning in settings.warnings() {
+                eprintln!("warning: {warning}");
+            }
             Ok(())
         }
         ConfigCommands::Explain {

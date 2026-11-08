@@ -1,0 +1,176 @@
+# Configurator metadata for the [input] section. Shape: see `Field` in src/meta/mod.rs.
+# `key` is relative to the section; the file name gives the section.
+
+[section]
+title = "Input"
+summary = "Where audio comes from and which formats are accepted."
+description = "The virtual PipeWire sink that applications play into, plus how files and stdin are interpreted. Most of it only matters for `audigma run`; the sample format of raw stdin matters for `play` and `convert`."
+
+[[field]]
+key = "backend"
+summary = "Live audio input backend."
+description = """
+Creates a virtual audio device (a sink) that your music players, browsers and desktop apps can play into.
+
+`pipewire` is currently the only live input and the default, so this key can be omitted. Only `audigma run` uses this setting. The offline commands (`convert`, `play`) take their input from the command line (`-i <file>`, or `-i -` for raw stdin) and ignore it.
+"""
+default = "pipewire"
+applies_to = ["run"]
+
+[[field.options]]
+key = "pipewire"
+label = "PipeWire sink"
+summary = "Virtual sink that applications play into."
+
+[[field]]
+key = "node_name"
+summary = "Name of the virtual sink in PipeWire."
+description = """
+The name that apps and tools such as `wpctl` show for audigma's sink.
+
+Leave it unset and audigma names the sink after the running instance (`audigma_sink_<instance>`), so multiple daemons never collide. Set it only if you need a stable custom name, and then give every instance its own.
+"""
+default_text = "unset; derived as audigma_sink_<instance>"
+applies_to = ["run"]
+
+[[field]]
+key = "sample_format"
+summary = "Sample encoding of raw stdin input."
+description = """
+Only `audigma convert -i -` and `audigma play -i -` use this setting, because a headerless stream cannot describe itself.
+
+`audigma run` ignores this setting (the PipeWire graph delivers `f32`), and so does file input (the container header defines the format).
+"""
+default = "s16le"
+applies_to = ["convert", "play"]
+
+[[field.options]]
+key = "s16le"
+label = "16-bit"
+summary = "16-bit signed integer."
+
+[[field.options]]
+key = "s24le"
+label = "24-bit (32-bit container)"
+summary = "24-bit signed integer in a 32-bit word."
+
+[[field.options]]
+key = "s24_3le"
+label = "24-bit packed"
+summary = "24-bit signed integer in 3 bytes."
+
+[[field.options]]
+key = "s32le"
+label = "32-bit"
+summary = "32-bit signed integer."
+
+[[field.options]]
+key = "f32"
+label = "32-bit float"
+summary = "32-bit floating point."
+
+[[field]]
+key = "rate_hz"
+summary = "Input sample rate."
+description = """
+For raw stdin (`-i -`) this is the true rate of the stream.
+
+For the live PipeWire sink it is only the initial rate the sink advertises and prepares the pipeline for. With `rate_mode = "dynamic"` the sink then follows each application's actual rate and the pipeline re-prepares on change.
+"""
+default_text = "48000 for the live PipeWire sink; 44100 for raw stdin"
+
+[[field]]
+key = "channels"
+summary = "Number of input channels."
+description = """
+Fixed for the lifetime of the daemon, because the DSP worker pool is sized from it. Combine it with `channel_positions` for non-standard layouts.
+
+Offline file input is always conditioned to stereo, so for offline use this only matters for raw stdin (`-i -`).
+"""
+default = 2
+
+[[field]]
+key = "channel_positions"
+summary = "Channel order and meaning."
+description = """
+The list length must match `channels`. Recognized tokens: `FL FR FC LFE RL RR SL SR MONO RC FLC FRC UNKNOWN[_n]`.
+
+The declared order is kept exactly, never normalized, so `["FR", "FL"]` deliberately swaps stereo. Leave it unset for standard layouts.
+"""
+default_text = "synthesized from channels: 1 MONO; 2 FL FR; 4 FL FR RL RR; 6 FL FR FC LFE RL RR; 8 adds SL SR; otherwise UNKNOWN_n"
+
+[[field]]
+key = "rate_mode"
+summary = "Whether the virtual sink follows the application's sample rate."
+description = """
+- `dynamic`: advertises every rate in `allowed_rates`, so PipeWire lets each app play at its native rate and does not resample a single input stream. All upsampling is then left to audigma.
+- `fixed`: advertises only `rate_hz`, so PipeWire resamples everything to that rate first. Not recommended, because the double resampling lowers quality.
+"""
+default = "dynamic"
+applies_to = ["run"]
+
+[[field.options]]
+key = "dynamic"
+label = "Dynamic"
+summary = "Advertise every allowed rate; apps play at their native rate."
+
+[[field.options]]
+key = "fixed"
+label = "Fixed"
+summary = "Advertise only rate_hz; PipeWire resamples everything to it."
+
+[[field]]
+key = "allowed_rates"
+summary = "Sample rates the virtual sink accepts from applications."
+description = """
+Rates left out are resampled by PipeWire to an allowed rate before audigma sees them.
+
+Keep both rate families (multiples of 44.1 kHz and of 48 kHz) so `target.rate_family = "source"` has something to follow. Trim the list only if a specific app misbehaves at high rates.
+"""
+default = [44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000]
+show_if = { key = "input.rate_mode", eq = "dynamic" }
+applies_to = ["run"]
+
+[[field]]
+key = "allow_dsd"
+summary = "Accept DSD streams from applications."
+description = """
+When enabled, the PipeWire sink also advertises DSD input capability. An incoming DSD stream then makes the sink operate exclusively, which disables mixing of multiple app sources.
+
+When disabled, either PipeWire or the source may convert DSD to PCM, which lowers quality, or a source configured never to resample may stall with no audio.
+
+Suited to dedicated music boxes with DSD players such as MPD; usually left off on desktop PCs where other apps need to share the sink.
+"""
+default = false
+applies_to = ["run"]
+recommended.headless-appliance = { value = true, why = "you have DSD sources and DSD-transport-capable players (like MPD)." }
+recommended.interactive-desktop = { value = false, why = "keeps PipeWire's mixer always available; no DSD stream takes the sink exclusively." }
+
+[[field]]
+key = "dsd"
+kind = "group"
+summary = "DSD input processing."
+description = "Settings for the DSD to PCM decimation stage applied to DSD input."
+show_if = { key = "input.allow_dsd", eq = true }
+
+[[field]]
+key = "dsd.max_intermediate_rate_hz"
+summary = "Upper limit for the PCM rate DSD is decimated to."
+description = """
+The intermediate rate is min(useful input rate, useful output rate, this cap).
+
+A lower cap saves CPU in DSD-in/DSD-out chains, at the cost of ultrasonic content you would not hear anyway. Leave it unset unless a benchmark confirms that lowering it helps.
+"""
+default_text = "unset (no cap)"
+assist = ["benchmark-validate"]
+
+[[field]]
+key = "dsd.gain_db"
+summary = "Level alignment applied after DSD decimation."
+description = """
+SACD reference level sits 6 dB below full scale in the raw 1-bit stream. The default +6.0 dB brings 0 dB SACD to 0 dBFS PCM, so DSD and PCM tracks play at matched loudness.
+
+Change it only to deliberately attenuate or boost DSD relative to PCM. Headroom for the result is handled by `[gain]`.
+"""
+default = 6.0
+range = [-30.0, 30.0]

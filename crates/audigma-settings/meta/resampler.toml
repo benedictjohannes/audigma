@@ -1,0 +1,141 @@
+# Configurator metadata for the [resampler] section. Shape: see `Field` in src/meta/mod.rs.
+# `key` is relative to the section; the file name gives the section.
+
+[section]
+title = "Resampler"
+summary = "Filter and modulator choices used for upsampling, and drift correction."
+description = "Filter phase, how the first upsampling stage rolls off near 20 kHz, and the order of the 1-bit modulator for DSD targets. The defaults are flat to 20 kHz with a linear-phase filter."
+
+[[field]]
+key = "phase"
+summary = "Filter phase response."
+description = """
+Selects the phase behaviour of the interpolation filters:
+
+- `linear`: symmetric impulse response. All frequencies stay time-aligned, but the filter rings before sharp transients as well as after them (pre-ringing). Delay is about 1.3 ms.
+- `minimum`: asymmetric impulse response. No pre-ringing from this stage; all ringing follows the transient. Delay is about 0.1 ms, but frequencies are delayed unevenly (phase shift, mostly towards the top of the band).
+
+Both are equally flat in level across the audio band.
+"""
+default = "linear"
+assist = ["quality-starting-point"]
+
+[[field.options]]
+key = "linear"
+label = "Linear phase"
+summary = "Symmetric filter; pre- and post-ringing; no phase shift."
+
+[[field.options]]
+key = "minimum"
+label = "Minimum phase"
+summary = "No pre-ringing, lower delay; uneven phase response."
+
+[[field]]
+key = "apodization"
+summary = "Trade top-of-band level for less ringing."
+description = """
+Applies to the first upsampling stage only. It decides where that stage rolls off:
+
+- `off`: flat to 20 kHz, then a steep cutoff with full rejection at 24.1 kHz.
+- `gentle` (alias for `19000`): rolls off from a 19 kHz edge, with about -0.8 dB at 20 kHz.
+- `18000` / `18500` / `19000` / `20000`: the pass edge in Hz. The response rolls off from the edge and reaches full rejection at 22.05 kHz, which shortens the ringing at the cost of attenuating the top of the audio band. Measured level at 20 kHz: about -5.7 dB (18000), -2.8 dB (18500), -0.8 dB (19000), 0 dB (20000). The 20000 stage is flat at 20 kHz (its -3 dB point is 20.9 kHz) but is the longest filter (409 taps) and costs noticeably more CPU at DSD64.
+
+For 48 kHz sources the edge is scaled by 48/44.1. Whether the shorter ringing is audible is a matter of taste; the level loss is measurable.
+"""
+default = "off"
+
+[[field.options]]
+key = "off"
+label = "Off"
+summary = "Flat to 20 kHz, steepest cutoff."
+
+[[field.options]]
+key = "gentle"
+label = "Gentle (19 kHz edge)"
+summary = "Rolls off from 19 kHz; about -0.8 dB at 20 kHz; less ringing. Alias for 19000."
+caution = "Attenuates the top of the audio band (above about 19 kHz)."
+
+[[field.options]]
+key = "18000"
+label = "18 kHz edge"
+summary = "Strongest roll-off; about -5.7 dB at 20 kHz."
+caution = "Attenuates the top of the audio band (above about 18 kHz)."
+
+[[field.options]]
+key = "18500"
+label = "18.5 kHz edge"
+summary = "Roll-off from 18.5 kHz; about -2.8 dB at 20 kHz."
+caution = "Attenuates the top of the audio band (above about 18.5 kHz)."
+
+[[field.options]]
+key = "20000"
+label = "20 kHz edge"
+summary = "Mildest roll-off; flat at 20 kHz, -3 dB at 20.9 kHz; longest stage."
+
+[[field]]
+key = "modulator_order"
+summary = "Order of the 1-bit delta-sigma modulator."
+description = """
+`5` or `7`. This setting only applies to DSD targets; PCM targets ignore it.
+
+The 5th order is the default, and the better choice at DSD64, where the 7th order is limited by dither noise. In our measurements the 7th order costs about 10 percent more CPU and shows no consistent benefit at any rate, so keep `5` unless you have verified a gain on your own setup.
+"""
+default = 5
+show_if = { key = "target.format", eq = "dsd" }
+assist = ["benchmark-validate"]
+
+[[field.options]]
+key = "5"
+label = "5th order"
+summary = "Default modulator."
+
+[[field.options]]
+key = "7"
+label = "7th order"
+summary = "Higher-order noise shaping; about 10% more CPU."
+
+[[field]]
+key = "drift_correction"
+summary = "Whether the input is resampled to follow the output clock."
+description = """
+Only `audigma run` uses this setting.
+
+The virtual sink and the output device run on different clocks. When their rates differ by even a few parts per million, the queue between them slowly runs empty or full. Drift correction resamples the input by a tiny, continuously adjusted ratio to keep the queue level. The correction runs at the low baseband rate, never on DSD bits.
+
+- `auto`: on for `output.backend = "alsa"`, where the DAC clock is master; off for `"pipewire"`, where the output stream is rate-matched by PipeWire. Recommended.
+- `on`: always correct drift. With a PipeWire output this adds a resampler without an expected benefit.
+- `off`: never correct drift. Usage with an ALSA output is unsupported: the DAC clock and the input are not locked, so expect dropouts or clicks over long playback.
+
+A warning is shown for the two combinations that contradict the output backend. If the key is left out, it is `auto`.
+"""
+default = "auto"
+applies_to = ["run"]
+
+[[field.options]]
+key = "auto"
+label = "Automatic"
+summary = "On for ALSA output, off for PipeWire output."
+
+[[field.options]]
+key = "on"
+label = "On"
+summary = "Always resample the input to follow the output clock."
+
+[[field.options]]
+key = "off"
+label = "Off"
+summary = "Never correct drift."
+caution = "Unsupported with an ALSA output: expect dropouts or clicks over long playback."
+
+[[field]]
+key = "max_clock_drift_ppm"
+summary = "Largest drift correction applied to the input (parts per million)."
+description = """
+Limits how far the drift controller may stretch or squeeze the input rate. 500 ppm is a 0.05 % change of rate. Real clocks normally differ by tens of ppm.
+
+If the measured drift exceeds this limit, the stream goes through a controlled fault and recovery sequence instead of silently dropping or repeating samples.
+"""
+default = 500
+range = [1, 10000]
+show_if = { any = [{ key = "resampler.drift_correction", eq = "on" }, { all = [{ key = "resampler.drift_correction", eq = "auto" }, { key = "output.backend", eq = "alsa" }] }] }
+applies_to = ["run"]

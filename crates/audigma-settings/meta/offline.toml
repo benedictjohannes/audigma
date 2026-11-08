@@ -1,0 +1,79 @@
+# Configurator metadata for the [offline] section. Shape: see `Field` in src/meta/mod.rs.
+# `key` is relative to the section; the file name gives the section.
+
+[section]
+title = "Offline conversion"
+summary = "How `audigma convert` handles file ends, reports and DSF padding."
+description = "Applies to file conversion only. Live playback ignores it."
+applies_to = ["convert"]
+advanced = true
+
+[[field]]
+key = "tail_policy"
+summary = "What to do with the filter delay at the start and end of a file."
+description = """
+Only `audigma convert` uses this setting.
+
+Every filter delays the signal and keeps ringing after the last input sample. This decides how the converted file handles that:
+
+- `trim-to-duration`: drops the initial filter delay and stops at exactly `input frames × output rate / input rate` frames, so the output has the same duration as the input and is time-aligned with it. Consecutive album tracks stay gapless.
+- `preserve-tail`: keeps the filter ringing after the last input sample until it has died away. The file is slightly longer than the input.
+"""
+default = "trim-to-duration"
+applies_to = ["convert"]
+recommended.offline-conversion = { value = "trim-to-duration", why = "output length equals input length, so album tracks stay gapless." }
+
+[[field.options]]
+key = "trim-to-duration"
+label = "Trim to duration"
+summary = "Same duration as the input; time-aligned."
+
+[[field.options]]
+key = "preserve-tail"
+label = "Preserve tail"
+summary = "Keep the ringing after the last sample; slightly longer file."
+
+[[field]]
+key = "write_report"
+summary = "Print the conversion report as JSON."
+description = """
+Only `audigma convert` uses this setting.
+
+When `true`, the conversion summary (frame counts, bytes written, measured peak, applied gain, overload count, elapsed time) is printed to stderr as JSON, as if `--json` were given. When `false`, a short human-readable summary is printed instead.
+"""
+default = false
+applies_to = ["convert"]
+
+[[field.options]]
+key = "false"
+label = "Text summary"
+summary = "Human-readable summary on stderr."
+
+[[field.options]]
+key = "true"
+label = "JSON report"
+summary = "Machine-readable JSON on stderr."
+
+[[field]]
+key = "dsf_pad_mode"
+summary = "How to fill the unused end of the last DSF block."
+description = """
+DSF files store audio in 4096-byte blocks per channel, so the last block is usually only partly used. The header records the exact sample count, and this setting decides what fills the rest:
+
+- `spec-zero`: `0x00` bytes, as the DSF specification says.
+- `dsd-silence`: `0x69`, a balanced DSD idle pattern. Players that ignore the recorded sample count then play silence at the end instead of the all-zero pattern, which is not silence in DSD.
+"""
+default = "spec-zero"
+show_if = { key = "output.container", eq = "dsf" }
+applies_to = ["convert"]
+
+[[field.options]]
+key = "spec-zero"
+label = "Specification (0x00)"
+summary = "Pad with zero bytes, as the DSF specification says."
+
+[[field.options]]
+key = "dsd-silence"
+label = "DSD silence (0x69)"
+summary = "Pad with a balanced silence pattern."
+description = "Safer with players that ignore the recorded sample count."

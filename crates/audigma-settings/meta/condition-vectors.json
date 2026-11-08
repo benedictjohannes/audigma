@@ -1,0 +1,20 @@
+[
+  {"name": "eq string true", "condition": {"key": "output.backend", "eq": "alsa"}, "values": {"output.backend": "alsa"}, "expected": true},
+  {"name": "eq string false", "condition": {"key": "output.backend", "eq": "alsa"}, "values": {"output.backend": "pipewire"}, "expected": false},
+  {"name": "eq bool", "condition": {"key": "input.allow_dsd", "eq": true}, "values": {"input.allow_dsd": true}, "expected": true},
+  {"name": "eq number int vs float", "condition": {"key": "a.b", "eq": 6}, "values": {"a.b": 6.0}, "expected": true},
+  {"name": "eq negative number", "condition": {"key": "output.device_wait_ms", "eq": -1}, "values": {"output.device_wait_ms": -1}, "expected": true},
+  {"name": "eq unresolved is false", "condition": {"key": "a.b", "eq": "x"}, "values": {}, "expected": false},
+  {"name": "neq differs", "condition": {"key": "a.b", "neq": "x"}, "values": {"a.b": "y"}, "expected": true},
+  {"name": "neq same", "condition": {"key": "a.b", "neq": "x"}, "values": {"a.b": "x"}, "expected": false},
+  {"name": "neq unresolved is true", "condition": {"key": "a.b", "neq": "x"}, "values": {}, "expected": true},
+  {"name": "in member", "condition": {"key": "a.b", "in": ["x", "y"]}, "values": {"a.b": "y"}, "expected": true},
+  {"name": "in non-member", "condition": {"key": "a.b", "in": ["x", "y"]}, "values": {"a.b": "z"}, "expected": false},
+  {"name": "in unresolved is false", "condition": {"key": "a.b", "in": ["x"]}, "values": {}, "expected": false},
+  {"name": "in numbers", "condition": {"key": "a.b", "in": [1, 2.5]}, "values": {"a.b": 2.5}, "expected": true},
+  {"name": "all true", "condition": {"all": [{"key": "a.b", "eq": "x"}, {"key": "c.d", "in": [1, 2]}]}, "values": {"a.b": "x", "c.d": 2}, "expected": true},
+  {"name": "all one false", "condition": {"all": [{"key": "a.b", "eq": "x"}, {"key": "c.d", "in": [1, 2]}]}, "values": {"a.b": "x", "c.d": 3}, "expected": false},
+  {"name": "any one true", "condition": {"any": [{"key": "a.b", "eq": "x"}, {"key": "c.d", "eq": 1}]}, "values": {"a.b": "q", "c.d": 1}, "expected": true},
+  {"name": "any none true", "condition": {"any": [{"key": "a.b", "eq": "x"}, {"key": "c.d", "eq": 1}]}, "values": {"a.b": "q", "c.d": 2}, "expected": false},
+  {"name": "nested", "condition": {"all": [{"any": [{"key": "a.b", "eq": 1}, {"key": "a.b", "eq": 2}]}, {"key": "c.d", "neq": false}]}, "values": {"a.b": 2, "c.d": true}, "expected": true}
+]

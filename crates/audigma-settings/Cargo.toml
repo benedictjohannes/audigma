@@ -13,3 +13,12 @@ audigma-format = { path = "../audigma-format" }
 serde = { workspace = true }
 thiserror = { workspace = true }
 toml = { workspace = true }
+serde_json = { workspace = true, optional = true }
+
+[features]
+# Typed configurator metadata (`meta/*.toml`) and its loader.
+meta = ["dep:serde_json"]
+
+[dev-dependencies]
+# Run the metadata tests in a plain `cargo test`.
+audigma-settings = { path = ".", features = ["meta"] }

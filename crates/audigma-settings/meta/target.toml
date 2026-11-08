@@ -1,0 +1,203 @@
+# Configurator metadata for the [target] section. Shape: see `Field` in src/meta/mod.rs.
+# `key` is relative to the section; the file name gives the section.
+
+[section]
+title = "Target"
+summary = "The format audigma produces: PCM or DSD, and at what rate."
+description = "Sets the final output format and rate, the rate family policy, and for PCM the sample format and dither. Everything upstream of the DAC is converted to this."
+
+[[field]]
+key = "format"
+summary = "Output stream format: PCM or DSD."
+description = """
+Selects whether audigma outputs high-rate PCM or remodulates the audio into a 1-bit DSD stream. This choice affects everything else in `[target]`.
+
+Many modern delta-sigma DACs convert incoming PCM to a high-rate delta-sigma stream internally, using on-chip filters that are limited by power and silicon budget. Feeding such a DAC DSD moves that oversampling and noise shaping onto your computer's CPU, and most of these DACs then skip their own digital interpolation filters. How much of the DAC's internal chain is bypassed depends on the chip, so check your DAC's documentation.
+
+High-rate PCM upsamples to rates such as 384 or 768 kHz, which moves filter imaging and ringing well above the audible band, and needs far less CPU than real-time DSD modulation.
+"""
+required_for = ["run", "play", "convert"]
+assist = ["capability-check"]
+
+[[field.options]]
+key = "pcm"
+label = "PCM"
+summary = "High-rate PCM (e.g. 192 kHz to 768 kHz)."
+description = """
+Upsamples with the resampler filter chain and quantizes to the chosen sample format. Works with PipeWire, exclusive ALSA, and WAV/FLAC files.
+"""
+
+[[field.options]]
+key = "dsd"
+label = "DSD"
+summary = "1-bit delta-sigma stream (DSD64 to DSD512)."
+description = """
+Upsamples and remodulates to 1 bit. Requires exclusive ALSA (native DSD or DoP transport) or a DSF/raw file. Needs far more CPU than PCM at the same quality.
+"""
+caution = "DSD output cannot use the PipeWire output backend."
+
+[[field]]
+key = "rate_family"
+summary = "How the output clock follows the source."
+description = """
+Sample rates come in two families: multiples of 44.1 kHz (44.1, 88.2, 176.4, 352.8 kHz and the DSD rates) and multiples of 48 kHz (48, 96, 192, 384 kHz).
+
+- `source`: switches the output between the two families to follow each track, so the conversion uses only pure power-of-two interpolation (best quality and efficient). The DAC relocks its clock when the family changes, which on some DACs is audible as a relay click or a short delay.
+- `44100` or `48000`: pins the output clock to that family. The DAC never relocks (no clicks or delays when switching between apps), and sources from the other family are bridged by rational resampling.
+
+Keep it on `source` unless your DAC has problems with rate switching.
+"""
+default = "source"
+recommended.interactive-desktop = { value = "source", why = "pure power-of-two upsampling per track; a music box has no app switching to cause relocks." }
+recommended.headless-appliance = { value = "source", why = "pure power-of-two upsampling per track; a music box has no app switching to cause relocks." }
+recommended.offline-conversion = { value = "source", why = "each file keeps its own family without cross-family resampling." }
+
+[[field.options]]
+key = "source"
+label = "Follow source"
+summary = "Switch between 44.1 kHz and 48 kHz families per track."
+description = """
+44.1 kHz-family sources get a 44.1 kHz-family target; 48 kHz and other sources get the 48 kHz family. Every conversion is a pure power-of-two step, at the cost of a DAC clock relock whenever the family changes.
+"""
+
+[[field.options]]
+key = "44100"
+label = "Pin 44.1 kHz family"
+summary = "Always output in the 44.1 kHz family."
+description = """
+Zero relock. 48 kHz-family sources are bridged by rational resampling.
+"""
+
+[[field.options]]
+key = "48000"
+label = "Pin 48 kHz family"
+summary = "Always output in the 48 kHz family."
+description = """
+Zero relock. 44.1 kHz-family sources are bridged by rational resampling.
+"""
+
+[[field]]
+key = "pcm_rate_hz"
+summary = "PCM output sample rate."
+description = """
+Any multiple of 44.1 kHz or 48 kHz (for example 96000, 192000, 384000, 705600, 768000).
+
+This sets the rate *tier*. When the output family is pinned, or follows the source into the other family, the matching rate in that family is used: 192000 in the 48 kHz family becomes 176400 in the 44.1 kHz family.
+
+Higher tiers move more of the filtering above the audible band but cost proportionally more CPU, and must be supported by the DAC.
+"""
+show_if = { key = "target.format", eq = "pcm" }
+required_if = { key = "target.format", eq = "pcm" }
+assist = ["alsa-detect", "capability-check", "benchmark-discover"]
+
+[[field]]
+key = "dsd_rate"
+summary = "DSD output rate."
+description = """
+The DSD multiplier. It resolves to the 44.1 kHz-family or 48 kHz-family bit rate according to `rate_family`: DSD256, for example, is 11.2896 MHz in the 44.1 kHz family and 12.288 MHz in the 48 kHz family.
+
+Higher rates need more CPU and a DAC that supports them over your chosen transport (native DSD or DoP).
+"""
+show_if = { key = "target.format", eq = "dsd" }
+required_if = { key = "target.format", eq = "dsd" }
+assist = ["alsa-detect", "capability-check", "benchmark-discover"]
+
+[[field.options]]
+key = "dsd64"
+label = "DSD64"
+summary = "2.8224 MHz (44.1 kHz family) / 3.072 MHz (48 kHz family)."
+
+[[field.options]]
+key = "dsd128"
+label = "DSD128"
+summary = "5.6448 MHz / 6.144 MHz."
+
+[[field.options]]
+key = "dsd256"
+label = "DSD256"
+summary = "11.2896 MHz / 12.288 MHz."
+
+[[field.options]]
+key = "dsd512"
+label = "DSD512"
+summary = "22.5792 MHz / 24.576 MHz."
+description = """
+Very CPU-heavy; verify with a benchmark before relying on it for live playback.
+"""
+caution = "Needs a DAC and USB link that support DSD512 and enough CPU for real-time modulation."
+
+[[field]]
+key = "sample_format"
+summary = "PCM sample encoding."
+description = """
+Sample word format of the PCM output. Applies to exclusive ALSA and file outputs only. Use the integer format your DAC or file container takes; `s32le` is the usual choice for 24-bit DACs. Integer formats are quantized with dither on the live path.
+
+PipeWire output ignores this setting and always uses `f32`, because the graph carries unquantized floating point.
+"""
+show_if = { all = [
+  { key = "target.format", eq = "pcm" },
+  { key = "output.backend", neq = "pipewire" },
+] }
+default = "s32le"
+assist = ["alsa-detect"]
+
+[[field.options]]
+key = "s16le"
+label = "16-bit"
+summary = "16-bit signed integer."
+
+[[field.options]]
+key = "s24le"
+label = "24-bit (32-bit container, low-justified)"
+summary = "24-bit signed integer in a 32-bit word."
+
+[[field.options]]
+key = "s24_3le"
+label = "24-bit packed"
+summary = "24-bit signed integer in 3 bytes."
+
+[[field.options]]
+key = "s32le"
+label = "32-bit"
+summary = "32-bit signed integer (24-bit DACs take the top bits)."
+
+[[field.options]]
+key = "f32"
+label = "32-bit float"
+summary = "32-bit floating point, unquantized."
+
+[[field]]
+key = "dither"
+summary = "Dither applied when quantizing."
+description = """
+`tpdf` adds triangular-PDF dither in the 1-bit modulator and, for live integer PCM output, before quantization. This keeps quantization error uncorrelated with the music. Offline PCM file output does not dither yet.
+
+`none` disables it. Results are bit-exact, but quantization error becomes correlated with the signal at low levels. Leave it on `tpdf` unless you are testing.
+"""
+default = "tpdf"
+show_if = { any = [
+  { key = "target.format", eq = "dsd" },
+  { key = "output.backend", neq = "pipewire" },
+] }
+
+[[field.options]]
+key = "tpdf"
+label = "TPDF"
+summary = "Triangular-PDF dither."
+
+[[field.options]]
+key = "none"
+label = "None"
+summary = "No dither."
+caution = "Quantization error becomes correlated with the signal at low levels."
+
+[[field]]
+key = "dither_tpdf_seed"
+summary = "Seed for the dither noise generator."
+description = """
+Makes the dither noise reproducible: the same input then gives the same output bit-for-bit across runs, which is useful for tests and A/B comparisons.
+
+The default is a fixed seed, so output is deterministic unless you change it.
+"""
+show_if = { key = "target.dither", neq = "none" }
+default = 12345

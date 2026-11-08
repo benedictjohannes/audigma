@@ -9,6 +9,9 @@ use audigma_format::DsfPadMode;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+#[cfg(feature = "meta")]
+pub mod meta;
+
 /// Supported schema version (`schema_version = 1`).
 pub const SCHEMA_VERSION_V1: u32 = 1;
 
@@ -139,13 +142,15 @@ pub enum PeakAnalysisMode {
     TwoPass,
 }
 
-/// `[clock] mode` options (`Design.md §1.5`, `§6.2`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ClockMode {
-    #[serde(rename = "shared-graph")]
-    SharedGraph,
-    #[serde(rename = "adaptive-input")]
-    AdaptiveInput,
+/// `[resampler] drift_correction` options (`Design.md §1.5`, `§6.2`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DriftCorrection {
+    /// On for ALSA output (the DAC clock is master), off for PipeWire output.
+    #[default]
+    Auto,
+    On,
+    Off,
 }
 
 /// `[offline] tail_policy` options (`Design.md §6.2`).
@@ -419,6 +424,11 @@ pub struct ResamplerConfig {
     pub apodization: Apodization,
     #[serde(default = "default_modulator_order")]
     pub modulator_order: u8,
+    /// Input-side drift correction against the output clock (`auto` follows `[output] backend`).
+    #[serde(default)]
+    pub drift_correction: DriftCorrection,
+    /// Largest drift correction in ppm (default 500); only used while drift correction is active.
+    pub max_clock_drift_ppm: Option<u32>,
 }
 
 const fn default_filter_phase() -> FilterPhase {
@@ -439,16 +449,10 @@ impl Default for ResamplerConfig {
             phase: FilterPhase::Linear,
             apodization: Apodization::Off,
             modulator_order: 5,
+            drift_correction: DriftCorrection::Auto,
+            max_clock_drift_ppm: None,
         }
     }
-}
-
-/// `[clock]` section (`Design.md §1.5`, `§6.2`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ClockConfig {
-    pub mode: ClockMode,
-    pub max_correction_ppm: Option<u32>,
 }
 
 /// `[offline]` section (`Design.md §6.2`).
@@ -460,6 +464,9 @@ pub struct OfflineConfig {
     #[serde(default)]
     pub dsf_pad_mode: DsfPadMode,
 }
+
+/// Default `[resampler] max_clock_drift_ppm`.
+pub const DEFAULT_MAX_CLOCK_DRIFT_PPM: u32 = 500;
 
 /// Default aggregation interval for DSP deadline-miss records.
 pub const DEFAULT_LATE_TILE_REPORT_INTERVAL_MS: u64 = 10_000;
@@ -685,7 +692,6 @@ pub struct Settings {
     pub target: Option<TargetConfig>,
     pub gain: Option<GainConfig>,
     pub resampler: Option<ResamplerConfig>,
-    pub clock: Option<ClockConfig>,
     pub offline: Option<OfflineConfig>,
     pub logging: Option<LoggingConfig>,
     pub runtime: Option<RuntimeConfig>,
@@ -757,8 +763,8 @@ impl Settings {
                     phase: FilterPhase::Linear,
                     apodization: Apodization::Off,
                     modulator_order: 5,
+                    ..Default::default()
                 }),
-                clock: None,
                 offline: Some(OfflineConfig {
                     tail_policy: Some(TailPolicy::TrimToDuration),
                     write_report: Some(false),
@@ -815,8 +821,8 @@ impl Settings {
                     phase: FilterPhase::Linear,
                     apodization: Apodization::Off,
                     modulator_order: 5,
+                    ..Default::default()
                 }),
-                clock: None,
                 offline: Some(OfflineConfig {
                     tail_policy: Some(TailPolicy::TrimToDuration),
                     write_report: Some(false),
@@ -873,8 +879,8 @@ impl Settings {
                     phase: FilterPhase::Linear,
                     apodization: Apodization::Off,
                     modulator_order: 5,
+                    ..Default::default()
                 }),
-                clock: None,
                 offline: Some(OfflineConfig {
                     tail_policy: Some(TailPolicy::TrimToDuration),
                     write_report: Some(false),
@@ -931,8 +937,8 @@ impl Settings {
                     phase: FilterPhase::Linear,
                     apodization: Apodization::Off,
                     modulator_order: 5,
+                    ..Default::default()
                 }),
-                clock: None,
                 offline: None,
                 logging: None,
                 runtime: None,
@@ -1128,7 +1134,44 @@ impl Settings {
                 ));
             }
         }
+        match (self.drift_correction_setting(), self.output_backend()) {
+            (DriftCorrection::Off, Some(OutputBackend::Alsa)) => warnings.push(
+                "[resampler] drift_correction = \"off\" with an ALSA output is unsupported: the DAC clock and the input are not locked, so expect dropouts or clicks over long playback".to_string(),
+            ),
+            (DriftCorrection::On, Some(OutputBackend::Pipewire)) => warnings.push(
+                "[resampler] drift_correction = \"on\" with a PipeWire output adds a drift resampler on a rate-matched stream; no benefit expected".to_string(),
+            ),
+            _ => {}
+        }
         warnings
+    }
+
+    fn output_backend(&self) -> Option<OutputBackend> {
+        self.output.as_ref().and_then(|o| o.backend)
+    }
+
+    fn drift_correction_setting(&self) -> DriftCorrection {
+        self.resampler
+            .as_ref()
+            .map_or(DriftCorrection::Auto, |r| r.drift_correction)
+    }
+
+    /// Whether the input is resampled against the output clock: `[resampler] drift_correction`
+    /// with `auto` resolved from `[output] backend` (on for ALSA, off otherwise).
+    pub fn drift_correction_enabled(&self) -> bool {
+        match self.drift_correction_setting() {
+            DriftCorrection::On => true,
+            DriftCorrection::Off => false,
+            DriftCorrection::Auto => self.output_backend() == Some(OutputBackend::Alsa),
+        }
+    }
+
+    /// Drift correction limit in ppm (default 500); only used while drift correction is active.
+    pub fn resolved_max_clock_drift_ppm(&self) -> u32 {
+        self.resampler
+            .as_ref()
+            .and_then(|r| r.max_clock_drift_ppm)
+            .unwrap_or(DEFAULT_MAX_CLOCK_DRIFT_PPM)
     }
 
     /// Returns the configured maximum intermediate PCM rate for DSD decimation, if set.
@@ -1225,6 +1268,34 @@ mod tests {
         format!(
             "schema_version = 1\n[target]\nformat = \"dsd\"\nrate_family = \"44100\"\ndsd_rate = \"dsd128\"\n{runtime}"
         )
+    }
+
+    #[test]
+    fn test_drift_correction_auto_resolves_from_backend() {
+        let base = |out: &str, resampler: &str| {
+            Settings::from_toml_str(&format!(
+                "schema_version = 1\n[output]\n{out}\n[target]\nformat = \"pcm\"\npcm_rate_hz = 192000\n{resampler}"
+            ))
+        };
+        let alsa = "backend = \"alsa\"\ndevice = \"hw:0,0\"";
+        let pw = "backend = \"pipewire\"";
+        assert!(base(alsa, "").unwrap().drift_correction_enabled());
+        assert!(!base(pw, "[resampler]\ndrift_correction = \"auto\"").unwrap().drift_correction_enabled());
+        assert_eq!(
+            base(alsa, "[resampler]\nmax_clock_drift_ppm = 200")
+                .unwrap()
+                .resolved_max_clock_drift_ppm(),
+            200
+        );
+        assert_eq!(base(pw, "").unwrap().resolved_max_clock_drift_ppm(), 500);
+        // Overrides are allowed against the backend, with a warning.
+        let off = base(alsa, "[resampler]\ndrift_correction = \"off\"").unwrap();
+        assert!(!off.drift_correction_enabled());
+        assert_eq!(off.warnings().len(), 1);
+        let on = base(pw, "[resampler]\ndrift_correction = \"on\"").unwrap();
+        assert!(on.drift_correction_enabled());
+        assert_eq!(on.warnings().len(), 1);
+        assert!(base(alsa, "[resampler]\ndrift_correction = \"on\"").unwrap().warnings().is_empty());
     }
 
     #[test]
@@ -1460,9 +1531,7 @@ overload_policy = "mute-recover"
 [resampler]
 phase = "linear"
 apodization = "off"
-
-[clock]
-mode = "shared-graph"
+drift_correction = "off"
 "#;
         let settings = Settings::from_toml_str(toml).unwrap();
         let input = settings.input.as_ref().unwrap();
@@ -1526,10 +1595,8 @@ overload_policy = "mute-recover"
 phase = "minimum"
 apodization = "off"
 modulator_order = 5
-
-[clock]
-mode = "adaptive-input"
-max_correction_ppm = 500
+drift_correction = "on"
+max_clock_drift_ppm = 500
 "#;
         let settings = Settings::from_toml_str(toml).unwrap();
         assert!(settings.output.as_ref().unwrap().reserve_device_enabled());

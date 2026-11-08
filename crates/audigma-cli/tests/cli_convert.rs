@@ -67,6 +67,39 @@ apodization = "gentle"
 }
 
 #[test]
+fn test_cli_config_check_prints_warnings() {
+    let bin = env!("CARGO_BIN_EXE_audigma");
+    let cfg_path = std::env::temp_dir().join("test_audigma_cli_warn_cfg.toml");
+    let toml = r#"
+schema_version = 1
+
+[output]
+backend = "alsa"
+device = "hw:0,0"
+
+[target]
+format = "pcm"
+pcm_rate_hz = 192000
+
+[resampler]
+drift_correction = "off"
+"#;
+    File::create(&cfg_path)
+        .unwrap()
+        .write_all(toml.as_bytes())
+        .unwrap();
+    let output = Command::new(bin)
+        .args(["config", "check", "-c"])
+        .arg(&cfg_path)
+        .output()
+        .expect("failed to run audigma config check");
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("warning:") && stderr.contains("drift_correction"));
+    let _ = std::fs::remove_file(cfg_path);
+}
+
+#[test]
 fn test_cli_convert_rejects_non_seekable_stdout_for_dsf() {
     let bin = env!("CARGO_BIN_EXE_audigma");
     let temp_dir = std::env::temp_dir();

@@ -1,0 +1,101 @@
+# Configurator metadata for the [gain] section. Shape: see `Field` in src/meta/mod.rs.
+# `key` is relative to the section; the file name gives the section.
+
+[section]
+title = "Gain"
+summary = "Level before processing, headroom and overload handling."
+description = "A fixed preamp, the extra margin kept below the stable input limit of the 1-bit modulator, true-peak analysis for conversions, and what happens if the modulator overloads."
+
+[[field]]
+key = "preamp_db"
+summary = "Fixed gain applied before all processing (dB)."
+description = """
+A constant gain applied to the floating-point signal before resampling and modulation.
+
+Volume changes (`audigma set volume`, `play -v`) are layered on top of it, so use this for a permanent level trim (for example to match loudness between setups), not for day-to-day volume.
+
+Positive values can clip PCM output or overload the 1-bit modulator. DSD targets also get an automatic attenuation to keep the modulator stable (see `dsd_safety_margin_db`); PCM targets get none.
+"""
+default = 0.0
+range = [-120.0, 12.0]
+
+[[field]]
+key = "dsd_safety_margin_db"
+summary = "Extra headroom below the modulator's stable input limit (dB)."
+description = """
+This setting only applies to DSD targets. PCM targets ignore it.
+
+A 1-bit modulator becomes unstable if its input is too hot. Audigma attenuates to the modulator's maximum stable input level, which was measured with a 0.25 dB guard step and is verified at build time. This margin is subtracted on top of that limit:
+
+- `0.25 dB` (default): one guard step below the measured limit.
+- `0 dB`: runs the modulator right at its measured limit.
+- `0.5 dB`: one further guard step.
+
+Each step lowers the DSD output level by the same amount.
+"""
+default = 0.25
+show_if = { key = "target.format", eq = "dsd" }
+
+[[field.options]]
+key = "0"
+label = "0 dB"
+summary = "No extra margin; runs at the measured limit."
+
+[[field.options]]
+key = "0.25"
+label = "0.25 dB"
+summary = "Default."
+
+[[field.options]]
+key = "0.5"
+label = "0.5 dB"
+summary = "Extra guard; 0.25 dB quieter than the default."
+
+[[field]]
+key = "peak_analysis"
+summary = "Whether to measure the true peak before converting."
+description = """
+Only `audigma convert` uses this setting. `run` and `play` ignore it.
+
+- `two-pass`: first runs the resampler over the whole file to find the true peak after upsampling, then lowers the gain just enough to stay within the output limit. It never raises the gain above the configured value. The limit is 0.5 dB below full scale for PCM targets, and 0.5 dB below the modulator's stable input limit for DSD targets. Needs a seekable input file (not stdin) and adds an analysis pass.
+- `single-pass`: applies the configured gain only, with no look-ahead. The only choice when the input is stdin.
+"""
+default = "single-pass"
+applies_to = ["convert"]
+recommended.offline-conversion = { value = "two-pass", why = "guarantees no clipping or overload without guessing headroom." }
+
+[[field.options]]
+key = "single-pass"
+label = "Single pass"
+summary = "Apply the configured gain as is; works with stdin."
+
+[[field.options]]
+key = "two-pass"
+label = "Two pass"
+summary = "Measure the true peak first, then trim the gain to fit."
+caution = "Needs a seekable input file; not available for stdin."
+
+[[field]]
+key = "overload_policy"
+summary = "What happens when the modulator is overloaded."
+description = """
+Applies to the 1-bit modulator only.
+
+- `mute-recover`: mutes, resets the modulator and fades back in once levels are safe, so playback continues. The mute is audible, but short.
+- `error`: treats an overload as a fatal error and stops. Use it when a conversion must never contain a repaired glitch.
+"""
+default = "mute-recover"
+show_if = { key = "target.format", eq = "dsd" }
+recommended.interactive-desktop = { value = "mute-recover", why = "keeps music playing through a transient." }
+recommended.headless-appliance = { value = "mute-recover", why = "keeps music playing through a transient." }
+recommended.offline-conversion = { value = "error", why = "fail loudly instead of writing a file with a muted gap." }
+
+[[field.options]]
+key = "mute-recover"
+label = "Mute and recover"
+summary = "Mute, reset the modulator, fade back in; playback continues."
+
+[[field.options]]
+key = "error"
+label = "Stop with error"
+summary = "Treat overload as fatal; no repaired glitches in the output."

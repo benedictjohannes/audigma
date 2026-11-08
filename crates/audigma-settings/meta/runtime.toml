@@ -1,0 +1,154 @@
+# Configurator metadata for the [runtime] section. Shape: see `Field` in src/meta/mod.rs.
+# `key` is relative to the section; the file name gives the section.
+
+[section]
+title = "Runtime"
+summary = "Threads, CPU placement and real-time scheduling."
+description = "How many threads run the DSP, which cores they use and whether real-time priority is requested. The defaults suit most machines; change them to fix dropouts on a loaded or small CPU."
+advanced = true
+#
+# Decision (2026-11-08): no `recommended` values anywhere in [runtime]; the defaults are the
+# recommendation. Users who tune threading and placement are advanced and edit the fields directly.
+
+[[field]]
+key = "dsp_threads"
+summary = "How many threads run the DSP."
+description = """
+Accepts `"auto"`, `"inline"` or a whole number of at least 1.
+
+- `"auto"`: `min(channels, max(1, usable physical cores - 1))`, which is one thread per channel for stereo on a machine with 4 or more cores. It never picks `inline` or a single thread.
+- `"inline"`: no worker threads; all channels are processed one after the other on the audio loop thread. The output is bit-identical.
+- A number: that many worker threads, at most one per channel. Channels are spread over them; a worker handles its channels one after the other.
+
+One worker, or `inline`, needs about twice the time of a stereo pair of workers. On the reference machine that is enough up to about DSD256. Use it on small CPUs or for light targets only.
+
+Offline commands (`convert`, `play`, `benchmark`) use the same setting, with two channels.
+"""
+default = "auto"
+applies_to = ["run", "play", "convert"]
+
+[[field]]
+key = "realtime"
+summary = "Whether to request real-time scheduling."
+description = """
+Real-time scheduling lets the audio threads preempt ordinary work, which keeps deadlines under load.
+
+- `auto`: tries, and continues at normal priority with a warning if it is not granted.
+- `required`: refuses to start if real-time scheduling cannot be acquired.
+- `off`: never requests it.
+
+Real-time scheduling is granted by the kernel limits or by RTKit. Offline commands never request it, whatever this says.
+"""
+default = "auto"
+applies_to = ["run"]
+
+[[field.options]]
+key = "auto"
+label = "Auto"
+summary = "Try; warn and continue at normal priority on failure."
+
+[[field.options]]
+key = "required"
+label = "Required"
+summary = "Do not start without real-time scheduling."
+caution = "Startup fails on a system that does not grant real-time scheduling to this user."
+
+[[field.options]]
+key = "off"
+label = "Off"
+summary = "Never request real-time scheduling."
+
+[[field]]
+key = "realtime_priority"
+summary = "Real-time priority of the audio loop thread."
+description = """
+The audio loop thread gets this priority, the PipeWire input and output threads get one less, and the DSP workers two less. All other threads stay at normal priority.
+
+The default, 20, matches RTKit's default maximum. A higher value only helps if your system allows it.
+"""
+default = 20
+range = [3, 99]
+show_if = { key = "runtime.realtime", neq = "off" }
+applies_to = ["run"]
+
+[[field]]
+key = "core_selection"
+summary = "Which CPU cores the DSP workers are placed on."
+description = """
+Each DSP worker is pinned to its own core. Cores are ranked by the first speed measure that all allowed cores expose (`highest_perf`, `cpuinfo_max_freq` or `cpu_capacity`). If none exists, workers are left unpinned.
+
+- `performance`: fastest cores first.
+- `efficient`: slowest cores first.
+- `os`: no automatic pinning; the operating system decides. Workers also do not busy-wait before sleeping. Explicit `dsp_cpus` still applies.
+
+Everything else (the audio loop, PipeWire threads, IPC, logging) runs on the remaining allowed cores.
+"""
+default = "performance"
+applies_to = ["run", "play", "convert"]
+
+[[field.options]]
+key = "performance"
+label = "Performance cores"
+summary = "Fastest cores first."
+
+[[field.options]]
+key = "efficient"
+label = "Efficient cores"
+summary = "Slowest cores first."
+
+[[field.options]]
+key = "os"
+label = "Operating system"
+summary = "No automatic pinning."
+
+[[field]]
+key = "smt_siblings"
+summary = "Whether two DSP workers may share a physical core."
+description = """
+With simultaneous multithreading, one physical core appears as two logical CPUs (siblings) that share execution units.
+
+- `avoid`: siblings are used only after every allowed physical core has a worker.
+- `never`: workers never share a physical core. Startup fails if there are more workers than allowed physical cores.
+"""
+default = "avoid"
+show_if = { key = "runtime.core_selection", neq = "os" }
+applies_to = ["run", "play", "convert"]
+
+[[field.options]]
+key = "avoid"
+label = "Avoid"
+summary = "Share a physical core only when no free one is left."
+
+[[field.options]]
+key = "never"
+label = "Never"
+summary = "One worker per physical core; fail otherwise."
+caution = "Startup fails if workers outnumber the allowed physical cores."
+
+[[field]]
+key = "loop_cpu"
+summary = "CPU number to pin the audio loop thread to."
+description = """
+Overrides the automatic choice. By default the loop runs on the cores left over after the DSP workers (and their SMT siblings) are placed.
+
+Must not be one of `dsp_cpus`. The CPU must exist and be allowed for the process; this is checked at startup.
+"""
+default_text = "unset: any core not used by a DSP worker"
+range = [0, 1023]
+applies_to = ["run"]
+
+[[field]]
+key = "dsp_cpus"
+summary = "Explicit CPU numbers for the DSP workers."
+description = """
+One CPU per worker. Overrides `core_selection` and `smt_siblings`.
+
+- With `dsp_threads = "auto"`, the list length sets the worker count (capped at the channel count).
+- With a number, the list length must equal it.
+- Cannot be combined with `"inline"`.
+
+The list must not be empty or contain duplicates, and must not include `loop_cpu`. Whether each CPU exists and is allowed is checked at startup.
+"""
+default_text = "unset: chosen by core_selection"
+show_if = { key = "runtime.dsp_threads", neq = "inline" }
+applies_to = ["run", "play", "convert"]

@@ -28,11 +28,12 @@ In `audigma`, architectural decisions are enforced directly by the Rust type sys
    - **D-Bus Device Reservation (`org.freedesktop.ReserveDevice1`):** To avoid `Device or resource busy` lockouts when taking exclusive control of an ALSA DAC without requiring permanent configuration changes, `audigma-io` acquires the DAC dynamically via the standard D-Bus device reservation protocol (`[output] reserve_device = true`, enabled by default). WirePlumber automatically suspends its ALSA PCM monitor while `audigma` runs, and restores normal desktop routing when `audigma` stops. For headless setups without desktop sound servers, `reserve_device = false` can be configured.
 
 5. **Clock Domains & Low-Rate Baseband ASRC (`audigma-dsp` / `audigma-engine`):**
-   - **Shared Clock (`clock.mode = "shared-graph"`):** When both `[input]` and `[output]` use `backend = "pipewire"`, both sides are paced by the same PipeWire graph clock; no asynchronous drift controller is needed.
-   - **Independent Clocks (`clock.mode = "adaptive-input"`):** When bridging a software input clock (the PipeWire virtual sink) to a physical ALSA hardware DAC (`[output] backend = "alsa"`), the hardware DAC is the master clock. Clock drift is absorbed by factoring the total conversion ratio as:
+   - **Drift correction is one switch, `[resampler] drift_correction = "auto" | "on" | "off"`.** `auto` resolves from `[output] backend` (on for ALSA, off for PipeWire). `on`/`off` are overrides: they are never rejected, but the combinations that contradict the backend (`off` + ALSA, `on` + PipeWire) emit a validation warning. `off` + ALSA is documented as unsupported (unlocked clocks; expect dropouts over long playback). The input sink is always its own PipeWire driver (`NODE_DRIVER = "true"`; without it `pw-dsdplay` runs ~4x realtime or the sink is missing from KDE volume control) and is pulled on demand against a buffer cushion, so its clock domain is fixed; per-endpoint clock settings are deferred until a second legal value exists (another backend or platform).
+   - **No drift correction (PipeWire output):** the output is a PipeWire stream, rate-matched by the graph; no asynchronous drift controller is needed.
+   - **Independent Clocks (drift correction active; `auto` picks it for ALSA output):** When bridging a software input clock (the PipeWire virtual sink) to a physical ALSA hardware DAC (`[output] backend = "alsa"`), the hardware DAC is the master clock. Clock drift is absorbed by factoring the total conversion ratio as:
      $$R_{\text{total}}(t) = R_{\text{asrc}}(t) \times R_{\text{rational}} \times 2^K$$
    - The continuously variable fractional-phase stage ($R_{\text{asrc}}(t)$) **always executes at the low baseband/intermediate PCM rate ($1\times$ or $2\times$)** *before* the fixed-coefficient $2\times$ half-band FIR cascade—never at the final MHz DSD bit rate, and never by dropping/duplicating DSD bits.
-   - **ASRC Drift Bounds & Recovery:** The drift loop operates within a bounded correction range (e.g. `max_correction_ppm = 500`). When measured drift or queue fill exceeds safety thresholds, the engine invokes a controlled fault/recovery sequence rather than silently dropping or duplicating samples.
+   - **ASRC Drift Bounds & Recovery:** The drift loop operates within a bounded correction range (`[resampler] max_clock_drift_ppm`, default `500`). When measured drift or queue fill exceeds safety thresholds, the engine invokes a controlled fault/recovery sequence rather than silently dropping or duplicating samples.
 
 6. **DSD Ingestion, Automatic Passthrough & Bounded Decimation Remodulation (`audigma-engine` / `audigma-dsp`):**
    - **Automatic Opportunistic Passthrough:** Bit-exact DSD passthrough is an automatic, opportunistic signal path: whenever the input format is DSD (via SPA `audio/dsd`, Sony `.dsf` file, or auto-detected DoP), the input bit rate matches the target output DSD rate, digital software volume attenuation is at unity ($0\text{ dBFS}$ / 100% or routed to hardware UAC2 mixer / line-out), and the link is clock-locked or backpressured (file conversion, shared PipeWire graph clock, or synchronized stream), the stream bypasses intermediate float decimation and modulation completely, copying DSD bytes directly into the target transport packet with zero intermediate float conversions.
@@ -131,9 +132,9 @@ Rather than an artificial "desktop vs. music mode" switch on the input, output c
 
 | Live Output Path | `[output]` Config | `[target]` Config | Clock Domain & Device Ownership |
 |---|---|---|---|
-| **1. PipeWire High-Rate PCM Upsampler** | `backend = "pipewire"`<br>`target_node = "alsa_output..."` | `format = "pcm"`<br>`sample_format = "f32"` | **`shared-graph` clock** (no ASRC drift loop needed); PipeWire retains ownership of the DAC. |
-| **2. Direct Exclusive ALSA PCM (NOS / High-Rate)** | `backend = "alsa"`<br>`device = "hw:CARD=K17,DEV=0"` | `format = "pcm"`<br>`sample_format = "s32le"` + `dither = "tpdf"` | **`adaptive-input` ASRC** referenced to DAC master clock; `audigma` owns the ALSA DAC exclusively. |
-| **3. Direct Exclusive ALSA DSD (Native / DoP)** | `backend = "alsa"`<br>`device = "hw:CARD=K17,DEV=0"`<br>`transport = "native" \| "dop"` | `format = "dsd"`<br>`dsd_rate = "dsd256"` | **`adaptive-input` ASRC** referenced to DAC master clock; `audigma` owns the ALSA DAC exclusively. |
+| **1. PipeWire High-Rate PCM Upsampler** | `backend = "pipewire"`<br>`target_node = "alsa_output..."` | `format = "pcm"`<br>`sample_format = "f32"` | **PipeWire-rate-matched output** (`drift_correction = auto` → off; no ASRC drift loop); PipeWire retains ownership of the DAC. |
+| **2. Direct Exclusive ALSA PCM (NOS / High-Rate)** | `backend = "alsa"`<br>`device = "hw:CARD=K17,DEV=0"` | `format = "pcm"`<br>`sample_format = "s32le"` + `dither = "tpdf"` | **Drift-correcting ASRC** (`drift_correction = auto` → on) referenced to DAC master clock; `audigma` owns the ALSA DAC exclusively. |
+| **3. Direct Exclusive ALSA DSD (Native / DoP)** | `backend = "alsa"`<br>`device = "hw:CARD=K17,DEV=0"`<br>`transport = "native" \| "dop"` | `format = "dsd"`<br>`dsd_rate = "dsd256"` | **Drift-correcting ASRC** (`drift_correction = auto` → on) referenced to DAC master clock; `audigma` owns the ALSA DAC exclusively. |
 
 ### 3.4 Prepared Pipeline Stages & Worker Threading
 
@@ -356,8 +357,6 @@ overload_policy = "mute-recover"
 phase = "linear"
 apodization = "off"
 
-[clock]
-mode = "shared-graph"
 ```
 
 #### B. PipeWire Virtual Sink $\to$ Direct Exclusive ALSA Native DSD (`pipewire-alsa-dsd.toml`)
@@ -398,10 +397,8 @@ dsd_safety_margin_db = 0.25   # 0 | 0.25 | 0.5
 phase = "minimum"
 apodization = "off"
 modulator_order = 5
-
-[clock]
-mode = "adaptive-input"
-max_correction_ppm = 500
+drift_correction = "auto"   # auto: on for ALSA output, off for PipeWire; "on"/"off" override (warns if contradicting the backend)
+max_clock_drift_ppm = 500
 ```
 
 #### C. Offline WAV/FLAC $\to$ DSF (`offline-dsf.toml`)

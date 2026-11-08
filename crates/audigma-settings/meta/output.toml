@@ -1,0 +1,286 @@
+# Configurator metadata for the [output] section. Shape: see `Field` in src/meta/mod.rs.
+# `key` is relative to the section; the file name gives the section.
+
+[section]
+title = "Output"
+summary = "Where the processed audio goes: PipeWire or an exclusive ALSA device."
+description = "Chooses the backend, the DAC, the DSD transport (native or DoP), buffering and volume control for live playback, and the container for converted files."
+
+[[field]]
+key = "backend"
+summary = "Where processed audio goes."
+description = """
+Live output used by `audigma run` and `audigma play`:
+
+- `alsa`: opens your DAC exclusively through ALSA. Audigma owns the device, bypasses desktop mixing, and is paced by the DAC's own clock. Required for all DSD output (native and DoP).
+- `pipewire`: sends PCM back into the PipeWire graph, where it shares the DAC with other applications. No DSD.
+
+Required for `run`. `audigma convert` ignores this setting (it writes to the `-o` file or stdout).
+"""
+required_for = ["run"]
+applies_to = ["run", "play"]
+recommended.interactive-desktop = { value = "alsa", why = "prevents audio loop." }
+recommended.headless-appliance = { value = "alsa", why = "audigma owns the DAC; supports DSD." }
+
+[[field.options]]
+key = "pipewire"
+label = "PipeWire graph"
+summary = "Play into the PipeWire graph; PipeWire keeps ownership of the DAC."
+description = """
+PCM only (DSD cannot pass through the PipeWire graph). Output shares the DAC with other applications under one PipeWire clock, so no drift correction is needed.
+"""
+caution = """
+Make sure the PipeWire graph does not route audigma's output back into its own virtual sink (an audio loop).
+"""
+
+[[field.options]]
+key = "alsa"
+label = "Exclusive ALSA"
+summary = "Open an ALSA hardware device exclusively."
+description = """
+Required for DSD (native or DoP). Audigma owns the DAC while running, so other applications must play through audigma's virtual sink. Output is paced by the DAC clock, with drift correction on the input side.
+"""
+
+[[field]]
+key = "target_node"
+summary = "PipeWire sink to play into."
+description = """
+The name of an existing PipeWire sink, as listed by `wpctl status` (for example `alsa_output.usb-FiiO_K17-00.analog-stereo`).
+
+It is a routing hint for the session manager (WirePlumber), not a hard link. When unset, the session manager picks the default sink.
+"""
+show_if = { key = "output.backend", eq = "pipewire" }
+assist = ["pipewire-sinks"]
+applies_to = ["run", "play"]
+
+[[field]]
+key = "device"
+summary = "ALSA device to open."
+description = """
+Required. An ALSA device string such as `hw:CARD=K17,DEV=0`.
+
+Use a `hw:` device for bit-perfect output. `default` and `plughw:` insert ALSA's own conversion, which defeats native DSD and DoP.
+"""
+show_if = { key = "output.backend", eq = "alsa" }
+required_if = { key = "output.backend", eq = "alsa" }
+applies_to = ["run", "play"]
+assist = ["alsa-detect"]
+
+[[field]]
+key = "transport"
+summary = "How DSD is carried to the device."
+description = """
+- `native`: sends true DSD (`DSD_U32_BE`) to a DAC and driver that support it.
+- `dop`: packs DSD into PCM words with DoP markers. Works on any DAC that understands DoP, but needs a bit-perfect path: no software volume or resampling in between.
+- `pcm`: plain PCM, for PCM targets.
+"""
+default_text = "native for DSD targets; pcm for PCM targets"
+show_if = { key = "target.format", eq = "dsd" }
+applies_to = ["run", "play", "convert"]
+assist = ["alsa-detect", "capability-check"]
+recommended.headless-appliance = { value = "native", why = "if the DAC supports it; fall back to dop otherwise." }
+recommended.interactive-desktop = { value = "native", why = "if the DAC supports it; fall back to dop otherwise." }
+
+[[field.options]]
+key = "native"
+label = "Native DSD"
+summary = "True DSD (DSD_U32_BE) to a DAC that supports it."
+
+[[field.options]]
+key = "dop"
+label = "DoP"
+summary = "DSD packed into PCM words with DoP markers."
+
+[[field.options]]
+key = "pcm"
+label = "PCM"
+summary = "Plain PCM; used for PCM targets."
+
+[[field]]
+key = "container"
+summary = "File or stream container for offline output."
+description = """
+- `dsf`: DSD Stream File. DSD only; needs a seekable output file.
+- `wav`: uncompressed PCM. Needs a seekable file.
+- `flac`: lossless compressed PCM, 16 or 24-bit. Needs a seekable file.
+- `raw`: no header. The only choice for stdout.
+
+When unset, `audigma convert` picks the container from the output file extension.
+"""
+default_text = "dsf for DSD targets; wav for PCM targets"
+applies_to = ["convert"]
+recommended.offline-conversion = { value = "dsf", why = "for DSD targets; wav or flac for PCM." }
+
+[[field.options]]
+key = "dsf"
+label = "DSF"
+summary = "DSD file; needs a seekable output."
+
+[[field.options]]
+key = "wav"
+label = "WAV"
+summary = "PCM file; needs a seekable output."
+
+[[field.options]]
+key = "flac"
+label = "FLAC"
+summary = "Lossless PCM file, 16 or 24-bit; needs a seekable output."
+
+[[field.options]]
+key = "raw"
+label = "Raw"
+summary = "Headerless stream; the only choice for stdout."
+
+[[field]]
+key = "dop_sample_format"
+summary = "PCM word layout carrying DoP."
+description = """
+This setting only applies with `transport = "dop"`. It is the PCM word format that carries the DSD bits and markers. Pick what your DAC accepts; `s32le` is the default.
+
+- `s32le`: DoP in a 32-bit word.
+- `s24le`: DoP in a 24-bit word held in 4 bytes.
+- `s24_3le`: DoP in a 24-bit word packed into 3 bytes.
+
+Not related to `target.sample_format`, which sets PCM target output.
+"""
+default = "s32le"
+show_if = { key = "output.transport", eq = "dop" }
+applies_to = ["run", "play", "convert"]
+assist = ["alsa-detect"]
+
+[[field.options]]
+key = "s32le"
+label = "32-bit"
+summary = "DoP in a 32-bit word."
+
+[[field.options]]
+key = "s24le"
+label = "24-bit (32-bit container)"
+summary = "DoP in a 24-bit word held in 4 bytes."
+
+[[field.options]]
+key = "s24_3le"
+label = "24-bit packed"
+summary = "DoP in a 24-bit word packed into 3 bytes."
+
+[[field]]
+key = "reserve_device"
+summary = "Take the DAC from the desktop sound server while running."
+description = """
+Acquires the DAC through the freedesktop `ReserveDevice1` D-Bus protocol, so PipeWire/WirePlumber releases it (no `Device or resource busy`) and gets it back when audigma stops.
+
+Disable it on headless systems that have no desktop sound server.
+"""
+default_text = "true for alsa"
+show_if = { key = "output.backend", eq = "alsa" }
+applies_to = ["run", "play"]
+recommended.headless-appliance = { value = false, why = "no desktop sound server to negotiate with." }
+
+[[field]]
+key = "buffer_ms"
+summary = "Output buffer length in milliseconds."
+description = """
+For `alsa`, the device buffer length (minimum 5). For `pipewire`, it sizes the output queue.
+
+A larger buffer tolerates scheduling hiccups and CPU spikes without dropouts. A smaller one reduces latency and the time before a pause or stop is heard. Validate with a real playback test after changing it.
+"""
+default = 40
+range = [5.0, 5000.0]
+show_if = { key = "output.backend", in = ["alsa", "pipewire"] }
+applies_to = ["run", "play"]
+
+[[field]]
+key = "period_ms"
+summary = "ALSA period length in milliseconds."
+description = """
+How often the device asks for more data (minimum 1).
+
+Smaller periods lower latency but cause more CPU wakeups. Keep it well below `buffer_ms`; the defaults (5 ms against 40 ms) give 8 periods per buffer.
+"""
+default = 5
+range = [1.0, 1000.0]
+show_if = { key = "output.backend", eq = "alsa" }
+applies_to = ["run", "play"]
+
+[[field]]
+key = "volume_control"
+summary = "Where volume changes are applied."
+description = """
+- `hardware-software-fallback`: uses the DAC's analog mixer when it has one and keeps the digital stream at full scale; otherwise scales in software before the modulator.
+- `software`: always scales in floating point. Works on every DAC and is safe for DSD and DoP.
+- `hardware`: requires a DAC mixer and refuses to scale digitally.
+- `none`: fixed unity gain; volume changes are ignored.
+
+Hardware control is unavailable for pipewire and file output.
+"""
+default = "hardware-software-fallback"
+applies_to = ["run", "play"]
+assist = ["alsa-detect"]
+
+[[field.options]]
+key = "hardware-software-fallback"
+label = "Hardware, else software"
+summary = "DAC mixer when available, otherwise software scaling."
+
+[[field.options]]
+key = "software"
+label = "Software"
+summary = "Always scale in floating point; safe for DSD and DoP."
+
+[[field.options]]
+key = "hardware"
+label = "Hardware only"
+summary = "Requires a DAC mixer; never scales digitally."
+
+[[field.options]]
+key = "none"
+label = "None"
+summary = "Fixed unity gain; volume changes are ignored."
+
+[[field]]
+key = "mixer_control"
+summary = "ALSA mixer element used for hardware volume."
+description = """
+The name of the mixer element on the DAC (for example `PCM` or `Master`).
+
+When unset, audigma probes the usual names. Set it only if probing picks the wrong element.
+"""
+default_text = "unset (auto-probe)"
+show_if = { all = [
+  { key = "output.backend", eq = "alsa" },
+  { key = "output.volume_control", in = ["hardware-software-fallback", "hardware"] },
+] }
+applies_to = ["run", "play"]
+assist = ["alsa-detect"]
+
+[[field]]
+key = "device_wait_ms"
+summary = "How long the daemon waits for a missing output device."
+description = """
+How long the daemon keeps waiting when the DAC is absent at start or disappears (power-cycle, unplug). The process never crashes on device loss.
+
+- `-1`: wait forever; playback resumes when the DAC returns.
+- `0`: exit immediately (fail fast).
+- a positive number: exit after that many milliseconds.
+"""
+default = -1
+applies_to = ["run"]
+recommended.interactive-desktop = { value = -1, why = "always ready: the DAC returns and playback resumes." }
+recommended.headless-appliance = { value = -1, why = "the daemon self-heals when the DAC returns." }
+
+[[field]]
+key = "keep_audio_sink_ms"
+summary = "How long the virtual sink stays alive while the device is missing."
+description = """
+While the DAC is gone, audigma keeps its PipeWire sink and silently drains audio so apps do not stall. After this many milliseconds the sink is removed, letting desktop audio fall back to other outputs such as speakers.
+
+- `-1`: keep the sink forever.
+- `0`: remove it at once.
+- a positive number: remove it after that many milliseconds.
+
+Values longer than a positive `device_wait_ms` trigger a warning, because the daemon exits first.
+"""
+default = 5000
+applies_to = ["run"]
+recommended.interactive-desktop = { value = 2000, why = "keep short so media is not silenced for long when the DAC is unplugged." }
+recommended.headless-appliance = { value = -1, why = "no desktop audio to fall back to; keep the sink for when the DAC returns." }

@@ -810,19 +810,8 @@ impl LivePipeline {
         let is_dsd = self.topology.is_dsd();
         let target_dsd = self.topology.target_dsd_config(&self.plan.dsp_config);
 
-        let is_adaptive = self
-            .settings
-            .clock
-            .as_ref()
-            .map(|c| c.mode == audigma_settings::ClockMode::AdaptiveInput)
-            .unwrap_or(false);
-        let max_ppm = self
-            .settings
-            .clock
-            .as_ref()
-            .and_then(|c| c.max_correction_ppm)
-            .map(|p| p as f64)
-            .unwrap_or(500.0);
+        let is_adaptive = self.settings.drift_correction_enabled();
+        let max_ppm = f64::from(self.settings.resolved_max_clock_drift_ppm());
         let asrc_in_rate = if self.topology.decimation_stages > 0 {
             self.topology.intermediate_rate
         } else {
