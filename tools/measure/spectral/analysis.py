@@ -153,6 +153,8 @@ def analyze_components(v, f_bit_hz, k_bins, ref_db=0.0):
         "noise_db": level(noise),
         "noise_a_db": level(noise_a),
         "thdn_a_db": level(thdn_a),
+        # Windowed mean of the record (DC), dB re the DSD full scale minus ref_db (dBFS for the chain).
+        "dc_db": 20.0 * np.log10(max(abs(float(np.sum(v * w)) / float(np.sum(w))), 1e-300)) - ref_db,
         "spur_db": level(groups[i]),
         "spur_hz": float(freqs[noise_bins[i]]),
         "spur_prominence_db": float(10.0 * np.log10(prom[i])),

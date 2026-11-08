@@ -4,6 +4,7 @@
 //! Zero OS, file, or network I/O dependencies.
 
 pub mod config;
+pub mod dc_blocker;
 pub mod defaults;
 pub mod fir;
 pub mod ftz;
@@ -23,6 +24,7 @@ pub use config::{
     Apodization, DitherType, DspConfiguration, FilterPhase, OverloadPolicy, SampleFormat,
     StreamSpec, TargetFormat, TargetRateSpec,
 };
+pub use dc_blocker::{DC_BLOCKER_CORNER_HZ, DcBlocker};
 pub use defaults::{
     DEFAULT_MODULATOR_ORDER, DEFAULT_SAFETY_MARGIN_DB, DSD_IDLE_BYTE, DSD_IDLE_U32_BE,
     FILTER_REJECTION_TARGET_DB,

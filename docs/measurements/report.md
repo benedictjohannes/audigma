@@ -1,7 +1,7 @@
 # audigma — DSP Quality Report
 
 > **Authoritative specification:** `Design.md §4` and `§8`.  
-> **Generated:** `2026-11-08 11:16:48Z` on `AMD Ryzen AI 7 350 w/ Radeon 860M (x86_64)` running `CachyOS (Linux 7.3.1-1-cachyos)`  
+> **Generated:** `2026-11-08 11:39:19Z` on `AMD Ryzen AI 7 350 w/ Radeon 860M (x86_64)` running `CachyOS (Linux 7.3.1-1-cachyos)`  
 > **Rust compiler:** `rustc 1.98.0 (88d9e12ae 2026-08-18)`  
 > **Hardware FTZ/DAZ:** `Active (hardware-verified)`  
 > **Benchmark:** last run `2026-11-08 10:57:08Z`, placement `cpu [0], highest_perf 208`  

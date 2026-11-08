@@ -11,8 +11,8 @@ use std::time::Instant;
 mod linear_modes;
 
 use audigma_dsp::{
-    Apodization, DitherType, DsdBitRateHz, FilterPhase, HalfBandCascade, Modulator, OverloadPolicy,
-    STABILITY_THRESHOLD, ScopedFtzDaz,
+    Apodization, DC_BLOCKER_CORNER_HZ, DcBlocker, DitherType, DsdBitRateHz, FilterPhase,
+    HalfBandCascade, Modulator, OverloadPolicy, STABILITY_THRESHOLD, ScopedFtzDaz,
 };
 
 #[derive(Debug, Clone)]
@@ -36,6 +36,8 @@ struct HarnessConfig {
     margin_db: Option<f64>,
     /// Dither PRNG seed.
     seed: u64,
+    /// `chain`: production DC blocker ahead of the cascade (`--dc-blocker on|off`, default on).
+    dc_blocker: bool,
 }
 
 fn parse_args() -> HarnessConfig {
@@ -56,6 +58,7 @@ fn parse_args() -> HarnessConfig {
         tones: Vec::new(),
         margin_db: None,
         seed: 12345,
+        dc_blocker: true,
     };
 
     let mut i = 1;
@@ -138,6 +141,14 @@ fn parse_args() -> HarnessConfig {
             "--margin-db" => {
                 i += 1;
                 config.margin_db = Some(args[i].parse().expect("Invalid margin-db"));
+            }
+            "--dc-blocker" => {
+                i += 1;
+                config.dc_blocker = match args[i].as_str() {
+                    "on" => true,
+                    "off" => false,
+                    other => panic!("Unknown dc-blocker: {other} (on|off)"),
+                };
             }
             "--seed" => {
                 i += 1;
@@ -470,16 +481,45 @@ fn run_chain(
         TILE_BASEBAND,
     );
     let mut bb_tile = [0.0f64; TILE_BASEBAND];
+    let mut dc_tile = [0.0f64; TILE_BASEBAND];
     let mut exp_tile = vec![0.0f64; tile_expanded];
     let mut tile_bytes = vec![0u8; tile_expanded / 8];
 
+    // Production DC blocker at the cascade's input rate. It is settled alone first, for
+    // 30 time constants (residual of a DC step e^-30 = -261 dB), because its 159 ms time
+    // constant is far longer than the cascade/modulator warm-up below.
+    let baseband_hz = f_bit_hz as f64 / multiplier as f64;
+    let mut dc_blocker = config
+        .dc_blocker
+        .then(|| DcBlocker::production(baseband_hz));
+    let warmup_start = -((WARMUP_TILES * TILE_BASEBAND) as i64);
+    if let Some(blocker) = dc_blocker.as_mut() {
+        let tau = 1.0 / (2.0 * PI * DC_BLOCKER_CORNER_HZ);
+        let tiles = ((30.0 * tau * baseband_hz) as usize).div_ceil(TILE_BASEBAND) as i64;
+        for t in 0..tiles {
+            let start = warmup_start - (tiles - t) * TILE_BASEBAND as i64;
+            for (i, s) in bb_tile.iter_mut().enumerate() {
+                *s = sample(start + i as i64);
+            }
+            blocker.process(&bb_tile, &mut dc_tile);
+        }
+    }
+    let mut cascade_input = |bb: &[f64; TILE_BASEBAND], out: &mut [f64; TILE_BASEBAND]| {
+        if let Some(blocker) = dc_blocker.as_mut() {
+            blocker.process(bb, out);
+        } else {
+            out.copy_from_slice(bb);
+        }
+    };
+
     // Warm-up of cascade and modulator with the same (periodic) stimulus.
     for t in 0..WARMUP_TILES {
-        let start = (t as i64 - WARMUP_TILES as i64) * TILE_BASEBAND as i64;
+        let start = warmup_start + (t * TILE_BASEBAND) as i64;
         for (i, s) in bb_tile.iter_mut().enumerate() {
             *s = sample(start + i as i64);
         }
-        cascade.process_tile(&bb_tile, &mut exp_tile).unwrap();
+        cascade_input(&bb_tile, &mut dc_tile);
+        cascade.process_tile(&dc_tile, &mut exp_tile).unwrap();
         modulator
             .process_tile_bytes(&exp_tile, &mut tile_bytes)
             .unwrap();
@@ -494,7 +534,8 @@ fn run_chain(
         for (i, s) in bb_tile.iter_mut().enumerate() {
             *s = sample(offset + i as i64);
         }
-        cascade.process_tile(&bb_tile, &mut exp_tile).unwrap();
+        cascade_input(&bb_tile, &mut dc_tile);
+        cascade.process_tile(&dc_tile, &mut exp_tile).unwrap();
         tracker.process(modulator, &exp_tile, &mut tile_bytes);
         let byte_offset = t_idx * (tile_expanded / 8);
         raw_bytes[byte_offset..byte_offset + tile_expanded / 8].copy_from_slice(&tile_bytes);
@@ -539,6 +580,7 @@ fn run_chain(
   "samples": {n},
   "limit_dbfs": {limit_dbfs},
   "margin_db": {margin},
+  "dc_blocker": {},
   "gain_db": {gain_db},
   "k_bin": {k_bin},
   "f_tone_hz": {f_tone_hz:.6},
@@ -555,6 +597,7 @@ fn run_chain(
             config.apodization,
             config.phase,
             config.seed,
+            config.dc_blocker,
             config.amp_db,
             tones_json.join(", "),
             elapsed.as_secs_f64(),

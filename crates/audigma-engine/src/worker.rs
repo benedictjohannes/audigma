@@ -18,6 +18,7 @@ use crate::cpu::ThreadPlacement;
 use crate::lifecycle::FrameGain;
 use crate::timing::PoolTimings;
 use crate::traits::EngineError;
+use audigma_dsp::DcBlocker;
 use audigma_dsp::config::{Apodization, DitherType, FilterPhase, OverloadPolicy};
 use audigma_dsp::fir::HalfBandCascade;
 use audigma_dsp::ftz::ScopedFtzDaz;
@@ -45,8 +46,30 @@ const CMD_RECONFIGURE: u32 = 8;
 // it is still hot, rather than rereading the whole high-rate PCM tile later.
 const DSD_SUBTILE_SAMPLES: usize = 16_384;
 
+/// DC blocker ahead of the cascade (DSD targets only, `Design.md §4.1`) with its subtile scratch.
+struct DcStage {
+    blocker: DcBlocker,
+    scratch: Vec<f64>,
+}
+
+impl DcStage {
+    /// Returns `tile` with DC removed (in the scratch), or `tile` itself without a blocker.
+    #[inline]
+    fn filter<'a>(dc: &'a mut Option<&mut DcStage>, tile: &'a [f64]) -> &'a [f64] {
+        match dc {
+            Some(stage) => {
+                let out = &mut stage.scratch[..tile.len()];
+                stage.blocker.process(tile, out);
+                out
+            }
+            None => tile,
+        }
+    }
+}
+
 fn process_pcm_tile(
     cascade: &mut HalfBandCascade,
+    mut dc: Option<&mut DcStage>,
     input: &[f64],
     output: &mut [f64],
     subtile_frames: usize,
@@ -56,7 +79,7 @@ fn process_pcm_tile(
         .chunks(subtile_frames)
         .zip(output.chunks_mut(subtile_samples))
     {
-        cascade.process_tile(tile, out)?;
+        cascade.process_tile(DcStage::filter(&mut dc, tile), out)?;
     }
     Ok(())
 }
@@ -64,6 +87,7 @@ fn process_pcm_tile(
 fn process_dsd_tile(
     cascade: &mut HalfBandCascade,
     modulator: &mut Modulator,
+    mut dc: Option<&mut DcStage>,
     input: &[f64],
     pcm: &mut [f64],
     dsd: &mut [u8],
@@ -72,7 +96,7 @@ fn process_dsd_tile(
     // Preserve the original validation/error ordering: the FIR advances through
     // the entire tile even if the modulator rejects an unaligned input length.
     if pcm.len() % 8 != 0 {
-        process_pcm_tile(cascade, input, pcm, subtile_frames)?;
+        process_pcm_tile(cascade, dc, input, pcm, subtile_frames)?;
         return Ok(modulator.process_tile_bytes(pcm, dsd)?);
     }
     if input.is_empty() {
@@ -86,7 +110,7 @@ fn process_dsd_tile(
         .zip(pcm.chunks_mut(subtile_samples))
         .zip(dsd.chunks_mut(subtile_samples / 8))
     {
-        cascade.process_tile(tile, out_pcm)?;
+        cascade.process_tile(DcStage::filter(&mut dc, tile), out_pcm)?;
         // On OverloadPolicy::Error, finish the FIR but stop advancing the
         // modulator. Both states and the PCM view then match whole-tile execution.
         if result.is_ok() {
@@ -244,6 +268,8 @@ struct WorkerSlot {
 /// Everything one channel worker owns that depends on the active rate and filter.
 struct ChannelState {
     cascade: HalfBandCascade,
+    /// Present exactly when `modulator` is (DSD targets).
+    dc: Option<DcStage>,
     modulator: Option<Modulator>,
     input_processor: Option<InputProcessor>,
     buffers: Arc<WorkerBuffers>,
@@ -261,6 +287,9 @@ impl ChannelState {
         let result = match cmd {
             CMD_RESET | CMD_RESET_OUTPUT => {
                 self.cascade.reset();
+                if let Some(ref mut dc) = self.dc {
+                    dc.blocker.reset();
+                }
                 if let Some(ref mut m) = self.modulator {
                     m.reset();
                 }
@@ -285,6 +314,7 @@ impl ChannelState {
                     let result = process_dsd_tile(
                         &mut self.cascade,
                         m,
+                        self.dc.as_mut(),
                         in_slice,
                         pcm_out,
                         dsd_out,
@@ -295,7 +325,13 @@ impl ChannelState {
                         .store(m.overload_count(), Ordering::Relaxed);
                     result
                 } else {
-                    process_pcm_tile(&mut self.cascade, in_slice, pcm_out, subtile_frames)
+                    process_pcm_tile(
+                        &mut self.cascade,
+                        self.dc.as_mut(),
+                        in_slice,
+                        pcm_out,
+                        subtile_frames,
+                    )
                 }
             }
             CMD_INPUT_PCM | CMD_INPUT_DSD => (|| {
@@ -325,6 +361,7 @@ impl ChannelState {
                     let result = process_dsd_tile(
                         &mut self.cascade,
                         m,
+                        self.dc.as_mut(),
                         prepared,
                         pcm_out,
                         &mut dsd_buf[..dsd_bytes],
@@ -335,7 +372,13 @@ impl ChannelState {
                         .store(m.overload_count(), Ordering::Relaxed);
                     result
                 } else {
-                    process_pcm_tile(&mut self.cascade, prepared, pcm_out, subtile_frames)
+                    process_pcm_tile(
+                        &mut self.cascade,
+                        self.dc.as_mut(),
+                        prepared,
+                        pcm_out,
+                        subtile_frames,
+                    )
                 }
             })(),
             _ => Ok(()),
@@ -496,8 +539,14 @@ fn build_channel_states(
             .zip(input_bounds)
             .map(|(config, bounds)| InputProcessor::new(tile_baseband_frames, config, bounds))
             .transpose()?;
+        // The cascade runs at f_bit / mult, so that is the blocker's baseband rate.
+        let dc = target_dsd.map(|dsd_cfg| DcStage {
+            blocker: DcBlocker::production(dsd_cfg.bit_rate.get() as f64 / mult as f64),
+            scratch: vec![0.0; subtile_frames],
+        });
         states.push(ChannelState {
             cascade,
+            dc,
             modulator,
             input_processor,
             buffers,
@@ -1324,6 +1373,7 @@ mod tests {
                         let actual = process_dsd_tile(
                             &mut tiled,
                             &mut actual_mod,
+                            None,
                             &input,
                             actual_pcm,
                             actual_dsd,
@@ -1370,6 +1420,7 @@ mod tests {
                     process_dsd_tile(
                         &mut tiled,
                         &mut actual_mod,
+                        None,
                         &input,
                         &mut actual_pcm[..96 * mult],
                         &mut actual_dsd[..96 * mult / 8],
@@ -1437,6 +1488,12 @@ mod tests {
         )
         .unwrap();
         seq_mod_r.set_dither_seed(12346);
+        // The pool removes DC ahead of the cascade on DSD targets.
+        let baseband_hz = BIT_RATE.get() as f64 / (1usize << STAGES) as f64;
+        let mut seq_dc_l = DcBlocker::production(baseband_hz);
+        let mut seq_dc_r = DcBlocker::production(baseband_hz);
+        let mut dc_left = vec![0.0f64; FRAMES];
+        let mut dc_right = vec![0.0f64; FRAMES];
 
         // Generate synthetic stereo signal
         let mut left = vec![0.0f64; FRAMES];
@@ -1455,8 +1512,14 @@ mod tests {
 
         for _ in 0..10 {
             // Sequential step
-            seq_cascade_l.process_tile(&left, &mut seq_pcm_l).unwrap();
-            seq_cascade_r.process_tile(&right, &mut seq_pcm_r).unwrap();
+            seq_dc_l.process(&left, &mut dc_left);
+            seq_dc_r.process(&right, &mut dc_right);
+            seq_cascade_l
+                .process_tile(&dc_left, &mut seq_pcm_l)
+                .unwrap();
+            seq_cascade_r
+                .process_tile(&dc_right, &mut seq_pcm_r)
+                .unwrap();
             seq_mod_l
                 .process_tile_bytes(&seq_pcm_l, &mut seq_dsd_l)
                 .unwrap();
@@ -1527,6 +1590,12 @@ mod tests {
         )
         .unwrap();
         seq_mod_r.set_dither_seed(98766);
+        // The pool removes DC ahead of the cascade on DSD targets.
+        let baseband_hz = BIT_RATE.get() as f64 / (1usize << STAGES) as f64;
+        let mut seq_dc_l = DcBlocker::production(baseband_hz);
+        let mut seq_dc_r = DcBlocker::production(baseband_hz);
+        let mut dc_left = vec![0.0f64; FRAMES];
+        let mut dc_right = vec![0.0f64; FRAMES];
 
         let mut left = vec![0.0f64; FRAMES];
         let mut right = vec![0.0f64; FRAMES];
@@ -1543,8 +1612,14 @@ mod tests {
         let mut seq_dsd_r = vec![0u8; req_out / 8];
 
         for _ in 0..10 {
-            seq_cascade_l.process_tile(&left, &mut seq_pcm_l).unwrap();
-            seq_cascade_r.process_tile(&right, &mut seq_pcm_r).unwrap();
+            seq_dc_l.process(&left, &mut dc_left);
+            seq_dc_r.process(&right, &mut dc_right);
+            seq_cascade_l
+                .process_tile(&dc_left, &mut seq_pcm_l)
+                .unwrap();
+            seq_cascade_r
+                .process_tile(&dc_right, &mut seq_pcm_r)
+                .unwrap();
             seq_mod_l
                 .process_tile_bytes(&seq_pcm_l, &mut seq_dsd_l)
                 .unwrap();

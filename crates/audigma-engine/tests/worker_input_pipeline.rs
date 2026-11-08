@@ -1,6 +1,7 @@
 //! End-to-end channel DSP equivalence against the former serial input stages.
 //! These are correctness tests, not throughput/deadline benchmarks.
 
+use audigma_dsp::DcBlocker;
 use audigma_dsp::fir::{HalfBandCascade, HalfBandDecimationCascade, PolyphaseResampler};
 use audigma_dsp::modulator::Modulator;
 use audigma_dsp::{Apodization, DitherType, DsdBitRateHz, FilterPhase, OverloadPolicy, PcmRateHz};
@@ -28,6 +29,7 @@ struct SerialChannel {
     pcm_decimator: Option<ChannelDecimatorPool>,
     resampler: Option<PolyphaseResampler>,
     cascade: HalfBandCascade,
+    dc_blocker: Option<DcBlocker>,
     modulator: Option<Modulator>,
     input_capacity: usize,
     output_capacity: usize,
@@ -82,8 +84,13 @@ impl SerialChannel {
             modulator.set_dither_seed(target.seed_base.wrapping_add(channel as u64));
             modulator
         });
+        // DSD targets remove DC ahead of the cascade, at the cascade's input rate.
+        let dc_blocker = target.map(|target| {
+            DcBlocker::production(target.bit_rate.get() as f64 / (1usize << stages) as f64)
+        });
         Self {
             dsd_decoder,
+            dc_blocker,
             dsd_alignment,
             dsd_residue: Vec::new(),
             pcm_decimator,
@@ -146,6 +153,10 @@ impl SerialChannel {
                 baseband = resampled;
             }
         }
+        if let Some(blocker) = self.dc_blocker.as_mut() {
+            let input = baseband.clone();
+            blocker.process(&input, &mut baseband);
+        }
         let frames = baseband.len();
         let mut pcm = vec![0.0; frames * self.cascade.rate_multiplier()];
         self.cascade.process_tile(&baseband, &mut pcm).unwrap();
@@ -159,6 +170,9 @@ impl SerialChannel {
 
     fn reset_output(&mut self) {
         self.cascade.reset();
+        if let Some(blocker) = self.dc_blocker.as_mut() {
+            blocker.reset();
+        }
         if let Some(modulator) = self.modulator.as_mut() {
             modulator.reset();
         }

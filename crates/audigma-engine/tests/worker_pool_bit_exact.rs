@@ -1,6 +1,7 @@
 //! Integration test proving bit-exact output equivalence between sequential
 //! and persistent real-time ChannelWorkerPool DSP execution (`Design.md §1.2`).
 
+use audigma_dsp::DcBlocker;
 use audigma_dsp::config::{Apodization, DitherType, FilterPhase, OverloadPolicy};
 use audigma_dsp::fir::HalfBandCascade;
 use audigma_dsp::modulator::Modulator;
@@ -82,7 +83,12 @@ fn test_dsd_subtiles_partial_tiles_modes_and_reset() {
                 let mut modulator =
                     Modulator::new(order, rate, dither, OverloadPolicy::MuteRecover).unwrap();
                 modulator.set_dither_seed(424242);
-                let input: Vec<f64> = (0..512).map(|i| 0.3 * (i as f64 * 0.17).sin()).collect();
+                // DSD-configured pools remove DC ahead of the cascade.
+                let mut blocker = DcBlocker::production(rate.get() as f64 / 512.0);
+                let mut blocked = vec![0.0; 512];
+                let input: Vec<f64> = (0..512)
+                    .map(|i| 0.05 + 0.3 * (i as f64 * 0.17).sin())
+                    .collect();
                 let mut pcm = vec![0.0; 512 * 512];
                 let mut dsd = vec![0; 512 * 512 / 8];
                 assert_eq!(
@@ -96,7 +102,8 @@ fn test_dsd_subtiles_partial_tiles_modes_and_reset() {
                     {
                         let pcm = &mut pcm[..frames * 512];
                         let dsd = &mut dsd[..frames * 512 / 8];
-                        cascade.process_tile(&input[..frames], pcm).unwrap();
+                        blocker.process(&input[..frames], &mut blocked[..frames]);
+                        cascade.process_tile(&blocked[..frames], pcm).unwrap();
                         // DSD-configured workers also serve PCM peak analysis.
                         if block % 3 == 0 {
                             pool.process_tile_pcm(&[&input[..frames]]).unwrap();
@@ -111,6 +118,7 @@ fn test_dsd_subtiles_partial_tiles_modes_and_reset() {
                         assert_eq!(pool.channel_overload_count(0), modulator.overload_count());
                     }
                     pool.reset().unwrap();
+                    blocker.reset();
                     cascade.reset();
                     modulator.reset();
                 }
@@ -249,6 +257,11 @@ fn verify_stereo_dsd_bit_exact(
     let mut seq_mod_r =
         Modulator::new(order, bit_rate, dsd_cfg.dither, dsd_cfg.overload_policy).unwrap();
     seq_mod_r.set_dither_seed(SEED_BASE.wrapping_add(1));
+    let baseband_hz = bit_rate.get() as f64 / (1usize << stages) as f64;
+    let mut seq_dc_l = DcBlocker::production(baseband_hz);
+    let mut seq_dc_r = DcBlocker::production(baseband_hz);
+    let mut dc_l = vec![0.0f64; FRAMES];
+    let mut dc_r = vec![0.0f64; FRAMES];
 
     let mult = pool.rate_multiplier();
     let req_pcm = FRAMES * mult;
@@ -269,8 +282,10 @@ fn verify_stereo_dsd_bit_exact(
         }
 
         // Sequential
-        seq_cascade_l.process_tile(&bb_l, &mut seq_pcm_l).unwrap();
-        seq_cascade_r.process_tile(&bb_r, &mut seq_pcm_r).unwrap();
+        seq_dc_l.process(&bb_l, &mut dc_l);
+        seq_dc_r.process(&bb_r, &mut dc_r);
+        seq_cascade_l.process_tile(&dc_l, &mut seq_pcm_l).unwrap();
+        seq_cascade_r.process_tile(&dc_r, &mut seq_pcm_r).unwrap();
         seq_mod_l
             .process_tile_bytes(&seq_pcm_l, &mut seq_dsd_l)
             .unwrap();

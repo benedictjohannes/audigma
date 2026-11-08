@@ -1,12 +1,13 @@
 """Signal-dependent measurements of the production DSD chain (DSP quality audit, plan step 4).
 
 Every record runs the chain as `audigma run` builds it with the default settings (`Design.md §2`, §4.3-§4.4):
-baseband PCM -> profile gain L - M (M = `[gain] dsd_safety_margin_db`, default 0.25) -> `HalfBandCascade`
+baseband PCM -> profile gain L - M (M = `[gain] dsd_safety_margin_db`, default 0.25) -> `DcBlocker` (1 Hz) -> `HalfBandCascade`
 (linear phase, apodization off) -> `Modulator` with TPDF dither (0.005, the production default), harness mode `chain`.
 Levels are relative to the PCM input's full scale (a 0 dBFS PCM sine reaches the modulator at L - M).
 
 Stimuli: a 1 kHz level sweep (0 dBFS at M = 0 and M = 0.25 down to -120 dBFS), digital silence and small DC offsets,
-the same low-level set without dither, and two-tone IMD (SMPTE 60 Hz + 7 kHz 4:1, CCIF 19 + 20 kHz 1:1) at 0 dBFS peak.
+the same low-level set without dither, two-tone IMD (SMPTE 60 Hz + 7 kHz 4:1, CCIF 19 + 20 kHz 1:1) at 0 dBFS peak, and the
+DC offsets once more with the DC blocker off (what the chain did before O7).
 No pass/fail thresholds on quality figures (audit step 5); only method/invariant checks fail the run.
 """
 
@@ -24,6 +25,9 @@ PRODUCTION_MARGIN_DB = 0.25
 SWEEP_DBFS = [0.0, -1.0, -3.0, -6.0, -10.0, -20.0, -40.0, -60.0, -80.0, -100.0, -120.0]
 NO_DITHER_DBFS = [-6.0, -60.0, -100.0, -120.0]
 DC_DBFS = [-40.0, -80.0]
+# The DC blocker must leave at most this fraction of a DC offset (method check for O7; the blocker is settled for 30 time
+# constants, -261 dB, so anything left is the record's own low-frequency noise).
+DC_REMOVED_DB = 60.0
 # Measured tone level must match the requested one (method check: gain staging and cascade DC gain), within
 # LEVEL_TOL_DB plus the reading error the noise inside the tone lobe allows (3 sigma, amplitude). Checked for tones up to
 # LEVEL_CHECK_MAX_HZ only: near 20 kHz the modulator's signal transfer function itself deviates by ~0.01 dB at DSD64
@@ -45,7 +49,13 @@ IMD_STIMULI = {
 
 
 def _stimuli():
-    """(id, tones, margin, dither, samples multiplier) of every record per rate/order."""
+    """(id, tones, margin, dither, long record, DC blocker) of every record per rate/order."""
+    return [(*s, True) for s in _production_stimuli()] + [
+        (f"dc_{db:g}_unblocked", [(0.0, db)], PRODUCTION_MARGIN_DB, "tpdf", False, False) for db in DC_DBFS
+    ]
+
+
+def _production_stimuli():
     out = [("1k_L", [(1000.0, 0.0)], 0.0, "tpdf", False)]
     out += [(f"1k_{db:g}", [(1000.0, db)], PRODUCTION_MARGIN_DB, "tpdf", False) for db in SWEEP_DBFS]
     out += [("silence", [], PRODUCTION_MARGIN_DB, "tpdf", False)]
@@ -61,7 +71,7 @@ def _tones_arg(tones):
     return ",".join(f"{f:g}:{db:.6f}" for f, db in tones) or "none"
 
 
-def _run_one(harness_bin, order, rate_str, sid, tones, margin, dither, long):
+def _run_one(harness_bin, order, rate_str, sid, tones, margin, dither, long, dc_blocker):
     base = rate_str.split("_")[0]
     n = N_SAMPLES * (RATE_MULT[base] if long else 1)
     stem = f"sig_{rate_str}_ord{order}_{sid}_{dither}_m{margin:g}"
@@ -69,7 +79,8 @@ def _run_one(harness_bin, order, rate_str, sid, tones, margin, dither, long):
         harness_bin,
         stem,
         ["--mode", "chain", "--rate", rate_str, "--order", str(order), "--samples", str(n),
-         "--tones", _tones_arg(tones), "--margin-db", f"{margin:g}", "--dither", dither],
+         "--tones", _tones_arg(tones), "--margin-db", f"{margin:g}", "--dither", dither,
+         "--dc-blocker", "on" if dc_blocker else "off"],
         with_bin=True,
     )
     bits = np.unpackbits(np.fromfile(bin_out, dtype=np.uint8))[:n]
@@ -80,6 +91,7 @@ def _run_one(harness_bin, order, rate_str, sid, tones, margin, dither, long):
     tone_hz = [t["f_hz"] for t in meta["tones"] if t["f_hz"] > 0]
     return {
         "order": order, "rate": rate_str, "id": sid, "dither": dither, "margin": margin, "samples": n,
+        "dc_blocker": meta["dc_blocker"],
         "gain_db": meta["gain_db"], "limit_dbfs": meta["limit_dbfs"],
         "overloads": meta["overload_count"] + meta["warmup_overloads"],
         "peak_state": max(meta["max_state"]),
@@ -167,7 +179,8 @@ def render(sig):
 ## Signal-dependent measurements
 
 Production chain with the default settings, harness mode `chain`: baseband PCM stimulus -> profile gain `L - M`
-(`M` = {M:g} dB, `[gain] dsd_safety_margin_db` default) -> `HalfBandCascade` (linear phase, apodization `off`) -> `Modulator`
+(`M` = {M:g} dB, `[gain] dsd_safety_margin_db` default) -> `DcBlocker` (first-order high-pass, 1 Hz; settled for 30 time
+constants before the record) -> `HalfBandCascade` (linear phase, apodization `off`) -> `Modulator`
 (TPDF dither 0.005, seed 12345). Every record is checked bit for bit against the per-sample modulator path (`PeakTracker`).
 
 **Levels.** dBFS is relative to the PCM input's full scale: a 0 dBFS PCM sine reaches the modulator at `L - M`
@@ -256,6 +269,33 @@ highest prominence over the stimuli -120/-100/-60 dBFS 1 kHz, silence and DC -40
                 return f"{r['spur_prominence_db']:.1f} dB ({r['id'].replace('1k_', '1 kHz ').replace('dc_', 'DC ')}, {r['spur_hz'] / 1e3:.2f} kHz, {r['spur_db']:.1f} dBFS)"
 
             text += f"| {order} | `{rate.upper()}` | {'at floor' if delta is None else f'{delta:+.2f}'} | {worst('none')} | {worst('tpdf')} |\n"
+
+    text += f"""
+### DC offsets: DC blocker off vs on (dither on)
+
+A DC offset `u` at the modulator input gives an idle tone near `u * f_bit` that the dither does not remove (F9). The
+production chain removes source DC with a first-order 1 Hz high-pass ahead of the cascade (`Design.md` §4.1). "Off" is the
+chain without it (before O7). Residual DC is the record's windowed mean (dBFS). Prominence near {prom_med:.1f} dB (white-noise
+median, max {prom_max:.1f} dB) means no tone above the noise.
+
+| Order | Rate | DC (dBFS) | Off: worst spur (prominence, kHz, dBFS) | Off: residual DC (dBFS) | On: worst spur (prominence, kHz, dBFS) | On: residual DC (dBFS) |
+|---:|---|---:|---|---:|---|---:|
+"""
+
+    def spur(r):
+        return f"{r['spur_prominence_db']:.1f} dB, {r['spur_hz'] / 1e3:.2f} kHz, {r['spur_db']:.1f}"
+
+    for order in ORDERS:
+        for rate, _, _ in DIRECT_RATES:
+            for db in DC_DBFS:
+                off, on = get(order, rate, f"dc_{db:g}_unblocked"), get(order, rate, f"dc_{db:g}")
+                text += (
+                    f"| {order} | `{rate.upper()}` | {db:g} | {spur(off)} | {off['dc_db']:.1f} | "
+                    f"{spur(on)} | {on['dc_db']:.1f} |\n"
+                )
+                # Invariant: the blocker removes the DC (residual at least DC_REMOVED_DB below the input offset).
+                if on["dc_db"] > db - DC_REMOVED_DB:
+                    failures.append(f"Signal: DC blocker left {on['dc_db']:.1f} dBFS of a {db:g} dBFS offset at order {order} {rate}")
 
     text += """
 ### Two-tone intermodulation (0 dBFS peak, dither on)
