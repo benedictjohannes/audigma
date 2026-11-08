@@ -16,11 +16,11 @@ def now_str():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
 
 
-def family_header(key, env_info, extra=""):
+def family_header(key, env_info, extra="", generated=None):
     title = FAMILIES[key][0]
     return f"""# audigma — {title} Measurements
 
-> **Generated:** `{now_str()}`  
+> **Generated:** `{generated or now_str()}`  
 > **Evaluated on:** `{env_info['cpu']}` running `{env_info['os']}`  
 > **Rust compiler:** `{env_info['rustc']}`  
 > **Hardware FTZ/DAZ:** `{env_info['ftz_daz_status']}`  
@@ -31,11 +31,14 @@ def family_header(key, env_info, extra=""):
 """
 
 
-def write_family(key, env_info, sections, extra="", preamble=""):
-    """Writes docs/measurements/<key>.md from rendered Sections; returns the path."""
+def write_family(key, env_info, sections, extra="", preamble="", generated=None):
+    """Writes docs/measurements/<key>.md from rendered Sections; returns the path.
+
+    `generated` overrides the header timestamp (the benchmark report carries the time of its last run, so
+    re-rendering it without re-running changes nothing)."""
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     path = REPORT_DIR / f"{key}.md"
-    text = family_header(key, env_info, extra) + preamble + "".join(unnumber(s.text) for s in sections)
+    text = family_header(key, env_info, extra, generated) + preamble + "".join(unnumber(s.text) for s in sections)
     path.write_text(text)
     return path
 

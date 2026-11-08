@@ -1,6 +1,6 @@
 # audigma — Resampler Measurements
 
-> **Generated:** `2026-11-08 09:52:07Z`  
+> **Generated:** `2026-11-08 10:56:20Z`  
 > **Evaluated on:** `AMD Ryzen AI 7 350 w/ Radeon 860M (x86_64)` running `CachyOS (Linux 7.3.1-1-cachyos)`  
 > **Rust compiler:** `rustc 1.98.0 (88d9e12ae 2026-08-18)`  
 > **Hardware FTZ/DAZ:** `Active (hardware-verified)`  

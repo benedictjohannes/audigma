@@ -35,7 +35,6 @@ def run(harness_bin, oracle_results):
             )
 
             metrics = analyze_bitstream(bin_out, f_bit, meta["k_bin"], N_SAMPLES)
-            last_idx = len(meta["max_state"]) - 1
             theo = oracle_results[order][rate_str]
             mismatches = bitexact_mismatches(bin_out, theo["synth"], N_SAMPLES, meta["k_bin"], -6.0)
             floor_db = analysis_floor_snr_db(theo["synth"], f_bit, N_SAMPLES, meta["k_bin"], -6.0)
@@ -49,7 +48,7 @@ def run(harness_bin, oracle_results):
                 "k_bin": meta["k_bin"],
                 "f_tone_hz": meta["f_tone_hz"],
                 "max_state": meta["max_state"],
-                "last_state": meta["max_state"][last_idx],
+                "peak_state": max(meta["max_state"]),
                 "overload_count": meta["overload_count"],
                 "bitexact_mismatches": mismatches,
                 "analysis_floor_db": floor_db,
@@ -61,7 +60,7 @@ def run(harness_bin, oracle_results):
                 f"  [Order {order}] {res['rate']:10s} ({family}): Measured SNR = {res['snr_db']:6.2f} dB{theo_str}, "
                 f"SINAD = {res['sinad_db']:6.2f} dB, THD = {res['thd_db']:6.2f} dB, "
                 f"Ultra1 = {res['ultra1_db']:6.2f} dB, Spur = {res['spur_dbc']:7.2f} dBc, "
-                f"Max |x_{order}| = {res['last_state']:.4f}, "
+                f"Peak |x| = {res['peak_state']:.4f}, "
                 f"bit mismatches vs reference = {mismatches}, analysis floor = {floor_db:.1f} dB"
             )
     return direct_results
@@ -81,11 +80,11 @@ Test conditions: Direct coherent 1 kHz sine at -6.0 dBFS (f_tone = k * f_bit / N
         report += f"""
 ### 2.{order // 3} {order}th-Order CRFB Modulator
 
-| Target Rate | Family | f_bit (Hz) | OSR | Tone (dBFS) | Theoretical Oracle SNR | Measured In-Band SNR | Delta | Analysis floor | SINAD (dB) | THD (dB) | Ultrasonic 20–100 kHz | Worst spur (dBc) | Max abs x{order} | Bit-exact vs reference | Verdict |
+| Target Rate | Family | f_bit (Hz) | OSR | Tone (dBFS) | Theoretical Oracle SNR | Measured In-Band SNR | Delta | Analysis floor | SINAD (dB) | THD (dB) | Ultrasonic 20–100 kHz | Worst spur (dBc) | Peak abs state | Bit-exact vs reference | Verdict |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|:---:|:---:|
 """
         for r in direct_results[order]:
-            is_stable = r["overload_count"] == 0 and r["last_state"] < 50.0
+            is_stable = r["overload_count"] == 0 and r["peak_state"] < 50.0
             if not is_stable:
                 verdict = "**FAIL (Unstable)**"
                 failed_checks.append(f"Direct Order {order} {r['rate']} stability")
@@ -108,7 +107,7 @@ Test conditions: Direct coherent 1 kHz sine at -6.0 dBFS (f_tone = k * f_bit / N
             report += (
                 f"| `{r['rate']}` | {r['family']} | {r['f_bit_hz']:,} | {r['osr']:.1f} | "
                 f"{r['tone_dbfs']:.2f} | {theo_snr_str} | **{fmt_snr(r)}** | {delta_str} | {r['analysis_floor_db']:.0f} dB | "
-                f"{r['sinad_db']:.2f} | {r['thd_db']:.2f} | {r['ultra1_db']:.2f} dB | {r['spur_dbc']:.1f} | {r['last_state']:.4f} | {bitexact_str} | {verdict} |\n"
+                f"{r['sinad_db']:.2f} | {r['thd_db']:.2f} | {r['ultra1_db']:.2f} dB | {r['spur_dbc']:.1f} | {r['peak_state']:.4f} | {bitexact_str} | {verdict} |\n"
             )
 
     report += r"""

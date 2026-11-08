@@ -34,14 +34,13 @@ def run(harness_bin):
         # DC offset (+0.5) across all 8 rate/family cases
         for rate_str, _, _ in DIRECT_RATES:
             meta, _ = run_harness(harness_bin, f"dc_{rate_str}_ord{order}", _base_args("dc", rate_str, order))
-            last_idx = len(meta["max_state"]) - 1
             stability_results[order]["dc"].append({
                 "rate": rate_str.upper(),
                 "order": order,
                 "dc_val": meta["dc_val"],
                 "ones_ratio": meta["ones_ratio"],
                 "max_state": meta["max_state"],
-                "last_state": meta["max_state"][last_idx],
+                "peak_state": max(meta["max_state"]),
                 "overload_count": meta["overload_count"],
             })
 
@@ -50,12 +49,11 @@ def run(harness_bin):
             meta, _ = run_harness(
                 harness_bin, f"multitone_{rate_str}_ord{order}", _base_args("multitone", rate_str, order)
             )
-            last_idx = len(meta["max_state"]) - 1
             stability_results[order]["multitone"].append({
                 "rate": rate_str.upper(),
                 "order": order,
                 "max_state": meta["max_state"],
-                "last_state": meta["max_state"][last_idx],
+                "peak_state": max(meta["max_state"]),
                 "overload_count": meta["overload_count"],
             })
 
@@ -74,9 +72,14 @@ def run(harness_bin):
                 "rate": rate_str.upper(),
                 "order": order,
                 "overload_count": meta["overload_count"],
+                "step_overloads": meta["step_overloads"],
+                "tail_overloads": meta["tail_overloads"],
                 "recovered_stable": meta["recovered_stable"],
                 "idle_0x69_count": meta.get("overload_idle_0x69_count", 0),
                 "zero_0x00_count": meta.get("overload_zero_0x00_count", 0),
+                "tail_rail_bytes": meta["tail_rail_bytes"],
+                "tail_error_rms": meta["tail_error_rms"],
+                "reference_error_rms": meta["reference_error_rms"],
                 "state_after_recovery": meta["state_after_recovery"],
             })
     return stability_results
@@ -122,36 +125,36 @@ Modulator stability was evaluated across four distinct dynamic edge cases per `D
 ### 4.2 Positive DC Offset (+0.5 Normalized)
 - Evaluates behavior under sustained DC bias within the stable operating envelope.
 
-| Target Rate | Order | Input DC | Ones Ratio | Peak State (xn) | Overload Count | Verdict |
+| Target Rate | Order | Input DC | Ones Ratio | Peak abs state | Overload Count | Verdict |
 |---|:---:|---:|---:|---:|:---:|:---:|
 """
     for order in ORDERS:
         for d in stability_results[order]["dc"]:
-            is_pass = d["overload_count"] == 0 and d["last_state"] < 50.0 and d["ones_ratio"] > 0.50
+            is_pass = d["overload_count"] == 0 and d["peak_state"] < 50.0 and d["ones_ratio"] > 0.50
             verdict = "**PASS**" if is_pass else "**FAIL**"
             if not is_pass:
                 failed_checks.append(f"DC Offset Order {order} {d['rate']}")
             report += (
                 f"| `{d['rate']}` | {order} | +{d['dc_val']:.2f} | {d['ones_ratio']:.4f} | "
-                f"{d['last_state']:.4f} | {d['overload_count']} | {verdict} |\n"
+                f"{d['peak_state']:.4f} | {d['overload_count']} | {verdict} |\n"
             )
 
     report += r"""
 ### 4.3 High-Crest Multitone Bursts
 - Sum of simultaneous audio frequencies with peak amplitude within -6.0 dBFS.
 
-| Target Rate | Order | Test Description | Peak State (xn) | Overload Count | Verdict |
+| Target Rate | Order | Test Description | Peak abs state | Overload Count | Verdict |
 |---|:---:|---|---:|:---:|:---:|
 """
     for order in ORDERS:
         for m in stability_results[order]["multitone"]:
-            is_pass = m["overload_count"] == 0 and m["last_state"] < 50.0
+            is_pass = m["overload_count"] == 0 and m["peak_state"] < 50.0
             verdict = "**PASS**" if is_pass else "**FAIL**"
             if not is_pass:
                 failed_checks.append(f"Multitone Order {order} {m['rate']}")
             report += (
                 f"| `{m['rate']}` | {order} | 10-Tone Composite (100Hz–18kHz) | "
-                f"{m['last_state']:.4f} | {m['overload_count']} | {verdict} |\n"
+                f"{m['peak_state']:.4f} | {m['overload_count']} | {verdict} |\n"
             )
 
     report += r"""
@@ -178,29 +181,33 @@ Modulator stability was evaluated across four distinct dynamic edge cases per `D
 
     report += r"""
 ### 4.4 Intentional Overload & Autonomous Recovery
-- Injects a severe +5.0 step transient (violating the stable envelope), triggering `OverloadPolicy::MuteRecover`.
-- **Expected Behavior:** Overload event is recorded, integrator states are zeroed, output falls back to balanced DSD idle sequence (`0x69`), and modulation cleanly resumes once signal returns to normal.
+- Injects a severe +5.0 step (2 tiles) into a 0.1-amplitude 1 kHz sine (timed at each target's own bit rate), triggering `OverloadPolicy::MuteRecover`.
+- **Expected behavior:** the overload is recorded, integrator states are zeroed, the output falls back to the balanced DSD idle sequence (`0x69`) with no `0x00` bytes, and modulation resumes cleanly.
+- **Clean resumption** is checked on the tail (after 4 settling tiles): no further overloads, no rail-lock bytes (`0x00` / `0xFF`), bounded states, and a low-passed reconstruction error
+  (mean of the bits over 128-bit blocks against the mean input) of at most 1.5x that of a reference modulator that never overloaded (same seed, same sine).
 
-| Target Rate | Order | Injected Transient | Overload Detected | Idle 0x69 Pattern Emitted | States Clamped & Recovered | Verdict |
-|---|:---:|---:|:---:|:---:|:---:|:---:|
+| Target Rate | Order | Overloads (step / tail) | Idle 0x69 bytes in step | Tail rail bytes | Tail error rms | Reference error rms | Verdict |
+|---|:---:|:---:|:---:|:---:|---:|---:|:---:|
 """
     for order in ORDERS:
         for o in stability_results[order]["overload"]:
             idle_0x69 = o.get("idle_0x69_count", 0)
             zero_0x00 = o.get("zero_0x00_count", 0)
             is_pass = (
-                o["overload_count"] > 0
+                o["step_overloads"] > 0
+                and o["tail_overloads"] == 0
                 and o["recovered_stable"]
                 and idle_0x69 > 0
                 and zero_0x00 == 0
+                and o["tail_rail_bytes"] == 0
+                and o["tail_error_rms"] <= 1.5 * o["reference_error_rms"]
                 and max(o["state_after_recovery"]) < 50.0
             )
-            recovered_str = "Yes (States Bounded)" if o["recovered_stable"] else "No"
             verdict = "**PASS**" if is_pass else "**FAIL**"
             if not is_pass:
                 failed_checks.append(f"Overload Recovery Order {order} {o['rate']}")
             report += (
-                f"| `{o['rate']}` | {order} | +5.0 (step overload) | "
-                f"Yes ({o['overload_count']} events) | Yes ({idle_0x69:,} bytes) | {recovered_str} | {verdict} |\n"
+                f"| `{o['rate']}` | {order} | {o['step_overloads']} / {o['tail_overloads']} | {idle_0x69:,} | "
+                f"{o['tail_rail_bytes']} | {o['tail_error_rms']:.2e} | {o['reference_error_rms']:.2e} | {verdict} |\n"
             )
     return Section(report, failed_checks)

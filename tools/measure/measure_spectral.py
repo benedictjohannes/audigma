@@ -15,13 +15,15 @@ Writes one report per measurement family to docs/measurements/ plus an index (re
 - cascade.md: the half-band cascade as implemented (impulse response, tone cross-check, against design_halfband.py)
   and cascade + modulator end to end.
 - resampler.md: compiled SRC banks vs design_src.py, polyphase rational SRC and ASRC through PolyphaseResampler.
-- benchmark.md: CPU throughput and deadline budget. Opt-in (--benchmark): it needs a quiet machine, so coordinate
-  with the user (AGENTS.md). The last results are kept in docs/measurements/benchmark.json.
+- benchmark.md: CPU throughput and deadline budget. Part of a default run; it needs a quiet machine, so coordinate
+  with the user (AGENTS.md) or pass --skip-benchmark (the report is then re-rendered from the last results kept in
+  docs/measurements/benchmark.json).
 
 Usage:
-    uv run tools/measure/measure_spectral.py                  # all spectral families + index
-    uv run tools/measure/measure_spectral.py --only resampler # one family; the index is not updated
-    uv run tools/measure/measure_spectral.py --benchmark      # also (re)run the benchmark
+    uv run tools/measure/measure_spectral.py                       # everything, including the benchmark + index
+    uv run tools/measure/measure_spectral.py --skip-benchmark      # spectral families + index, benchmark not run
+    uv run tools/measure/measure_spectral.py --only resampler      # one family; the index is not updated
+    uv run tools/measure/measure_spectral.py --only benchmark      # only the benchmark
 
 Layout: this file only orchestrates; each family lives in tools/measure/spectral/ (modules with run() for measurement
 and render() for markdown). Always use `uv run` (scipy is required).
@@ -54,10 +56,12 @@ SPECTRAL_FAMILIES = ["modulator", "cascade", "resampler"]
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--only", nargs="+", choices=SPECTRAL_FAMILIES + ["benchmark"], help="run only these families")
-    ap.add_argument("--benchmark", action="store_true", help="also (re)run the CPU benchmark (quiet machine required)")
+    ap.add_argument("--skip-benchmark", action="store_true", help="do not run the CPU benchmark (the saved results are reused)")
     args = ap.parse_args()
-    families = set(args.only or SPECTRAL_FAMILIES)
-    run_bench = args.benchmark or "benchmark" in families
+    families = set(args.only or SPECTRAL_FAMILIES + ["benchmark"])
+    if args.skip_benchmark:
+        families.discard("benchmark")
+    run_bench = "benchmark" in families
     full = set(SPECTRAL_FAMILIES) <= families
 
     harness_bin = ensure_harness_binary()
@@ -136,6 +140,7 @@ def main():
         report.write_family(
             "benchmark", env_info, [b_sec],
             extra=f"> **Benchmark placement:** `{bench_stats['placement']}` (measured `{bench_stats['measured_at']}`)  \n",
+            generated=bench_stats["measured_at"],
         )
         failures["benchmark"] = b_sec.failures
         headlines["benchmark"] = (
@@ -143,7 +148,7 @@ def main():
             f"(last run {bench_stats['measured_at']})"
         )
     else:
-        headlines["benchmark"] = "never run (use --benchmark on a quiet machine)"
+        headlines["benchmark"] = "never run (run without --skip-benchmark on a quiet machine)"
 
     if full:
         direct_results, stability_results = results["modulator"]

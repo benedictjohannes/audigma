@@ -1,6 +1,6 @@
 # audigma — Cascade Measurements
 
-> **Generated:** `2026-11-08 09:52:03Z`  
+> **Generated:** `2026-11-08 10:56:16Z`  
 > **Evaluated on:** `AMD Ryzen AI 7 350 w/ Radeon 860M (x86_64)` running `CachyOS (Linux 7.3.1-1-cachyos)`  
 > **Rust compiler:** `rustc 1.98.0 (88d9e12ae 2026-08-18)`  
 > **Hardware FTZ/DAZ:** `Active (hardware-verified)`  
@@ -148,30 +148,46 @@ Agreement tolerance: 0.001 dB.
 
 ## End-to-End Cascade + Modulator Verification
 
-Test conditions: Baseband PCM 1 kHz coherent tone at -6.0 dBFS upsampled via `HalfBandCascade` (2^K linear-phase interpolation, apodization `off` or pass edge 20 kHz) directly into `Modulator`.
+Test conditions: Baseband PCM 1 kHz coherent tone at -6.0 dBFS upsampled via `HalfBandCascade` (2^K interpolation; linear or minimum phase, apodization `off` or pass edge 20 kHz) directly into `Modulator`.
 
 ### 5th-Order Modulator Pipeline
 
-| Target Rate | Apodization | Cascade Stages | In-Band SNR | Analysis floor | SINAD (dB) | THD (dB) | Ultrasonic 20–100 kHz | Worst spur (dBc) | Max abs x5 | Verdict |
-|---|---|:---:|---:|---:|---:|---:|---:|---:|---:|:---:|
-| `DSD64` | `off` | 6 | **115.14 dB** | 133 dB | 114.52 | -123.25 | -24.93 dB | -131.6 | 0.8472 | **PASS** |
-| `DSD64` | `20000` | 6 | **115.23 dB** | 133 dB | 114.59 | -123.24 | -24.78 dB | -130.9 | 0.8854 | **PASS** |
-| `DSD128` | `off` | 7 | **148.21 dB** | 171 dB | 147.15 | -153.78 | -53.56 dB | -161.1 | 0.8928 | **PASS** |
-| `DSD128` | `20000` | 7 | **147.97 dB** | 171 dB | 147.02 | -154.08 | -53.55 dB | -161.8 | 0.8567 | **PASS** |
-| `DSD256` | `off` | 8 | **181.68 dB** | 200 dB | 179.57 | -183.71 | -86.67 dB | -194.6 | 0.8842 | **PASS** |
-| `DSD256` | `20000` | 8 | **181.49 dB** | 200 dB | 179.71 | -184.44 | -86.63 dB | -194.1 | 0.7935 | **PASS** |
-| `DSD512` | `off` | 9 | **214.97 dB** | 235 dB | 211.11 | -213.41 | -119.93 dB | -224.0 | 0.8358 | **PASS** |
-| `DSD512` | `20000` | 9 | **215.87 dB** | 235 dB | 211.74 | -213.87 | -119.74 dB | -227.5 | 0.9058 | **PASS** |
+| Target Rate | Phase | Apodization | Cascade Stages | In-Band SNR | Analysis floor | SINAD (dB) | THD (dB) | Ultrasonic 20–100 kHz | Worst spur (dBc) | Peak abs state | Verdict |
+|---|---|---|:---:|---:|---:|---:|---:|---:|---:|:---:|
+| `DSD64` | `linear` | `off` | 6 | **115.14 dB** | 133 dB | 114.52 | -123.25 | -24.93 dB | -131.6 | 0.9759 | **PASS** |
+| `DSD64` | `linear` | `20000` | 6 | **115.23 dB** | 133 dB | 114.59 | -123.24 | -24.78 dB | -130.9 | 0.9792 | **PASS** |
+| `DSD64` | `minimum` | `off` | 6 | **115.20 dB** | 133 dB | 114.46 | -122.50 | -25.03 dB | -132.6 | 0.9775 | **PASS** |
+| `DSD64` | `minimum` | `20000` | 6 | **115.26 dB** | 133 dB | 114.64 | -123.38 | -24.94 dB | -130.5 | 0.9758 | **PASS** |
+| `DSD128` | `linear` | `off` | 7 | **148.21 dB** | 171 dB | 147.15 | -153.78 | -53.56 dB | -161.1 | 0.9798 | **PASS** |
+| `DSD128` | `linear` | `20000` | 7 | **147.97 dB** | 171 dB | 147.02 | -154.08 | -53.55 dB | -161.8 | 0.9816 | **PASS** |
+| `DSD128` | `minimum` | `off` | 7 | **148.56 dB** | 171 dB | 147.46 | -153.97 | -53.74 dB | -163.0 | 0.9827 | **PASS** |
+| `DSD128` | `minimum` | `20000` | 7 | **148.32 dB** | 171 dB | 147.26 | -153.91 | -53.66 dB | -161.1 | 0.9773 | **PASS** |
+| `DSD256` | `linear` | `off` | 8 | **181.68 dB** | 200 dB | 179.57 | -183.71 | -86.67 dB | -194.6 | 0.9800 | **PASS** |
+| `DSD256` | `linear` | `20000` | 8 | **181.49 dB** | 200 dB | 179.71 | -184.44 | -86.63 dB | -194.1 | 0.9777 | **PASS** |
+| `DSD256` | `minimum` | `off` | 8 | **181.39 dB** | 200 dB | 179.54 | -184.16 | -86.88 dB | -193.5 | 0.9878 | **PASS** |
+| `DSD256` | `minimum` | `20000` | 8 | **181.62 dB** | 200 dB | 179.52 | -183.69 | -86.84 dB | -193.0 | 0.9746 | **PASS** |
+| `DSD512` | `linear` | `off` | 9 | **214.97 dB** | 235 dB | 211.11 | -213.41 | -119.93 dB | -224.0 | 0.9837 | **PASS** |
+| `DSD512` | `linear` | `20000` | 9 | **215.87 dB** | 235 dB | 211.74 | -213.87 | -119.74 dB | -227.5 | 0.9762 | **PASS** |
+| `DSD512` | `minimum` | `off` | 9 | **215.33 dB** | 235 dB | 211.55 | -213.90 | -120.48 dB | -227.6 | 0.9863 | **PASS** |
+| `DSD512` | `minimum` | `20000` | 9 | **215.05 dB** | 235 dB | 211.33 | -213.73 | -119.94 dB | -225.4 | 0.9876 | **PASS** |
 
 ### 7th-Order Modulator Pipeline
 
-| Target Rate | Apodization | Cascade Stages | In-Band SNR | Analysis floor | SINAD (dB) | THD (dB) | Ultrasonic 20–100 kHz | Worst spur (dBc) | Max abs x7 | Verdict |
-|---|---|:---:|---:|---:|---:|---:|---:|---:|---:|:---:|
-| `DSD64` | `off` | 6 | **134.00 dB** | 150 dB | 133.38 | -142.10 | -19.91 dB | -150.7 | 0.8816 | **PASS** |
-| `DSD64` | `20000` | 6 | **133.85 dB** | 150 dB | 133.21 | -141.83 | -19.90 dB | -147.6 | 0.9064 | **PASS** |
-| `DSD128` | `off` | 7 | **179.01 dB** | 201 dB | 177.70 | -183.53 | -45.83 dB | -192.2 | 0.8226 | **PASS** |
-| `DSD128` | `20000` | 7 | **178.94 dB** | 201 dB | 177.76 | -184.00 | -45.88 dB | -192.3 | 0.8323 | **PASS** |
-| `DSD256` | `off` | 8 | **224.12 dB** | 242 dB | 222.02 | -226.20 | -91.23 dB | -232.7 | 0.8887 | **PASS** |
-| `DSD256` | `20000` | 8 | **224.35 dB** | 242 dB | 221.96 | -225.69 | -91.50 dB | -236.1 | 0.8573 | **PASS** |
-| `DSD512` | `off` | 9 | **270.09 dB** | 281 dB | 266.01 | -268.16 | -136.02 dB | -280.1 | 0.9001 | **PASS** |
-| `DSD512` | `20000` | 9 | **269.78 dB** | 281 dB | 265.95 | -268.27 | -136.97 dB | -276.9 | 0.6912 | **PASS** |
+| Target Rate | Phase | Apodization | Cascade Stages | In-Band SNR | Analysis floor | SINAD (dB) | THD (dB) | Ultrasonic 20–100 kHz | Worst spur (dBc) | Peak abs state | Verdict |
+|---|---|---|:---:|---:|---:|---:|---:|---:|---:|:---:|
+| `DSD64` | `linear` | `off` | 6 | **134.00 dB** | 150 dB | 133.38 | -142.10 | -19.91 dB | -150.7 | 0.9925 | **PASS** |
+| `DSD64` | `linear` | `20000` | 6 | **133.85 dB** | 150 dB | 133.21 | -141.83 | -19.90 dB | -147.6 | 0.9824 | **PASS** |
+| `DSD64` | `minimum` | `off` | 6 | **133.95 dB** | 150 dB | 133.28 | -141.72 | -20.01 dB | -148.8 | 0.9856 | **PASS** |
+| `DSD64` | `minimum` | `20000` | 6 | **134.26 dB** | 150 dB | 133.62 | -142.23 | -20.00 dB | -150.3 | 0.9845 | **PASS** |
+| `DSD128` | `linear` | `off` | 7 | **179.01 dB** | 201 dB | 177.70 | -183.53 | -45.83 dB | -192.2 | 0.9893 | **PASS** |
+| `DSD128` | `linear` | `20000` | 7 | **178.94 dB** | 201 dB | 177.76 | -184.00 | -45.88 dB | -192.3 | 1.0158 | **PASS** |
+| `DSD128` | `minimum` | `off` | 7 | **179.00 dB** | 201 dB | 177.80 | -183.97 | -45.64 dB | -191.6 | 0.9833 | **PASS** |
+| `DSD128` | `minimum` | `20000` | 7 | **179.23 dB** | 201 dB | 178.15 | -184.72 | -45.76 dB | -190.4 | 1.0098 | **PASS** |
+| `DSD256` | `linear` | `off` | 8 | **224.12 dB** | 242 dB | 222.02 | -226.20 | -91.23 dB | -232.7 | 0.9912 | **PASS** |
+| `DSD256` | `linear` | `20000` | 8 | **224.35 dB** | 242 dB | 221.96 | -225.69 | -91.50 dB | -236.1 | 1.0022 | **PASS** |
+| `DSD256` | `minimum` | `off` | 8 | **224.43 dB** | 242 dB | 222.28 | -226.36 | -91.48 dB | -234.9 | 1.0090 | **PASS** |
+| `DSD256` | `minimum` | `20000` | 8 | **224.51 dB** | 242 dB | 222.40 | -226.55 | -91.35 dB | -235.6 | 1.0030 | **PASS** |
+| `DSD512` | `linear` | `off` | 9 | **270.09 dB** | 281 dB | 266.01 | -268.16 | -136.02 dB | -280.1 | 0.9899 | **PASS** |
+| `DSD512` | `linear` | `20000` | 9 | **269.78 dB** | 281 dB | 265.95 | -268.27 | -136.97 dB | -276.9 | 1.0104 | **PASS** |
+| `DSD512` | `minimum` | `off` | 9 | **269.53 dB** | 281 dB | 265.98 | -268.52 | -136.28 dB | -278.9 | 0.9900 | **PASS** |
+| `DSD512` | `minimum` | `20000` | 9 | **270.51 dB** | 281 dB | 266.09 | -268.04 | -136.15 dB | -282.2 | 1.0004 | **PASS** |

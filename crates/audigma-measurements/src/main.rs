@@ -20,6 +20,7 @@ struct HarnessConfig {
     mode: String,
     rate: String,
     order: u8,
+    phase: FilterPhase,
     apodization: Apodization,
     samples: usize,
     amp_db: f64,
@@ -37,6 +38,7 @@ fn parse_args() -> HarnessConfig {
         mode: "direct-sine".to_string(),
         rate: "dsd64".to_string(),
         order: 5,
+        phase: FilterPhase::Linear,
         apodization: Apodization::Off,
         samples: 1_048_576,
         amp_db: -6.0,
@@ -61,6 +63,14 @@ fn parse_args() -> HarnessConfig {
             "--order" => {
                 i += 1;
                 config.order = args[i].parse().expect("Invalid order");
+            }
+            "--phase" => {
+                i += 1;
+                config.phase = match args[i].as_str() {
+                    "linear" => FilterPhase::Linear,
+                    "minimum" => FilterPhase::Minimum,
+                    other => panic!("Unknown phase: {other}"),
+                };
             }
             "--apodization" => {
                 i += 1;
@@ -121,6 +131,50 @@ fn parse_rate(rate_str: &str) -> (DsdBitRateHz, u32, usize, u32) {
         "dsd256_48" => (DsdBitRateHz::DSD256_48, 12_288_000, 8, 48_000),
         "dsd512_48" => (DsdBitRateHz::DSD512_48, 24_576_000, 9, 48_000),
         other => panic!("Unknown rate: {other}"),
+    }
+}
+
+/// True per-sample peak of every integrator state.
+///
+/// `Modulator::state_slice` only exposes the state at tile boundaries, so the production tile path cannot show the
+/// peak. A clone of the modulator (same state, same dither stream) runs the per-sample path `step_sample` on the same
+/// input; its states give the true peak, and its bits must equal the production tile bytes (a bit-exactness check
+/// for free, run on every stimulus).
+struct PeakTracker {
+    shadow: Modulator,
+    peak: Vec<f64>,
+}
+
+impl PeakTracker {
+    /// Clones `modulator` at its current state.
+    fn new(modulator: &Modulator) -> Self {
+        Self {
+            shadow: modulator.clone(),
+            peak: vec![0.0; modulator.state_slice().len()],
+        }
+    }
+
+    /// Runs `input` through the production tile path (`modulator`) and the shadow per-sample path.
+    fn process(&mut self, modulator: &mut Modulator, input: &[f64], out_bytes: &mut [u8]) {
+        modulator.process_tile_bytes(input, out_bytes).unwrap();
+        for (chunk, bytes) in input.chunks(8).zip(out_bytes.iter()) {
+            let mut byte = 0u8;
+            for &u in chunk {
+                byte = (byte << 1) | self.shadow.step_sample(u).unwrap();
+                for (p, &x) in self.peak.iter_mut().zip(self.shadow.state_slice()) {
+                    *p = p.max(x.abs());
+                }
+            }
+            assert_eq!(
+                byte, *bytes,
+                "shadow per-sample path differs from the production tile path"
+            );
+        }
+    }
+
+    /// Largest peak over all integrators.
+    fn overall(&self) -> f64 {
+        self.peak.iter().copied().fold(0.0, f64::max)
     }
 }
 
@@ -269,7 +323,7 @@ fn run_direct_sine(config: &HarnessConfig, modulator: &mut Modulator, f_bit_hz: 
 
     let start = Instant::now();
     let num_tiles = n / TILE_BITS;
-    let mut max_state = vec![0.0f64; modulator.state_slice().len()];
+    let mut tracker = PeakTracker::new(modulator);
 
     for t_idx in 0..num_tiles {
         let bit_offset = t_idx * TILE_BITS;
@@ -279,15 +333,9 @@ fn run_direct_sine(config: &HarnessConfig, modulator: &mut Modulator, f_bit_hz: 
             *pcm = amp * phase.sin();
         }
 
-        modulator
-            .process_tile_bytes(&pcm_tile, &mut tile_bytes)
-            .unwrap();
+        tracker.process(modulator, &pcm_tile, &mut tile_bytes);
         raw_bytes[t_idx * (TILE_BITS / 8)..(t_idx + 1) * (TILE_BITS / 8)]
             .copy_from_slice(&tile_bytes);
-
-        for (cur_max, &s) in max_state.iter_mut().zip(modulator.state_slice()) {
-            *cur_max = cur_max.max(s.abs());
-        }
     }
     let elapsed = start.elapsed();
 
@@ -319,7 +367,7 @@ fn run_direct_sine(config: &HarnessConfig, modulator: &mut Modulator, f_bit_hz: 
             config.amp_db,
             elapsed.as_secs_f64(),
             modulator.overload_count(),
-            format_state_json(&max_state)
+            format_state_json(&tracker.peak)
         );
         let mut f = File::create(path).unwrap();
         f.write_all(json.as_bytes()).unwrap();
@@ -343,7 +391,7 @@ fn run_cascade_sine(
     let tile_expanded = TILE_BASEBAND * multiplier;
 
     let mut cascade = HalfBandCascade::new(
-        FilterPhase::Linear,
+        config.phase,
         config.apodization,
         cascade_stages,
         TILE_BASEBAND,
@@ -375,7 +423,7 @@ fn run_cascade_sine(
     let mut tile_bytes = vec![0u8; tile_expanded / 8];
 
     let start = Instant::now();
-    let mut max_state = vec![0.0f64; modulator.state_slice().len()];
+    let mut tracker = PeakTracker::new(modulator);
 
     for t_idx in 0..total_tiles {
         let sample_offset = t_idx * TILE_BASEBAND;
@@ -386,16 +434,10 @@ fn run_cascade_sine(
         }
 
         cascade.process_tile(&bb_tile, &mut exp_tile).unwrap();
-        modulator
-            .process_tile_bytes(&exp_tile, &mut tile_bytes)
-            .unwrap();
+        tracker.process(modulator, &exp_tile, &mut tile_bytes);
 
         let byte_offset = t_idx * (tile_expanded / 8);
         raw_bytes[byte_offset..byte_offset + (tile_expanded / 8)].copy_from_slice(&tile_bytes);
-
-        for (cur_max, &s) in max_state.iter_mut().zip(modulator.state_slice()) {
-            *cur_max = cur_max.max(s.abs());
-        }
     }
     let elapsed = start.elapsed();
 
@@ -411,6 +453,7 @@ fn run_cascade_sine(
   "rate": "{}",
   "order": {},
   "apodization": "{}",
+  "phase": "{:?}",
   "cascade_stages": {},
   "f_bit_hz": {},
   "k_bin": {},
@@ -424,6 +467,7 @@ fn run_cascade_sine(
             config.rate,
             config.order,
             config.apodization,
+            config.phase,
             cascade_stages,
             f_bit_hz,
             k_bin,
@@ -431,7 +475,7 @@ fn run_cascade_sine(
             config.amp_db,
             elapsed.as_secs_f64(),
             modulator.overload_count(),
-            format_state_json(&max_state)
+            format_state_json(&tracker.peak)
         );
         let mut f = File::create(path).unwrap();
         f.write_all(json.as_bytes()).unwrap();
@@ -454,12 +498,10 @@ fn run_silence(config: &HarnessConfig, modulator: &mut Modulator, _f_bit_hz: u32
 
     let start = Instant::now();
     let num_tiles = n / TILE_BITS;
-    let mut max_state = vec![0.0f64; modulator.state_slice().len()];
+    let mut tracker = PeakTracker::new(modulator);
 
     for t_idx in 0..num_tiles {
-        modulator
-            .process_tile_bytes(&silence_tile, &mut tile_bytes)
-            .unwrap();
+        tracker.process(modulator, &silence_tile, &mut tile_bytes);
         for &b in &tile_bytes {
             total_ones += b.count_ones() as u64;
             if b == 0x00 {
@@ -472,10 +514,6 @@ fn run_silence(config: &HarnessConfig, modulator: &mut Modulator, _f_bit_hz: u32
         if let Some(ref mut raw) = raw_bytes {
             let offset = t_idx * (TILE_BITS / 8);
             raw[offset..offset + (TILE_BITS / 8)].copy_from_slice(&tile_bytes);
-        }
-
-        for (cur_max, &s) in max_state.iter_mut().zip(modulator.state_slice()) {
-            *cur_max = cur_max.max(s.abs());
         }
     }
     let elapsed = start.elapsed();
@@ -511,7 +549,7 @@ fn run_silence(config: &HarnessConfig, modulator: &mut Modulator, _f_bit_hz: u32
             full_byte_count,
             elapsed.as_secs_f64(),
             modulator.overload_count(),
-            format_state_json(&max_state)
+            format_state_json(&tracker.peak)
         );
         let mut f = File::create(path).unwrap();
         f.write_all(json.as_bytes()).unwrap();
@@ -527,18 +565,12 @@ fn run_dc(config: &HarnessConfig, modulator: &mut Modulator, _f_bit_hz: u32) {
 
     let start = Instant::now();
     let num_tiles = n / TILE_BITS;
-    let mut max_state = vec![0.0f64; modulator.state_slice().len()];
+    let mut tracker = PeakTracker::new(modulator);
 
     for _ in 0..num_tiles {
-        modulator
-            .process_tile_bytes(&dc_tile, &mut tile_bytes)
-            .unwrap();
+        tracker.process(modulator, &dc_tile, &mut tile_bytes);
         for &b in &tile_bytes {
             total_ones += b.count_ones() as u64;
-        }
-
-        for (cur_max, &s) in max_state.iter_mut().zip(modulator.state_slice()) {
-            *cur_max = cur_max.max(s.abs());
         }
     }
     let elapsed = start.elapsed();
@@ -564,7 +596,7 @@ fn run_dc(config: &HarnessConfig, modulator: &mut Modulator, _f_bit_hz: u32) {
             ones_ratio,
             elapsed.as_secs_f64(),
             modulator.overload_count(),
-            format_state_json(&max_state)
+            format_state_json(&tracker.peak)
         );
         let mut f = File::create(path).unwrap();
         f.write_all(json.as_bytes()).unwrap();
@@ -585,7 +617,7 @@ fn run_multitone(
     let tile_expanded = TILE_BASEBAND * multiplier;
 
     let mut cascade = HalfBandCascade::new(
-        FilterPhase::Linear,
+        config.phase,
         config.apodization,
         cascade_stages,
         TILE_BASEBAND,
@@ -604,7 +636,7 @@ fn run_multitone(
     let mut tile_bytes = vec![0u8; tile_expanded / 8];
 
     let start = Instant::now();
-    let mut max_state = vec![0.0f64; modulator.state_slice().len()];
+    let mut tracker = PeakTracker::new(modulator);
 
     for t_idx in 0..total_tiles {
         let sample_offset = t_idx * TILE_BASEBAND;
@@ -619,13 +651,7 @@ fn run_multitone(
         }
 
         cascade.process_tile(&bb_tile, &mut exp_tile).unwrap();
-        modulator
-            .process_tile_bytes(&exp_tile, &mut tile_bytes)
-            .unwrap();
-
-        for (cur_max, &s) in max_state.iter_mut().zip(modulator.state_slice()) {
-            *cur_max = cur_max.max(s.abs());
-        }
+        tracker.process(modulator, &exp_tile, &mut tile_bytes);
     }
     let elapsed = start.elapsed();
 
@@ -646,7 +672,7 @@ fn run_multitone(
             n,
             elapsed.as_secs_f64(),
             modulator.overload_count(),
-            format_state_json(&max_state)
+            format_state_json(&tracker.peak)
         );
         let mut f = File::create(path).unwrap();
         f.write_all(json.as_bytes()).unwrap();
@@ -674,7 +700,7 @@ fn run_input_limit(
     for &f in &INPUT_LIMIT_STIMULI_HZ {
         modulator.reset();
         let before = modulator.overload_count();
-        let mut max_state = 0.0f64;
+        let mut tracker = PeakTracker::new(modulator);
         let mut n: u64 = 0;
         for _ in 0..config.samples / TILE_BITS {
             for s in tile.iter_mut() {
@@ -685,14 +711,12 @@ fn run_input_limit(
                 };
                 n += 1;
             }
-            modulator.process_tile_bytes(&tile, &mut bytes).unwrap();
-            for &x in modulator.state_slice() {
-                max_state = max_state.max(x.abs());
-            }
+            tracker.process(modulator, &tile, &mut bytes);
         }
         rows.push(format!(
-            r#"{{"f_hz":{f},"overloads":{},"max_state":{max_state:.6}}}"#,
-            modulator.overload_count() - before
+            r#"{{"f_hz":{f},"overloads":{},"max_state":{:.6}}}"#,
+            modulator.overload_count() - before,
+            tracker.overall()
         ));
     }
     if let Some(ref path) = config.out_json {
@@ -710,49 +734,118 @@ fn run_input_limit(
     }
 }
 
-fn run_overload(config: &HarnessConfig, modulator: &mut Modulator, _f_bit_hz: u32) {
-    let n = config.samples;
+/// Tiles of `run_overload`: normal signal, a +5.0 step (two tiles), a settling window, then the checked tail.
+const OVERLOAD_PRE_TILES: usize = 8;
+const OVERLOAD_STEP_TILES: usize = 2;
+const OVERLOAD_SETTLE_TILES: usize = 4;
+/// Block length (bits) of the low-pass reconstruction used to compare the tail with a modulator that never overloaded.
+const OVERLOAD_BLOCK_BITS: usize = 128;
+
+fn overload_input(tile: &mut [f64], t_idx: usize, f_bit_hz: u32, step: bool) {
+    if step {
+        // Intentionally drive the integrators far outside the stable envelope.
+        tile.fill(5.0);
+    } else {
+        let len = tile.len();
+        for (i, p) in tile.iter_mut().enumerate() {
+            *p = 0.1 * (2.0 * PI * 1000.0 * ((t_idx * len + i) as f64 / f_bit_hz as f64)).sin();
+        }
+    }
+}
+
+/// RMS error between the low-passed bitstream (mean of +-1 over blocks) and the mean of the input over the same blocks.
+fn block_error_rms(bytes: &[u8], input: &[f64]) -> f64 {
+    let mut sum_sq = 0.0;
+    let mut blocks = 0usize;
+    for (bits_in, byte_idx) in input
+        .chunks(OVERLOAD_BLOCK_BITS)
+        .zip((0..).step_by(OVERLOAD_BLOCK_BITS / 8))
+    {
+        let n_bytes = bits_in.len() / 8;
+        let ones: u32 = bytes[byte_idx..byte_idx + n_bytes]
+            .iter()
+            .map(|b| b.count_ones())
+            .sum();
+        let mean_out = (2.0 * ones as f64 - bits_in.len() as f64) / bits_in.len() as f64;
+        let mean_in = bits_in.iter().sum::<f64>() / bits_in.len() as f64;
+        sum_sq += (mean_out - mean_in).powi(2);
+        blocks += 1;
+    }
+    (sum_sq / blocks as f64).sqrt()
+}
+
+/// Overload and recovery: a +5.0 step on a 1 kHz sine (`OverloadPolicy::MuteRecover`), then checks that the modulator
+/// resumes cleanly. The tail (after the settling window) must have no further overloads and no rail-lock bytes, and
+/// its reconstruction error must match a reference modulator (same seed, same sine, never overloaded).
+fn run_overload(config: &HarnessConfig, modulator: &mut Modulator, f_bit_hz: u32) {
     const TILE_BITS: usize = 4096;
+    let n = config.samples;
+    let num_tiles = n / TILE_BITS;
+    let step_end = OVERLOAD_PRE_TILES + OVERLOAD_STEP_TILES;
+    let tail_start = step_end + OVERLOAD_SETTLE_TILES;
+    assert!(
+        num_tiles > tail_start + 8,
+        "--samples too small for the overload test"
+    );
+
+    let mut reference = modulator.clone();
     let mut raw_bytes = vec![0u8; n / 8];
+    let mut ref_bytes = vec![0u8; n / 8];
+    let mut inputs = vec![0.0f64; n];
     let mut pcm_tile = [0.0f64; TILE_BITS];
+    let mut ref_tile = [0.0f64; TILE_BITS];
     let mut tile_bytes = [0u8; TILE_BITS / 8];
 
     let start = Instant::now();
-    let num_tiles = n / TILE_BITS;
-    let mut state_after_recovery = vec![0.0f64; modulator.state_slice().len()];
-
+    let mut overloads_at_step_end = 0;
+    let mut overloads_at_tail_start = 0;
     for t_idx in 0..num_tiles {
-        if t_idx == 8 || t_idx == 9 {
-            // Intentionally drive integrators well into overload (> 0 dBFS amplitude 5.0)
-            pcm_tile.fill(5.0);
-        } else {
-            // Normal low-level sine
-            for (i, p) in pcm_tile.iter_mut().enumerate() {
-                *p = 0.1
-                    * (2.0 * PI * 1000.0 * ((t_idx * TILE_BITS + i) as f64 / 2_822_400.0)).sin();
-            }
-        }
-
+        let step = (OVERLOAD_PRE_TILES..step_end).contains(&t_idx);
+        overload_input(&mut pcm_tile, t_idx, f_bit_hz, step);
+        overload_input(&mut ref_tile, t_idx, f_bit_hz, false);
         modulator
             .process_tile_bytes(&pcm_tile, &mut tile_bytes)
             .unwrap();
         raw_bytes[t_idx * (TILE_BITS / 8)..(t_idx + 1) * (TILE_BITS / 8)]
             .copy_from_slice(&tile_bytes);
-
-        if t_idx > 12 {
-            state_after_recovery = modulator.state_slice().to_vec();
+        reference
+            .process_tile_bytes(&ref_tile, &mut tile_bytes)
+            .unwrap();
+        ref_bytes[t_idx * (TILE_BITS / 8)..(t_idx + 1) * (TILE_BITS / 8)]
+            .copy_from_slice(&tile_bytes);
+        inputs[t_idx * TILE_BITS..(t_idx + 1) * TILE_BITS].copy_from_slice(&ref_tile);
+        if t_idx + 1 == step_end {
+            overloads_at_step_end = modulator.overload_count();
+        }
+        if t_idx + 1 == tail_start {
+            overloads_at_tail_start = modulator.overload_count();
         }
     }
     let elapsed = start.elapsed();
 
-    let recovered_stable = state_after_recovery
+    let tail_overloads = modulator.overload_count() - overloads_at_tail_start;
+    let step_overloads = overloads_at_step_end;
+    let max_tail_state = modulator
+        .state_slice()
         .iter()
-        .all(|&s| s.abs() < STABILITY_THRESHOLD);
+        .fold(0.0f64, |m, &s| m.max(s.abs()));
+    let recovered_stable = max_tail_state < STABILITY_THRESHOLD;
 
-    // Overload occurred during tiles 8 and 9 (bytes: 8*512 .. 10*512)
-    let overload_slice = &raw_bytes[8 * (TILE_BITS / 8)..10 * (TILE_BITS / 8)];
-    let idle_0x69_count = overload_slice.iter().filter(|&&b| b == 0x69).count();
-    let zero_0x00_count = overload_slice.iter().filter(|&&b| b == 0x00).count();
+    let bytes_per_tile = TILE_BITS / 8;
+    let step_slice = &raw_bytes[OVERLOAD_PRE_TILES * bytes_per_tile..step_end * bytes_per_tile];
+    let idle_0x69_count = step_slice.iter().filter(|&&b| b == 0x69).count();
+    let zero_0x00_count = step_slice.iter().filter(|&&b| b == 0x00).count();
+
+    let tail_bytes = &raw_bytes[tail_start * bytes_per_tile..];
+    let tail_input = &inputs[tail_start * TILE_BITS..];
+    let tail_rail_bytes = tail_bytes
+        .iter()
+        .filter(|&&b| b == 0x00 || b == 0xFF)
+        .count();
+    let tail_idle_bytes = tail_bytes.iter().filter(|&&b| b == 0x69).count();
+    let tail_error_rms = block_error_rms(tail_bytes, tail_input);
+    let reference_error_rms =
+        block_error_rms(&ref_bytes[tail_start * bytes_per_tile..], tail_input);
 
     if let Some(ref path) = config.out_bin {
         let mut f = File::create(path).unwrap();
@@ -766,10 +859,17 @@ fn run_overload(config: &HarnessConfig, modulator: &mut Modulator, _f_bit_hz: u3
   "rate": "{}",
   "order": {},
   "samples": {},
+  "f_bit_hz": {},
   "overload_count": {},
+  "step_overloads": {},
+  "tail_overloads": {},
   "recovered_stable": {},
   "overload_idle_0x69_count": {},
   "overload_zero_0x00_count": {},
+  "tail_rail_bytes": {},
+  "tail_idle_bytes": {},
+  "tail_error_rms": {:.6e},
+  "reference_error_rms": {:.6e},
   "elapsed_seconds": {:.6},
   "state_after_recovery": {}
 }}"#,
@@ -777,12 +877,19 @@ fn run_overload(config: &HarnessConfig, modulator: &mut Modulator, _f_bit_hz: u3
             config.rate,
             config.order,
             n,
+            f_bit_hz,
             modulator.overload_count(),
+            step_overloads,
+            tail_overloads,
             recovered_stable,
             idle_0x69_count,
             zero_0x00_count,
+            tail_rail_bytes,
+            tail_idle_bytes,
+            tail_error_rms,
+            reference_error_rms,
             elapsed.as_secs_f64(),
-            format_state_json(&state_after_recovery)
+            format_state_json(modulator.state_slice())
         );
         let mut f = File::create(path).unwrap();
         f.write_all(json.as_bytes()).unwrap();
@@ -801,7 +908,7 @@ fn run_benchmark(
     let tile_expanded = tile_baseband * multiplier;
 
     let mut cascade = HalfBandCascade::new(
-        FilterPhase::Linear,
+        config.phase,
         config.apodization,
         cascade_stages,
         tile_baseband,
