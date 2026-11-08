@@ -349,7 +349,7 @@ pub struct OutputConfig {
     pub device: Option<String>,
     pub transport: Option<OutputTransport>,
     pub container: Option<OutputContainer>,
-    pub sample_format: Option<SampleFormat>,
+    pub dop_sample_format: Option<SampleFormat>,
     pub reserve_device: Option<bool>,
     pub buffer_ms: Option<u32>,
     pub period_ms: Option<u32>,
@@ -748,7 +748,7 @@ impl Settings {
                     device: None,
                     transport: None,
                     container: Some(OutputContainer::Dsf),
-                    sample_format: None,
+                    dop_sample_format: None,
                     reserve_device: None,
                     buffer_ms: None,
                     period_ms: None,
@@ -807,7 +807,7 @@ impl Settings {
                     device: None,
                     transport: None,
                     container: Some(OutputContainer::Wav),
-                    sample_format: Some(SampleFormat::S32Le),
+                    dop_sample_format: None,
                     reserve_device: None,
                     buffer_ms: None,
                     period_ms: None,
@@ -866,7 +866,7 @@ impl Settings {
                     device: None,
                     transport: None,
                     container: Some(OutputContainer::Flac),
-                    sample_format: Some(SampleFormat::S24Le),
+                    dop_sample_format: None,
                     reserve_device: None,
                     buffer_ms: None,
                     period_ms: None,
@@ -925,7 +925,7 @@ impl Settings {
                     device: None,
                     transport: Some(OutputTransport::Dop),
                     container: Some(OutputContainer::Raw),
-                    sample_format: Some(SampleFormat::S24_3Le),
+                    dop_sample_format: Some(SampleFormat::S24_3Le),
                     reserve_device: None,
                     buffer_ms: None,
                     period_ms: None,
@@ -1686,7 +1686,7 @@ channels = 2
 [output]
 container = "raw"
 transport = "dop"
-sample_format = "s24_3le"
+dop_sample_format = "s24_3le"
 
 [target]
 format = "dsd"
@@ -1738,7 +1738,6 @@ schema_version = 1
 
 [output]
 container = "flac"
-sample_format = "s24le"
 
 [target]
 format = "pcm"

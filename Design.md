@@ -263,7 +263,7 @@ The engine state machine runs through:
      - `dsf_pad_mode = "dsd-silence"` (fills trailing pad bytes with `0x69` balanced DSD silence to prevent end-of-track pops on broken players).
 
 ### 5.3 Stdio Streaming & Container Seekability Constraints
-- **Raw Streams (`container = "raw"`):** Require complete format declarations (`sample_format`, `rate_hz`, `channels` on input; `transport`, `sample_format` on output). `stdout` must carry audio payload bytes only; all logs and diagnostics go strictly to `stderr`.
+- **Raw Streams (`container = "raw"`):** Require complete format declarations (`sample_format`, `rate_hz`, `channels` on input; `transport` on output; `target.sample_format` for PCM or `output.dop_sample_format` for DoP). `stdout` must carry audio payload bytes only; all logs and diagnostics go strictly to `stderr`.
 - **Header-Finalized Containers (`dsf` / `wav`):** Writing valid `.dsf` or `.wav` headers requires either a **seekable output file** (to patch chunk sizes and `sample_count` at EOF) or a known-length strategy. `audigma convert -o -` must explicitly reject unsupported non-seekable `stdout` combinations (such as streaming `container = "dsf"` to a pipe) rather than emitting corrupt headers.
 - **Pipe Resilience:** Handle pipe backpressure, partial frame reads/writes, clean `EOF` draining, and `EPIPE` (broken pipe) gracefully without panicking.
 - **Album-Continuous Processing:** When converting multi-track albums, state (filter ring buffers, modulator integrators, dither state) must be preserved across track boundaries, splitting output files at exact rational sample boundaries to guarantee click-free gapless playback.
@@ -440,7 +440,7 @@ channels = 2
 [output]
 container = "raw"
 transport = "dop"
-sample_format = "s24_3le"
+dop_sample_format = "s24_3le"
 
 [target]
 format = "dsd"

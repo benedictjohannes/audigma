@@ -144,7 +144,7 @@ impl AlsaOutputConfig {
                         let sample_format = settings
                             .output
                             .as_ref()
-                            .and_then(|o| o.sample_format)
+                            .and_then(|o| o.dop_sample_format)
                             .unwrap_or(SampleFormat::S32Le);
 
                         let alsa_format = match sample_format {
@@ -602,7 +602,7 @@ mod tests {
             device: Some("hw:CARD=K17,DEV=0".to_string()),
             transport: Some(OutputTransport::Native),
             container: None,
-            sample_format: None,
+            dop_sample_format: None,
             volume_control: None,
             device_wait_ms: None,
             keep_audio_sink_ms: None,
@@ -635,7 +635,7 @@ mod tests {
             device: Some("hw:CARD=JA11,DEV=0".to_string()),
             transport: Some(OutputTransport::Dop),
             container: None,
-            sample_format: Some(SampleFormat::S24_3Le),
+            dop_sample_format: Some(SampleFormat::S24_3Le),
             volume_control: None,
             device_wait_ms: None,
             keep_audio_sink_ms: None,
@@ -666,7 +666,7 @@ mod tests {
             device: Some("hw:0,0".to_string()),
             transport: Some(OutputTransport::Pcm),
             container: None,
-            sample_format: Some(SampleFormat::S32Le),
+            dop_sample_format: Some(SampleFormat::S32Le),
             volume_control: None,
             device_wait_ms: None,
             keep_audio_sink_ms: None,

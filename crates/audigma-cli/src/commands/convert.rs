@@ -71,9 +71,21 @@ pub fn run_convert(args: ConvertArgs) -> Result<(), CliError> {
                 ));
             }
         }
-        if output.and_then(|o| o.sample_format).is_none() {
+        let target = settings.target.as_ref();
+        let transport = output.and_then(|o| o.transport);
+        if transport == Some(audigma_settings::OutputTransport::Dop) {
+            if output.and_then(|o| o.dop_sample_format).is_none() {
+                return Err(CliError::Config(
+                    "writing DoP to stdout (-o -) requires an explicit [output] dop_sample_format"
+                        .to_string(),
+                ));
+            }
+        } else if target.map(|t| t.format) == Some(audigma_dsp::config::TargetFormat::Pcm)
+            && target.and_then(|t| t.sample_format).is_none()
+        {
             return Err(CliError::Config(
-                "writing to stdout (-o -) requires an explicit [output] sample_format".to_string(),
+                "writing PCM to stdout (-o -) requires an explicit [target] sample_format"
+                    .to_string(),
             ));
         }
     }

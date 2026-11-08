@@ -180,7 +180,7 @@ impl<'a> ContainerWriter<'a> {
                         let sample_format = settings
                             .output
                             .as_ref()
-                            .and_then(|o| o.sample_format)
+                            .and_then(|o| o.dop_sample_format)
                             .unwrap_or(SampleFormat::S32Le);
                         let dop_fmt = match sample_format {
                             SampleFormat::S32Le => DopContainerFormat::S32Le,
@@ -199,11 +199,14 @@ impl<'a> ContainerWriter<'a> {
                         })
                     }
                     OutputTransport::Pcm => {
-                        let sample_format = settings
-                            .output
-                            .as_ref()
-                            .and_then(|o| o.sample_format)
-                            .unwrap_or(SampleFormat::S16Le);
+                        let sample_format = match target_spec {
+                            TargetRateSpec::Pcm { sample_format, .. } => *sample_format,
+                            TargetRateSpec::Dsd { .. } => {
+                                return Err(EngineError::InvalidTopology {
+                                    message: "raw PCM transport requires a PCM target".into(),
+                                });
+                            }
+                        };
                         Ok(Self::RawPcm {
                             output,
                             format: sample_format,

@@ -66,7 +66,7 @@ impl IdleCarrierFormat {
                         let fmt = settings
                             .output
                             .as_ref()
-                            .and_then(|o| o.sample_format)
+                            .and_then(|o| o.dop_sample_format)
                             .unwrap_or(SampleFormat::S32Le);
                         let dop_fmt = match fmt {
                             SampleFormat::S32Le => DopContainerFormat::S32Le,
