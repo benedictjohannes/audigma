@@ -30,6 +30,12 @@ struct HarnessConfig {
     out_json: Option<String>,
     /// Pin the process to the best physical core via the runtime placement resolver.
     pin: bool,
+    /// `chain` stimulus: (frequency in Hz, 0 = DC; peak level in dBFS). Empty = digital silence.
+    tones: Vec<(f64, f64)>,
+    /// `chain`: production safety margin `M`; the gain is then `L - M`. `None`: no gain.
+    margin_db: Option<f64>,
+    /// Dither PRNG seed.
+    seed: u64,
 }
 
 fn parse_args() -> HarnessConfig {
@@ -47,6 +53,9 @@ fn parse_args() -> HarnessConfig {
         out_bin: None,
         out_json: None,
         pin: false,
+        tones: Vec::new(),
+        margin_db: None,
+        seed: 12345,
     };
 
     let mut i = 1;
@@ -111,6 +120,28 @@ fn parse_args() -> HarnessConfig {
             }
             "--pin" => {
                 config.pin = true;
+            }
+            "--tones" => {
+                i += 1;
+                config.tones = args[i]
+                    .split(',')
+                    .filter(|t| !t.is_empty() && *t != "none")
+                    .map(|t| {
+                        let (f, db) = t.split_once(':').expect("tone is <hz>:<dbfs>");
+                        (
+                            f.parse().expect("Invalid tone frequency"),
+                            db.parse().expect("Invalid tone level"),
+                        )
+                    })
+                    .collect();
+            }
+            "--margin-db" => {
+                i += 1;
+                config.margin_db = Some(args[i].parse().expect("Invalid margin-db"));
+            }
+            "--seed" => {
+                i += 1;
+                config.seed = args[i].parse().expect("Invalid seed");
             }
             other => panic!("Unknown argument: {other}"),
         }
@@ -253,20 +284,21 @@ fn main() {
         config.overload_policy,
     )
     .unwrap_or_else(|e| panic!("Failed to initialize modulator: {e}"));
-    modulator.set_dither_seed(12345);
+    modulator.set_dither_seed(config.seed);
 
     match config.mode.as_str() {
         "direct-sine" => {
             run_direct_sine(&config, &mut modulator, f_bit_hz);
         }
         "cascade-sine" => {
-            run_cascade_sine(
-                &config,
-                &mut modulator,
-                f_bit_hz,
-                cascade_stages,
-                baseband_fs,
-            );
+            // 1 kHz at `--amp-db` (modulator input level): `chain` with a fixed stimulus and no headroom.
+            let mut cfg = config.clone();
+            cfg.tones = vec![(1000.0, config.amp_db)];
+            cfg.margin_db = None;
+            run_chain(&cfg, &mut modulator, bit_rate, f_bit_hz, cascade_stages);
+        }
+        "chain" => {
+            run_chain(&config, &mut modulator, bit_rate, f_bit_hz, cascade_stages);
         }
         "silence" => {
             run_silence(&config, &mut modulator, f_bit_hz);
@@ -374,21 +406,62 @@ fn run_direct_sine(config: &HarnessConfig, modulator: &mut Modulator, f_bit_hz: 
     }
 }
 
-fn run_cascade_sine(
+/// Production chain (`Design.md §2`): baseband PCM stimulus -> static gain -> `HalfBandCascade` -> `Modulator`.
+///
+/// The stimulus is a sum of components (`config.tones`: frequency in Hz, 0 = DC, and peak level in dBFS of the
+/// PCM input); an empty list is digital silence. Each tone is coherent with the `config.samples`-bit record
+/// (k cycles in the record, so also k cycles in its `samples / 2^K` baseband frames). The gain is the
+/// production profile headroom `L - M` when `--margin-db M` is given (a 0 dBFS PCM peak reaches the modulator
+/// at `L - M`), otherwise 0 dB (levels are then modulator input levels, as for `cascade-sine`).
+fn run_chain(
     config: &HarnessConfig,
     modulator: &mut Modulator,
+    bit_rate: DsdBitRateHz,
     f_bit_hz: u32,
     cascade_stages: usize,
-    baseband_fs: u32,
 ) {
+    const TILE_BASEBAND: usize = 64;
+    const WARMUP_TILES: usize = 256;
     let multiplier = 1usize << cascade_stages;
     let n = config.samples;
-    let k_bin = ((1000.0 * n as f64) / (f_bit_hz as f64)).round() as u64;
-    let f_tone_hz = (k_bin as f64) * (f_bit_hz as f64) / (n as f64);
-    let amp = 10.0_f64.powf(config.amp_db / 20.0);
-
-    const TILE_BASEBAND: usize = 64;
     let tile_expanded = TILE_BASEBAND * multiplier;
+    assert!(
+        n % tile_expanded == 0,
+        "--samples must be a multiple of {tile_expanded} at this rate"
+    );
+    let n_bb = (n / multiplier) as i64;
+
+    let limit_dbfs = audigma_dsp::max_stable_input_dbfs(config.order, bit_rate)
+        .unwrap_or_else(|e| panic!("no input limit: {e}"));
+    let gain_db = config.margin_db.map_or(0.0, |m| limit_dbfs - m);
+    let gain = 10.0_f64.powf(gain_db / 20.0);
+
+    // (k cycles per record, peak amplitude at the modulator input); k = 0 is DC.
+    let components: Vec<(u64, f64)> = config
+        .tones
+        .iter()
+        .map(|&(f, db)| {
+            let k = if f == 0.0 {
+                0
+            } else {
+                ((f * n as f64) / (f_bit_hz as f64)).round().max(1.0) as u64
+            };
+            (k, gain * 10.0_f64.powf(db / 20.0))
+        })
+        .collect();
+    let sample = |idx: i64| -> f64 {
+        let pos = idx.rem_euclid(n_bb) as f64;
+        components
+            .iter()
+            .map(|&(k, amp)| {
+                if k == 0 {
+                    amp
+                } else {
+                    amp * (2.0 * PI * (k as f64) * pos / n_bb as f64).sin()
+                }
+            })
+            .sum()
+    };
 
     let mut cascade = HalfBandCascade::new(
         config.phase,
@@ -396,57 +469,62 @@ fn run_cascade_sine(
         cascade_stages,
         TILE_BASEBAND,
     );
-
-    // Warm-up cascade & modulator
-    let n_warmup_tiles = 256;
-    let mut bb_warmup = [0.0f64; TILE_BASEBAND];
-    let mut exp_warmup = vec![0.0f64; tile_expanded];
-    let mut dummy_bytes = vec![0u8; tile_expanded / 8];
-
-    for t in 0..n_warmup_tiles {
-        let start_sample = (t as i64 - n_warmup_tiles as i64) * (TILE_BASEBAND as i64);
-        for (i, s) in bb_warmup.iter_mut().enumerate() {
-            let sample_idx = start_sample + (i as i64);
-            let t_sec = (sample_idx as f64) / (baseband_fs as f64);
-            *s = amp * (2.0 * PI * f_tone_hz * t_sec).sin();
-        }
-        cascade.process_tile(&bb_warmup, &mut exp_warmup).unwrap();
-        modulator
-            .process_tile_bytes(&exp_warmup, &mut dummy_bytes)
-            .unwrap();
-    }
-
-    let mut raw_bytes = vec![0u8; n / 8];
-    let total_tiles = n / tile_expanded;
     let mut bb_tile = [0.0f64; TILE_BASEBAND];
     let mut exp_tile = vec![0.0f64; tile_expanded];
     let mut tile_bytes = vec![0u8; tile_expanded / 8];
 
+    // Warm-up of cascade and modulator with the same (periodic) stimulus.
+    for t in 0..WARMUP_TILES {
+        let start = (t as i64 - WARMUP_TILES as i64) * TILE_BASEBAND as i64;
+        for (i, s) in bb_tile.iter_mut().enumerate() {
+            *s = sample(start + i as i64);
+        }
+        cascade.process_tile(&bb_tile, &mut exp_tile).unwrap();
+        modulator
+            .process_tile_bytes(&exp_tile, &mut tile_bytes)
+            .unwrap();
+    }
+    let warmup_overloads = modulator.overload_count();
+
+    let mut raw_bytes = vec![0u8; n / 8];
     let start = Instant::now();
     let mut tracker = PeakTracker::new(modulator);
-
-    for t_idx in 0..total_tiles {
-        let sample_offset = t_idx * TILE_BASEBAND;
+    for t_idx in 0..n / tile_expanded {
+        let offset = (t_idx * TILE_BASEBAND) as i64;
         for (i, s) in bb_tile.iter_mut().enumerate() {
-            let sample_idx = sample_offset + i;
-            let t_sec = (sample_idx as f64) / (baseband_fs as f64);
-            *s = amp * (2.0 * PI * f_tone_hz * t_sec).sin();
+            *s = sample(offset + i as i64);
         }
-
         cascade.process_tile(&bb_tile, &mut exp_tile).unwrap();
         tracker.process(modulator, &exp_tile, &mut tile_bytes);
-
         let byte_offset = t_idx * (tile_expanded / 8);
-        raw_bytes[byte_offset..byte_offset + (tile_expanded / 8)].copy_from_slice(&tile_bytes);
+        raw_bytes[byte_offset..byte_offset + tile_expanded / 8].copy_from_slice(&tile_bytes);
     }
     let elapsed = start.elapsed();
 
     if let Some(ref path) = config.out_bin {
-        let mut f = File::create(path).unwrap();
-        f.write_all(&raw_bytes).unwrap();
+        File::create(path).unwrap().write_all(&raw_bytes).unwrap();
     }
 
     if let Some(ref path) = config.out_json {
+        let tones_json: Vec<String> = config
+            .tones
+            .iter()
+            .zip(&components)
+            .map(|(&(_, db), &(k, _))| {
+                let f_eff = k as f64 * f_bit_hz as f64 / n as f64;
+                format!(r#"{{"f_hz":{f_eff:.6},"k_bin":{k},"level_dbfs":{db}}}"#)
+            })
+            .collect();
+        let (k_bin, f_tone_hz) = components.first().map_or((0, 0.0), |&(k, _)| {
+            (k, k as f64 * f_bit_hz as f64 / n as f64)
+        });
+        let margin = config
+            .margin_db
+            .map_or_else(|| "null".to_string(), |m| m.to_string());
+        let dither = match config.dither {
+            DitherType::Tpdf => "tpdf",
+            DitherType::None => "none",
+        };
         let json = format!(
             r#"{{
   "mode": "{}",
@@ -454,12 +532,20 @@ fn run_cascade_sine(
   "order": {},
   "apodization": "{}",
   "phase": "{:?}",
-  "cascade_stages": {},
-  "f_bit_hz": {},
-  "k_bin": {},
-  "f_tone_hz": {:.6},
+  "dither": "{dither}",
+  "dither_seed": {},
+  "cascade_stages": {cascade_stages},
+  "f_bit_hz": {f_bit_hz},
+  "samples": {n},
+  "limit_dbfs": {limit_dbfs},
+  "margin_db": {margin},
+  "gain_db": {gain_db},
+  "k_bin": {k_bin},
+  "f_tone_hz": {f_tone_hz:.6},
   "amp_db": {:.2},
+  "tones": [{}],
   "elapsed_seconds": {:.6},
+  "warmup_overloads": {warmup_overloads},
   "overload_count": {},
   "max_state": {}
 }}"#,
@@ -468,17 +554,17 @@ fn run_cascade_sine(
             config.order,
             config.apodization,
             config.phase,
-            cascade_stages,
-            f_bit_hz,
-            k_bin,
-            f_tone_hz,
+            config.seed,
             config.amp_db,
+            tones_json.join(", "),
             elapsed.as_secs_f64(),
             modulator.overload_count(),
             format_state_json(&tracker.peak)
         );
-        let mut f = File::create(path).unwrap();
-        f.write_all(json.as_bytes()).unwrap();
+        File::create(path)
+            .unwrap()
+            .write_all(json.as_bytes())
+            .unwrap();
     }
 }
 

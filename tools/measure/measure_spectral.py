@@ -15,6 +15,8 @@ Writes one report per measurement family to docs/measurements/ plus an index (re
 - cascade.md: the half-band cascade as implemented (impulse response, tone cross-check, against design_halfband.py)
   and cascade + modulator end to end.
 - resampler.md: compiled SRC banks vs design_src.py, polyphase rational SRC and ASRC through PolyphaseResampler.
+- signal.md: the production DSD chain (gain L - M, cascade, dithered modulator) with signal-dependent stimuli:
+  level sweep, dither on/off, two-tone IMD, ultrasonic noise, 44.1k vs 48k family.
 - benchmark.md: CPU throughput and deadline budget. Part of a default run; it needs a quiet machine, so coordinate
   with the user (AGENTS.md) or pass --skip-benchmark (the report is then re-rendered from the last results kept in
   docs/measurements/benchmark.json).
@@ -44,13 +46,14 @@ from spectral import (  # noqa: E402
     oracle,
     report,
     resampler,
+    signal,
     stability,
     summary,
 )
 from spectral.common import TMP_DIR, ensure_harness_binary  # noqa: E402
 from spectral.environment import get_system_environment  # noqa: E402
 
-SPECTRAL_FAMILIES = ["modulator", "cascade", "resampler"]
+SPECTRAL_FAMILIES = ["modulator", "cascade", "resampler", "signal"]
 
 
 def main():
@@ -74,7 +77,7 @@ def main():
     print(f"Rust Compiler:  {env_info['rustc']}")
     print(f"HW FTZ/DAZ:     {env_info['ftz_daz_status']}")
 
-    need_oracle = bool(families & {"modulator", "cascade"}) or full
+    need_oracle = bool(families & {"modulator", "cascade", "signal"}) or full
     oracle_results = oracle.synthesize_oracle() if need_oracle else None
     design = oracle.load_halfband_design() if "cascade" in families or full else None
 
@@ -127,6 +130,18 @@ def main():
         headlines["resampler"] = (
             f"Worst spur on 1-18 kHz tones: 44.1k->48k {worst_spur(up):.0f} dBc, 48k->44.1k {worst_spur(down):.0f} dBc, "
             f"ASRC at +50 ppm {worst_spur(drift):.0f} dBc"
+        )
+
+    if "signal" in families or full:
+        sig = signal.run(harness_bin, oracle_results)
+        sig_sec = signal.render(sig)
+        report.write_family("signal", env_info, [sig_sec])
+        failures["signal"] = sig_sec.failures
+        r = sig["rows"]
+        dr = {o: -r[(o, "dsd64", "1k_-60", "tpdf", signal.PRODUCTION_MARGIN_DB)]["thdn_a_db"] for o in (5, 7)}
+        headlines["signal"] = (
+            f"Production chain: DSD64 DR (A) {dr[5]:.0f} dB (5th) / {dr[7]:.0f} dB (7th); "
+            f"{len(failures['signal'])} failing check(s)"
         )
 
     bench_results, bench_stats = bench.load()

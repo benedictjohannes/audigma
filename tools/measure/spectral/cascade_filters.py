@@ -97,6 +97,8 @@ def run(harness_bin, design):
                 bands = (20_000.0, 24_100.0) if apod == "off" else (float(apod), 22_050.0)
             m = impulse_metrics(h, meta["mult"], BASE_HZ, bands)
             m["harness_group_delay_samples"] = meta["group_delay_output_samples"]
+            # The same normalised filters serve 48 kHz sources: image bands k*48 kHz +- 20 kHz, apodizing edge x 48/44.1.
+            m["fam48"] = impulse_metrics(h, meta["mult"], 48_000.0)
             if design is not None:
                 m["design_dev"], m["design_lag"] = design_deviation(h, design_impulse(design, phase, apod, k, len(h)))
             m["h"] = h if k in TONE_STAGES else None
@@ -238,6 +240,29 @@ response peak; tolerance {DESIGN_IMPULSE_TOL:g}.
             f"{m['gain_nyq_db']:.1f} | {m['image_rejection_db'][0]:.1f} | {m['worst_image_db']:.1f} | "
             f"{m['gd_1k_ms']:.3f} | {m['gd_20k_ms']:.3f} |\n"
         )
+
+    text += """
+### Rate family: 44.1 kHz vs 48 kHz sources (K = 6, DSD64 / DSD64_48)
+
+The cascade uses the same normalised filters for both families, so a 48 kHz source sees every frequency scaled by 48/44.1
+(apodizing pass edge 19 kHz -> 20.7 kHz). The audio band stays 20 kHz, so the 48k family has more passband margin and a wider
+first image gap (28 kHz instead of 24.1 kHz). Image bands: `k*fs +- 20 kHz`.
+
+| Phase | Apod. | Gain @ 20 kHz, 44.1k / 48k (dB) | Ripple 0-20 kHz, 44.1k / 48k (dB) | Worst image rejection, 44.1k / 48k (dB) | Group delay @ 1 kHz, 44.1k / 48k (ms) |
+|---|---|---:|---:|---:|---:|
+"""
+    for phase, apod in combos():
+        a = impulse[(phase, apod, 6)]
+        b = a["fam48"]
+        text += (
+            f"| {phase} | {_apod_label(apod)} | {a['gain_20k_db']:.3f} / {b['gain_20k_db']:.3f} | {a['ripple_db']:.2e} / {b['ripple_db']:.2e} | "
+            f"{a['worst_image_db']:.1f} / {b['worst_image_db']:.1f} | {a['gd_1k_ms']:.3f} / {b['gd_1k_ms']:.3f} |\n"
+        )
+    text += (
+        f"\nWorst image rejection over all {len(impulse)} combinations, 48k family: "
+        f"**{min(m['fam48']['worst_image_db'] for m in impulse.values()):.1f} dB** "
+        f"(44.1k family: {min(m['worst_image_db'] for m in impulse.values()):.1f} dB).\n"
+    )
 
     text += """
 ### Stage count (K) scaling, `linear` / `off`

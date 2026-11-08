@@ -61,8 +61,8 @@ def render(env_info, direct_results, stability_results, bench_stats, cascade_fil
     ]
     if bench_stats:
         min_tp, max_tp, max_p = bench_stats["min_tp"], bench_stats["max_tp"], bench_stats["max_p999_budget"]
-        rows.append(("Real-Time Throughput", "`Design.md §8.3`", f">= 2.0x sustained real-time throughput (Measured: {min_tp:.2f}x to {max_tp:.2f}x)", min_tp >= 2.0))
-        rows.append(("p99.9 Deadline Budget", "`Design.md §8.3`", f"<= 70% of audio block duration (Measured peak: {max_p:.1f}%)", max_p <= 70.0))
+        rows.append(("Real-Time Throughput", "`Design.md §8.5`", f">= 2.0x sustained real-time throughput (Measured: {min_tp:.2f}x to {max_tp:.2f}x)", min_tp >= 2.0))
+        rows.append(("p99.9 Deadline Budget", "`Design.md §8.5`", f"<= 70% of audio block duration (Measured peak: {max_p:.1f}%)", max_p <= 70.0))
         if min_tp < 2.0:
             failed_checks.append("Real-time throughput goal")
         if max_p > 70.0:
@@ -76,7 +76,7 @@ def render(env_info, direct_results, stability_results, bench_stats, cascade_fil
     for name, ref, val, ok in rows:
         text += f"| **{name}** | {ref} | {val} | {'Compliant' if ok else '**Non-Compliant**'} |\n"
     if not bench_stats:
-        text += "| **Real-Time Throughput / p99.9 Budget** | `Design.md §8.3` | Benchmark never run (see [benchmark.md](benchmark.md)) | — |\n"
+        text += "| **Real-Time Throughput / p99.9 Budget** | `Design.md §8.5` | Benchmark never run (see [benchmark.md](benchmark.md)) | — |\n"
     text += "\n## Conclusion\n\n"
     n_ok = sum(bool(r[3]) for r in rows)
     text += (
