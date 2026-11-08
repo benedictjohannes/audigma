@@ -124,7 +124,7 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
 
     let create_input_driver =
         |in_cfg: &audigma_settings::InputConfig| -> Result<Box<dyn AudioInput>, EngineError> {
-            match in_cfg.backend {
+            match in_cfg.backend() {
                 #[cfg(feature = "pipewire")]
                 InputBackend::Pipewire => {
                     let mut sink = PipeWireVirtualSink::from_input_config_with_preset(
@@ -141,10 +141,6 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
                     sink.set_preroll_secs(target_preroll_secs);
                     Ok(Box::new(sink))
                 }
-                InputBackend::File | InputBackend::Stdio => Err(EngineError::InvalidTopology {
-                    message: "File/Stdio backend is for offline mode; use 'audigma convert'"
-                        .to_string(),
-                }),
                 #[cfg(not(feature = "pipewire"))]
                 InputBackend::Pipewire => Err(EngineError::AudioBackend {
                     backend: "pipewire",
@@ -160,7 +156,7 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
                                 target: &TargetRateSpec|
      -> Result<Box<dyn AudioOutput>, EngineError> {
         match out_cfg.backend {
-            OutputBackend::Alsa => {
+            Some(OutputBackend::Alsa) => {
                 let alsa_config =
                     AlsaOutputConfig::from_settings(&settings, target).map_err(|e| {
                         EngineError::DeviceUnavailable {
@@ -186,7 +182,7 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
                 Ok(Box::new(alsa_out))
             }
             #[cfg(feature = "pipewire")]
-            OutputBackend::Pipewire => {
+            Some(OutputBackend::Pipewire) => {
                 let target_node = out_cfg.target_node.as_deref();
                 let pw_rate = match target {
                     TargetRateSpec::Pcm { rate, .. } => rate.get(),
@@ -217,13 +213,12 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
                 Ok(Box::new(pw_out))
             }
             #[cfg(not(feature = "pipewire"))]
-            OutputBackend::Pipewire => Err(EngineError::AudioBackend {
+            Some(OutputBackend::Pipewire) => Err(EngineError::AudioBackend {
                 backend: "pipewire",
                 message: "PipeWire feature is disabled in this build".to_string(),
             }),
-            OutputBackend::File | OutputBackend::Stdio => Err(EngineError::InvalidTopology {
-                message: "File/Stdio backend is for offline mode; use 'audigma convert'"
-                    .to_string(),
+            None => Err(EngineError::InvalidTopology {
+                message: "[output] backend is required for 'audigma run'".to_string(),
             }),
         }
     };
@@ -310,7 +305,7 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
                     // D-Bus device reservation if exclusive ALSA output is selected
                     #[cfg(feature = "dbus")]
                     let mut _reservation: Option<DeviceReservation> =
-                        if out_cfg.backend == OutputBackend::Alsa && out_cfg.reserve_device.unwrap_or(true) {
+                        if out_cfg.backend == Some(OutputBackend::Alsa) && out_cfg.reserve_device.unwrap_or(true) {
                             let card_idx = out_cfg
                                 .device
                                 .as_deref()
@@ -363,7 +358,7 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
                     let device_wait_ms = out_cfg.device_wait_ms();
                     let keep_audio_sink_ms = out_cfg.keep_audio_sink_ms();
 
-                    let mut hw_mixer: Option<AlsaHardwareMixer> = if out_cfg.backend == OutputBackend::Alsa {
+                    let mut hw_mixer: Option<AlsaHardwareMixer> = if out_cfg.backend == Some(OutputBackend::Alsa) {
                         match AlsaHardwareMixer::open(&target_device, custom_mixer_control) {
                             Ok(m) => {
                                 tracing::info!(
@@ -426,7 +421,7 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
                     while control.is_running() {
                         // Step 1: Ensure output device is connected and opened
                         if current_output.is_none() {
-                            if out_cfg.backend == OutputBackend::Alsa && !is_alsa_device_present(&target_device) {
+                            if out_cfg.backend == Some(OutputBackend::Alsa) && !is_alsa_device_present(&target_device) {
                                 if device_wait_ms == 0 {
                                     return Err(EngineError::DeviceDisconnected(format!(
                                         "target ALSA device '{target_device}' is not present at startup"
@@ -581,7 +576,7 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
                                     control.set_disconnect_info(None, None);
 
                                     // Re-bind ALSA hardware mixer if applicable
-                                    if out_cfg.backend == OutputBackend::Alsa {
+                                    if out_cfg.backend == Some(OutputBackend::Alsa) {
                                         hw_mixer =
                                             match AlsaHardwareMixer::open(&target_device, custom_mixer_control) {
                                                 Ok(mut m) => {

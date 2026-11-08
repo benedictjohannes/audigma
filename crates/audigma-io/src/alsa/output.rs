@@ -597,7 +597,7 @@ mod tests {
     fn test_alsa_output_config_native_dsd() {
         let mut settings = Settings::default_offline(audigma_settings::OutputContainer::Raw);
         settings.output = Some(OutputConfig {
-            backend: OutputBackend::Alsa,
+            backend: Some(OutputBackend::Alsa),
             target_node: None,
             device: Some("hw:CARD=K17,DEV=0".to_string()),
             transport: Some(OutputTransport::Native),
@@ -630,7 +630,7 @@ mod tests {
     fn test_alsa_output_config_dop() {
         let mut settings = Settings::default_offline(audigma_settings::OutputContainer::Raw);
         settings.output = Some(OutputConfig {
-            backend: OutputBackend::Alsa,
+            backend: Some(OutputBackend::Alsa),
             target_node: None,
             device: Some("hw:CARD=JA11,DEV=0".to_string()),
             transport: Some(OutputTransport::Dop),
@@ -661,7 +661,7 @@ mod tests {
     fn test_alsa_output_config_high_rate_pcm() {
         let mut settings = Settings::default_offline(audigma_settings::OutputContainer::Raw);
         settings.output = Some(OutputConfig {
-            backend: OutputBackend::Alsa,
+            backend: Some(OutputBackend::Alsa),
             target_node: None,
             device: Some("hw:0,0".to_string()),
             transport: Some(OutputTransport::Pcm),

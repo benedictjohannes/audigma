@@ -90,7 +90,6 @@ fn test_cli_convert_rejects_non_seekable_stdout_for_dsf() {
 schema_version = 1
 
 [output]
-backend = "stdio"
 container = "dsf"
 
 [target]
@@ -242,7 +241,6 @@ pcm_rate_hz = 44100
 sample_format = "s16le"
 
 [output]
-backend = "file"
 container = "wav"
 
 [offline]

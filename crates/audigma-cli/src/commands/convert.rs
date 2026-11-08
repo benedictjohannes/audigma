@@ -52,16 +52,29 @@ pub fn run_convert(args: ConvertArgs) -> Result<(), CliError> {
 
     // If writing to stdout, verify invariants
     if args.output == "-" {
-        // Check if container was explicitly configured or defaulted to seekable container
-        let container = settings.output.as_ref().and_then(|o| o.container);
-        match container {
+        // Stdout is non-seekable: only headerless raw streams can be written to it.
+        let output = settings.output.as_ref();
+        match output.and_then(|o| o.container) {
             Some(OutputContainer::Dsf) => {
                 return Err(EngineError::SeekableOutputRequired { container: "dsf" }.into());
             }
             Some(OutputContainer::Wav) => {
                 return Err(EngineError::SeekableOutputRequired { container: "wav" }.into());
             }
-            _ => {}
+            Some(OutputContainer::Flac) => {
+                return Err(EngineError::SeekableOutputRequired { container: "flac" }.into());
+            }
+            Some(OutputContainer::Raw) => {}
+            None => {
+                return Err(CliError::Config(
+                    "writing to stdout (-o -) requires [output] container = \"raw\"".to_string(),
+                ));
+            }
+        }
+        if output.and_then(|o| o.sample_format).is_none() {
+            return Err(CliError::Config(
+                "writing to stdout (-o -) requires an explicit [output] sample_format".to_string(),
+            ));
         }
     }
 

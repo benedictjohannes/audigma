@@ -400,10 +400,8 @@ max_correction_ppm = 500
 schema_version = 1
 
 [input]
-backend = "file"
 
 [output]
-backend = "file"
 container = "dsf"
 
 [target]
@@ -435,13 +433,11 @@ dsf_pad_mode = "spec-zero"
 schema_version = 1
 
 [input]
-backend = "stdio"
 sample_format = "s16le"
 rate_hz = 44100
 channels = 2
 
 [output]
-backend = "stdio"
 container = "raw"
 transport = "dop"
 sample_format = "s24_3le"

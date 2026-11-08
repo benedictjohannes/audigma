@@ -34,8 +34,6 @@ pub enum SettingsError {
 #[serde(rename_all = "lowercase")]
 pub enum InputBackend {
     Pipewire,
-    File,
-    Stdio,
 }
 
 /// `[output] backend` options (`Design.md §6.2`).
@@ -44,8 +42,6 @@ pub enum InputBackend {
 pub enum OutputBackend {
     Pipewire,
     Alsa,
-    File,
-    Stdio,
 }
 
 /// `[output] transport` options (`Design.md §6.2`).
@@ -234,7 +230,7 @@ impl DsdInputConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InputConfig {
-    pub backend: InputBackend,
+    pub backend: Option<InputBackend>,
     pub node_name: Option<String>,
     pub sample_format: Option<SampleFormat>,
     pub rate_hz: Option<PcmRateHz>,
@@ -247,6 +243,11 @@ pub struct InputConfig {
 }
 
 impl InputConfig {
+    /// Returns the active input backend (defaults to `pipewire`, the only live backend).
+    pub fn backend(&self) -> InputBackend {
+        self.backend.unwrap_or(InputBackend::Pipewire)
+    }
+
     /// Returns the resolved channel positions for this input, strictly preserving
     /// user-declared order if specified, or synthesizing standard defaults from `channels`.
     pub fn resolved_channel_positions(&self) -> Vec<String> {
@@ -343,7 +344,7 @@ impl InputConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutputConfig {
-    pub backend: OutputBackend,
+    pub backend: Option<OutputBackend>,
     pub target_node: Option<String>,
     pub device: Option<String>,
     pub transport: Option<OutputTransport>,
@@ -362,7 +363,7 @@ impl OutputConfig {
     /// Returns whether D-Bus `org.freedesktop.ReserveDevice1` reservation is enabled (`true` by default for ALSA).
     pub fn reserve_device_enabled(&self) -> bool {
         self.reserve_device
-            .unwrap_or(self.backend == OutputBackend::Alsa)
+            .unwrap_or(self.backend == Some(OutputBackend::Alsa))
     }
 
     /// Returns the active volume control strategy (`VolumeControlMode::HardwareSoftwareFallback` by default).
@@ -731,7 +732,7 @@ impl Settings {
             OutputContainer::Dsf => Self {
                 schema_version: SCHEMA_VERSION_V1,
                 input: Some(InputConfig {
-                    backend: InputBackend::File,
+                    backend: None,
                     node_name: None,
                     sample_format: None,
                     rate_hz: None,
@@ -743,7 +744,7 @@ impl Settings {
                     dsd: None,
                 }),
                 output: Some(OutputConfig {
-                    backend: OutputBackend::File,
+                    backend: None,
                     target_node: None,
                     device: None,
                     transport: None,
@@ -791,7 +792,7 @@ impl Settings {
             OutputContainer::Wav => Self {
                 schema_version: SCHEMA_VERSION_V1,
                 input: Some(InputConfig {
-                    backend: InputBackend::File,
+                    backend: None,
                     node_name: None,
                     sample_format: None,
                     rate_hz: None,
@@ -803,7 +804,7 @@ impl Settings {
                     dsd: None,
                 }),
                 output: Some(OutputConfig {
-                    backend: OutputBackend::File,
+                    backend: None,
                     target_node: None,
                     device: None,
                     transport: None,
@@ -851,7 +852,7 @@ impl Settings {
             OutputContainer::Flac => Self {
                 schema_version: SCHEMA_VERSION_V1,
                 input: Some(InputConfig {
-                    backend: InputBackend::File,
+                    backend: None,
                     node_name: None,
                     sample_format: None,
                     rate_hz: None,
@@ -863,7 +864,7 @@ impl Settings {
                     dsd: None,
                 }),
                 output: Some(OutputConfig {
-                    backend: OutputBackend::File,
+                    backend: None,
                     target_node: None,
                     device: None,
                     transport: None,
@@ -911,7 +912,7 @@ impl Settings {
             OutputContainer::Raw => Self {
                 schema_version: SCHEMA_VERSION_V1,
                 input: Some(InputConfig {
-                    backend: InputBackend::Stdio,
+                    backend: None,
                     node_name: None,
                     sample_format: Some(SampleFormat::S16Le),
                     rate_hz: Some(PcmRateHz::PCM_44100),
@@ -923,7 +924,7 @@ impl Settings {
                     dsd: None,
                 }),
                 output: Some(OutputConfig {
-                    backend: OutputBackend::Stdio,
+                    backend: None,
                     target_node: None,
                     device: None,
                     transport: Some(OutputTransport::Dop),
@@ -1012,16 +1013,6 @@ impl Settings {
                 }
             }
 
-            if input.backend == InputBackend::Stdio
-                && (input.sample_format.is_none()
-                    || input.rate_hz.is_none()
-                    || input.channels.is_none())
-            {
-                return Err(SettingsError::Validation(
-                    "[input] backend = \"stdio\" requires sample_format, rate_hz, and channels",
-                ));
-            }
-
             if let Some(ref dsd) = input.dsd {
                 if let Some(gain_db) = dsd.gain_db {
                     if !(-30.0..=30.0).contains(&gain_db) || gain_db.is_nan() {
@@ -1064,29 +1055,22 @@ impl Settings {
                 }
             }
 
-            // Non-seekable stdout cannot stream header-finalized DSF (Design.md §5.3)
-            if output.backend == OutputBackend::Stdio
-                && output.container == Some(OutputContainer::Dsf)
+            // Exclusive ALSA needs an explicit hardware device (no implicit "default").
+            if output.backend == Some(OutputBackend::Alsa)
+                && output.device.as_deref().is_none_or(|d| d.trim().is_empty())
             {
                 return Err(SettingsError::Validation(
-                    "non-seekable [output] backend = \"stdio\" cannot write container = \"dsf\"",
-                ));
-            }
-
-            if output.backend == OutputBackend::Stdio
-                && (output.container != Some(OutputContainer::Raw)
-                    || output.sample_format.is_none())
-            {
-                return Err(SettingsError::Validation(
-                    "[output] backend = \"stdio\" requires container = \"raw\" and explicit sample_format",
+                    "[output] backend = \"alsa\" requires device",
                 ));
             }
 
             // DSD output must never return to PipeWire normal PCM graph (Design.md §1.4)
             if let Some(target) = &self.target {
-                if target.format == TargetFormat::Dsd && output.backend == OutputBackend::Pipewire {
+                if target.format == TargetFormat::Dsd
+                    && output.backend == Some(OutputBackend::Pipewire)
+                {
                     return Err(SettingsError::Validation(
-                        "[target] format = \"dsd\" requires exclusive ALSA, file, or stdio backend (cannot use output.backend = \"pipewire\")",
+                        "[target] format = \"dsd\" requires exclusive ALSA backend (cannot use output.backend = \"pipewire\")",
                     ));
                 }
             }
@@ -1658,10 +1642,8 @@ modulator_order = 6
 schema_version = 1
 
 [input]
-backend = "file"
 
 [output]
-backend = "file"
 container = "dsf"
 
 [target]
@@ -1704,13 +1686,11 @@ dsf_pad_mode = "spec-zero"
 schema_version = 1
 
 [input]
-backend = "stdio"
 sample_format = "s16le"
 rate_hz = 44100
 channels = 2
 
 [output]
-backend = "stdio"
 container = "raw"
 transport = "dop"
 sample_format = "s24_3le"
@@ -1743,7 +1723,7 @@ modulator_order = 5
     }
 
     #[test]
-    fn test_rejects_dsd_over_pipewire_and_nonseekable_stdout_dsf() {
+    fn test_rejects_dsd_over_pipewire() {
         let dsd_over_pw = r#"
 schema_version = 1
 [output]
@@ -1754,18 +1734,6 @@ rate_family = "44100"
 dsd_rate = "dsd64"
 "#;
         assert!(Settings::from_toml_str(dsd_over_pw).is_err());
-
-        let stdout_dsf = r#"
-schema_version = 1
-[output]
-backend = "stdio"
-container = "dsf"
-[target]
-format = "dsd"
-rate_family = "44100"
-dsd_rate = "dsd64"
-"#;
-        assert!(Settings::from_toml_str(stdout_dsf).is_err());
     }
 
     #[test]
@@ -1774,10 +1742,8 @@ dsd_rate = "dsd64"
 schema_version = 1
 
 [input]
-backend = "file"
 
 [output]
-backend = "file"
 container = "flac"
 sample_format = "s24le"
 
@@ -1839,7 +1805,6 @@ preset = "reference"
         let flac_dsd = r#"
 schema_version = 1
 [output]
-backend = "file"
 container = "flac"
 [target]
 format = "dsd"
@@ -1851,7 +1816,6 @@ dsd_rate = "dsd256"
         let dsf_pcm = r#"
 schema_version = 1
 [output]
-backend = "file"
 container = "dsf"
 [target]
 format = "pcm"
@@ -1914,7 +1878,7 @@ pcm_rate_hz = 96000
 
         // Synthesize standard defaults when channel_positions omitted
         let mono_input = InputConfig {
-            backend: InputBackend::Pipewire,
+            backend: Some(InputBackend::Pipewire),
             node_name: None,
             sample_format: None,
             rate_hz: None,
@@ -2015,6 +1979,7 @@ pcm_rate_hz = 96000
 schema_version = 1
 [output]
 backend = "alsa"
+device = "hw:CARD=Test,DEV=0"
 volume_control = "{mode_str}"
 [target]
 format = "pcm"
@@ -2030,6 +1995,7 @@ pcm_rate_hz = 96000
 schema_version = 1
 [output]
 backend = "alsa"
+device = "hw:CARD=Test,DEV=0"
 [target]
 format = "pcm"
 pcm_rate_hz = 96000
@@ -2078,6 +2044,7 @@ overload_policy = "mute-recover"
 schema_version = 1
 [output]
 backend = "alsa"
+device = "hw:CARD=Test,DEV=0"
 device_wait_ms = 10000
 keep_audio_sink_ms = 2000
 [target]
@@ -2094,6 +2061,7 @@ pcm_rate_hz = 96000
 schema_version = 1
 [output]
 backend = "alsa"
+device = "hw:CARD=Test,DEV=0"
 device_wait_ms = 1000
 keep_audio_sink_ms = 5000
 [target]
@@ -2110,6 +2078,7 @@ pcm_rate_hz = 96000
 schema_version = 1
 [output]
 backend = "alsa"
+device = "hw:CARD=Test,DEV=0"
 device_wait_ms = -2
 [target]
 format = "pcm"
@@ -2121,6 +2090,7 @@ pcm_rate_hz = 96000
 schema_version = 1
 [output]
 backend = "alsa"
+device = "hw:CARD=Test,DEV=0"
 keep_audio_sink_ms = -5
 [target]
 format = "pcm"

@@ -28,6 +28,7 @@ preset = "balanced"
 
 [output]
 backend = "alsa"
+device = "hw:CARD=Test,DEV=0"
 container = "raw"
 {transport_line}
 "#

@@ -89,6 +89,8 @@ fn test_cli_play_volume_accepts_db_and_percent_syntax() {
             .arg("play")
             .arg("-i")
             .arg("non_existent_file.wav")
+            .arg("-d")
+            .arg("hw:CARD=Test,DEV=0")
             .arg("-v")
             .arg(vol)
             .output()

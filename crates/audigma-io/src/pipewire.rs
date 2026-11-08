@@ -703,7 +703,7 @@ impl PipeWireVirtualSink {
         queue_chunks: usize,
     ) -> Result<Self, PipeWireError> {
         let dummy_cfg = InputConfig {
-            backend: audigma_settings::InputBackend::Pipewire,
+            backend: Some(audigma_settings::InputBackend::Pipewire),
             node_name: Some(node_name.to_string()),
             sample_format: None,
             rate_hz: PcmRateHz::new(rate_hz),

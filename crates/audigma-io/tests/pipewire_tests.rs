@@ -143,7 +143,7 @@ fn test_build_format_pod_multichannel_layouts() {
 #[cfg(feature = "pipewire")]
 fn test_pipewire_virtual_sink_from_input_config_resolution() {
     let in_cfg = InputConfig {
-        backend: InputBackend::Pipewire,
+        backend: Some(InputBackend::Pipewire),
         node_name: Some("test_dynamic_sink".to_string()),
         sample_format: None,
         rate_hz: None,
