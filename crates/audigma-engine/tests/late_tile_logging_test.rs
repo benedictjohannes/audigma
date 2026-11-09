@@ -3,7 +3,10 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
-use audigma_engine::late::{LateCounters, LateEpisodeAggregator, LateRecord, LateTileTelemetry};
+use audigma_engine::late::{
+    HeadroomSource, HeadroomWindow, LateCounters, LateEpisodeAggregator, LateRecord,
+    LateTileTelemetry,
+};
 use tracing_subscriber::layer::SubscriberExt;
 
 #[derive(Clone, Default)]
@@ -88,7 +91,7 @@ fn synthetic_telemetry_emits_valid_json_records() {
 
     let start: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
     assert_eq!(start["target"], "audigma::late");
-    assert_eq!(start["level"], "WARN");
+    assert_eq!(start["level"], "DEBUG");
     assert_eq!(start["event"], "late_start");
     assert_eq!(start["tile_us"], 1_567);
     assert_eq!(start["budget_us"], 1_451);
@@ -159,4 +162,101 @@ fn records_group_under_one_episode_id() {
     let id = episode_id(&start);
     assert_eq!(episode_id(&slice), id);
     assert_eq!(episode_id(&end), id);
+}
+
+/// Runs one late episode with the given headroom and returns the slice's JSON record.
+fn slice_with_headroom(window: HeadroomWindow) -> serde_json::Value {
+    let buf = TestBuffer::default();
+    let subscriber = tracing_subscriber::registry().with(
+        tracing_subscriber::fmt::layer()
+            .json()
+            .flatten_event(true)
+            .with_writer(buf.clone())
+            .with_ansi(false),
+    );
+    let telemetry = Arc::new(LateTileTelemetry::new(
+        256,
+        Duration::from_micros(1_451),
+        176_400,
+        11_289_600,
+    ));
+    let counters: Arc<dyn Fn() -> LateCounters + Send + Sync> = Arc::new(LateCounters::default);
+    let headroom: HeadroomSource = Arc::new(move || window);
+    let mut aggregator = LateEpisodeAggregator::new(
+        Arc::clone(&telemetry),
+        counters,
+        Duration::from_millis(10_000),
+    )
+    .with_headroom(headroom);
+
+    let first_ns = 1_000_000u64;
+    telemetry.record_tile(true, 1_567, true, Some(first_ns));
+    let mut records = aggregator.tick(
+        first_ns + 1_000,
+        UNIX_EPOCH + Duration::from_nanos(first_ns),
+    );
+    records.extend(aggregator.tick(
+        first_ns + 10_000_000_000,
+        UNIX_EPOCH + Duration::from_nanos(first_ns + 10_000_000_000),
+    ));
+    tracing::subscriber::with_default(subscriber, || {
+        for record in &records {
+            record.emit();
+        }
+    });
+
+    let output = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+    output
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .find(|v| v["event"] == "late_slice")
+        .expect("late_slice record")
+}
+
+#[test]
+fn slice_is_info_when_device_headroom_is_healthy() {
+    let slice = slice_with_headroom(HeadroomWindow {
+        min_us: Some(40_000),
+        buffered_peak_us: Some(45_000),
+    });
+    assert_eq!(slice["level"], "INFO");
+    assert_eq!(slice["headroom_min_us"], 40_000);
+    assert_eq!(slice["buffer_peak_us"], 45_000);
+}
+
+#[test]
+fn slice_is_warn_when_half_the_device_buffer_is_consumed() {
+    let slice = slice_with_headroom(HeadroomWindow {
+        min_us: Some(20_000),
+        buffered_peak_us: Some(45_000),
+    });
+    assert_eq!(slice["level"], "WARN");
+}
+
+#[test]
+fn headroom_threshold_is_exactly_half_the_buffer() {
+    let at_half = HeadroomWindow {
+        min_us: Some(22_500),
+        buffered_peak_us: Some(45_000),
+    };
+    assert!(!at_half.is_low());
+    let just_below = HeadroomWindow {
+        min_us: Some(22_499),
+        buffered_peak_us: Some(45_000),
+    };
+    assert!(just_below.is_low());
+    let starved = HeadroomWindow {
+        min_us: Some(-1),
+        buffered_peak_us: Some(45_000),
+    };
+    assert!(starved.is_low());
+}
+
+#[test]
+fn unknown_headroom_stays_warn() {
+    assert!(HeadroomWindow::default().is_low());
+    assert_eq!(
+        slice_with_headroom(HeadroomWindow::default())["level"],
+        "WARN"
+    );
 }

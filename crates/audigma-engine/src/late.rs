@@ -13,6 +13,43 @@ use std::time::{Duration, Instant, SystemTime};
 /// How often the `audigma-late` aggregator polls the atomics.
 pub const LATE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
+/// Device-buffer headroom observed by the feed loop over one polling window.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HeadroomWindow {
+    /// Smallest `buffered - feed_gap` seen at an emit, in microseconds.
+    pub min_us: Option<i64>,
+    /// Largest device-buffered audio seen right after an emit; stands in for the
+    /// buffer capacity (the loop is demand-driven, so the queue sits near full).
+    pub buffered_peak_us: Option<u64>,
+}
+
+impl HeadroomWindow {
+    fn merge(&mut self, other: &Self) {
+        self.min_us = match (self.min_us, other.min_us) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, None) => a,
+            (None, b) => b,
+        };
+        self.buffered_peak_us = match (self.buffered_peak_us, other.buffered_peak_us) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, None) => a,
+            (None, b) => b,
+        };
+    }
+
+    /// `true` when at least half of the device buffer was consumed, or when the
+    /// backend reports no buffer depth (headroom unknown, so assume the worst).
+    pub fn is_low(&self) -> bool {
+        match (self.min_us, self.buffered_peak_us) {
+            (Some(min), Some(peak)) => min < (peak / 2) as i64,
+            _ => true,
+        }
+    }
+}
+
+/// Provider of the feed loop's headroom since the previous call (take-and-reset).
+pub type HeadroomSource = Arc<dyn Fn() -> HeadroomWindow + Send + Sync>;
+
 /// Cumulative counter snapshot used to derive per-interval deltas.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LateCounters {
@@ -331,6 +368,8 @@ pub enum LateRecord {
         fill_max_ms: f64,
         partial_tiles: u64,
         counters_delta: LateCounters,
+        /// Device headroom over this slice. Decides the log level of the record.
+        headroom: HeadroomWindow,
         /// Worker/dispatch timing over this slice, when the pool exposes histograms.
         /// Boxed to keep `LateRecord` small; records are built off the real-time path.
         timing: Option<Box<TimingReport>>,
@@ -347,6 +386,8 @@ pub enum LateRecord {
         fill_max_ms: f64,
         input_rate_hz: u32,
         output_rate_hz: u32,
+        /// Device headroom over the whole episode.
+        headroom: HeadroomWindow,
     },
 }
 
@@ -362,7 +403,7 @@ impl LateRecord {
                 input_rate_hz,
                 output_rate_hz,
             } => {
-                tracing::warn!(
+                tracing::debug!(
                     target: audigma_log::LATE_TARGET,
                     event = audigma_log::LATE_START,
                     episode_id = *episode_id,
@@ -386,39 +427,53 @@ impl LateRecord {
                 fill_max_ms,
                 partial_tiles,
                 counters_delta,
+                headroom,
                 timing,
             } => {
                 let timing = timing.as_ref();
-                tracing::warn!(
-                    target: audigma_log::LATE_TARGET,
-                    event = audigma_log::LATE_SLICE,
-                    episode_id = *episode_id,
-                    start = %start,
-                    end = %end,
-                    late = *late,
-                    total = *total,
-                    max_us = *max_us,
-                    budget_us = *budget_us,
-                    fill_min_ms = *fill_min_ms,
-                    fill_max_ms = *fill_max_ms,
-                    partial_tiles = *partial_tiles,
-                    xruns_delta = counters_delta.xruns,
-                    overruns_delta = counters_delta.overruns,
-                    starvations_delta = counters_delta.starvations,
-                    empty_polls_delta = counters_delta.empty_polls,
-                    dropped_chunks_delta = counters_delta.dropped_chunks,
-                    processed_chunks_delta = counters_delta.processed_chunks,
-                    worker_exec_mean_us = timing.map(|t| t.worker.mean_us),
-                    worker_exec_p50_us = timing.map(|t| t.worker.p50_us),
-                    worker_exec_p99_us = timing.map(|t| t.worker.p99_us),
-                    worker_exec_max_us = timing.map(|t| t.worker.max_us),
-                    worker_p99_us = timing.map(|t| t.per_worker_list(|s| s.p99_us)),
-                    worker_max_us = timing.map(|t| t.per_worker_list(|s| s.max_us)),
-                    dispatch_p50_us = timing.map(|t| t.dispatch.p50_us),
-                    dispatch_p99_us = timing.map(|t| t.dispatch.p99_us),
-                    dispatch_max_us = timing.map(|t| t.dispatch.max_us),
-                    "dsp deadline miss interval slice"
-                );
+                // A miss only matters when it ate into the device buffer; otherwise it is
+                // an INFO-level DSP-budget statistic.
+                macro_rules! emit_slice {
+                    ($level:ident) => {
+                        tracing::$level!(
+                            target: audigma_log::LATE_TARGET,
+                            event = audigma_log::LATE_SLICE,
+                            episode_id = *episode_id,
+                            start = %start,
+                            end = %end,
+                            late = *late,
+                            total = *total,
+                            max_us = *max_us,
+                            budget_us = *budget_us,
+                            fill_min_ms = *fill_min_ms,
+                            fill_max_ms = *fill_max_ms,
+                            partial_tiles = *partial_tiles,
+                            xruns_delta = counters_delta.xruns,
+                            overruns_delta = counters_delta.overruns,
+                            starvations_delta = counters_delta.starvations,
+                            empty_polls_delta = counters_delta.empty_polls,
+                            dropped_chunks_delta = counters_delta.dropped_chunks,
+                            processed_chunks_delta = counters_delta.processed_chunks,
+                            worker_exec_mean_us = timing.map(|t| t.worker.mean_us),
+                            worker_exec_p50_us = timing.map(|t| t.worker.p50_us),
+                            worker_exec_p99_us = timing.map(|t| t.worker.p99_us),
+                            worker_exec_max_us = timing.map(|t| t.worker.max_us),
+                            worker_p99_us = timing.map(|t| t.per_worker_list(|s| s.p99_us)),
+                            worker_max_us = timing.map(|t| t.per_worker_list(|s| s.max_us)),
+                            dispatch_p50_us = timing.map(|t| t.dispatch.p50_us),
+                            dispatch_p99_us = timing.map(|t| t.dispatch.p99_us),
+                            dispatch_max_us = timing.map(|t| t.dispatch.max_us),
+                            headroom_min_us = headroom.min_us,
+                            buffer_peak_us = headroom.buffered_peak_us,
+                            "dsp deadline miss interval slice"
+                        )
+                    };
+                }
+                if headroom.is_low() {
+                    emit_slice!(warn);
+                } else {
+                    emit_slice!(info);
+                }
             }
             Self::End {
                 episode_id,
@@ -432,6 +487,7 @@ impl LateRecord {
                 fill_max_ms,
                 input_rate_hz,
                 output_rate_hz,
+                headroom,
             } => {
                 tracing::info!(
                     target: audigma_log::LATE_TARGET,
@@ -447,6 +503,8 @@ impl LateRecord {
                     fill_max_ms = *fill_max_ms,
                     input_rate_hz = *input_rate_hz,
                     output_rate_hz = *output_rate_hz,
+                    headroom_min_us = headroom.min_us,
+                    buffer_peak_us = headroom.buffered_peak_us,
                     "dsp deadline miss episode recovered"
                 );
             }
@@ -465,6 +523,7 @@ struct EpisodeTotals {
     fill_min: Option<f64>,
     fill_max: Option<f64>,
     last_late_mono_ns: u64,
+    headroom: HeadroomWindow,
 }
 
 impl EpisodeTotals {
@@ -490,6 +549,7 @@ struct Episode {
     pending: IntervalSnapshot,
     interval_fill_min: Option<f64>,
     interval_fill_max: Option<f64>,
+    interval_headroom: HeadroomWindow,
 }
 
 impl Episode {
@@ -501,6 +561,7 @@ impl Episode {
     fn reset_interval_fill(&mut self) {
         self.interval_fill_min = None;
         self.interval_fill_max = None;
+        self.interval_headroom = HeadroomWindow::default();
     }
 }
 
@@ -521,6 +582,7 @@ pub struct LateEpisodeAggregator {
     next_boundary_ns: u64,
     episode: Option<Episode>,
     timing: Option<TimingTracker>,
+    headroom: Option<HeadroomSource>,
 }
 
 impl LateEpisodeAggregator {
@@ -540,7 +602,14 @@ impl LateEpisodeAggregator {
             next_boundary_ns: 0,
             episode: None,
             timing: None,
+            headroom: None,
         }
+    }
+
+    /// Adds device headroom to the records and uses it to pick the `late_slice` level.
+    pub fn with_headroom(mut self, source: HeadroomSource) -> Self {
+        self.headroom = Some(source);
+        self
     }
 
     /// Adds worker/dispatch timing to `late_slice` records.
@@ -553,10 +622,12 @@ impl LateEpisodeAggregator {
     pub fn tick(&mut self, mono_now_ns: u64, wall_now: SystemTime) -> Vec<LateRecord> {
         let mut records = Vec::new();
         let total_late = self.telemetry.total_late_tiles();
+        // Drain every tick so a window never spans time before the episode opened.
+        let window = self.headroom.as_ref().map(|f| f()).unwrap_or_default();
 
         if self.episode.is_none() {
             if total_late > self.last_seen_late_total {
-                self.open_episode(total_late, mono_now_ns, wall_now, &mut records);
+                self.open_episode(total_late, mono_now_ns, wall_now, window, &mut records);
             } else {
                 // Stay ready for a new episode without letting interval counters grow
                 // stale while the stream is meeting all deadlines.
@@ -564,6 +635,13 @@ impl LateEpisodeAggregator {
                 self.last_seen_late_total = total_late;
                 return records;
             }
+        }
+
+        if let Some(episode) = self.episode.as_mut() {
+            // Min/max merging is idempotent, so the opening tick's window (already stored
+            // by `open_episode`) is harmless to fold in again.
+            episode.interval_headroom.merge(&window);
+            episode.totals.headroom.merge(&window);
         }
 
         if let Some(fill) = self.telemetry.current_fill_ms() {
@@ -645,6 +723,7 @@ impl LateEpisodeAggregator {
         total_late: u64,
         mono_now_ns: u64,
         wall_now: SystemTime,
+        window: HeadroomWindow,
         records: &mut Vec<LateRecord>,
     ) {
         let mut snapshot = self.telemetry.take_interval();
@@ -697,7 +776,9 @@ impl LateEpisodeAggregator {
             pending: snapshot,
             interval_fill_min: Some(fill_ms),
             interval_fill_max: Some(fill_ms),
+            interval_headroom: window,
         };
+        episode.totals.headroom = window;
         episode.totals.sample_fill(fill_ms);
         episode.totals.last_late_mono_ns = snapshot.last_late_mono_ns;
 
@@ -731,6 +812,7 @@ impl LateEpisodeAggregator {
             fill_max_ms: episode.interval_fill_max.unwrap_or(0.0),
             partial_tiles: episode.pending.partial,
             counters_delta: delta,
+            headroom: episode.interval_headroom,
             timing,
         }
     }
@@ -749,6 +831,7 @@ impl LateEpisodeAggregator {
             fill_max_ms: episode.totals.fill_max.unwrap_or(0.0),
             input_rate_hz: self.telemetry.input_rate_hz(),
             output_rate_hz: self.telemetry.output_rate_hz(),
+            headroom: episode.totals.headroom,
         }
     }
 
@@ -799,6 +882,7 @@ impl LateTileMonitor {
         counters: LateCounterSource,
         interval: Duration,
         timings: Option<Arc<PoolTimings>>,
+        headroom: Option<HeadroomSource>,
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = Arc::clone(&stop);
@@ -809,6 +893,9 @@ impl LateTileMonitor {
                     LateEpisodeAggregator::new(Arc::clone(&telemetry), counters, interval);
                 if let Some(timings) = timings {
                     aggregator = aggregator.with_timings(timings);
+                }
+                if let Some(headroom) = headroom {
+                    aggregator = aggregator.with_headroom(headroom);
                 }
                 loop {
                     let mono_now = telemetry.mono_ns();

@@ -34,8 +34,8 @@ pub use cpu::{
 };
 pub use decimator::ChannelDecimatorPool;
 pub use late::{
-    LateCounterSource, LateCounters, LateEpisodeAggregator, LateRecord, LateTileMonitor,
-    LateTileTelemetry,
+    HeadroomSource, HeadroomWindow, LateCounterSource, LateCounters, LateEpisodeAggregator,
+    LateRecord, LateTileMonitor, LateTileTelemetry,
 };
 pub use lifecycle::{
     BlockAction, FrameGain, IdleCarrierFormat, LifecycleController, LifecycleState,

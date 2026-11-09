@@ -15,7 +15,7 @@
 //! - Monitored live telemetry exported via shared state.
 
 use crate::asrc::{ClockDriftConfig, ClockDriftController, ClockDriftError, DriftMode};
-use crate::late::{LateCounterSource, LateCounters, LateTileMonitor};
+use crate::late::{HeadroomSource, LateCounterSource, LateCounters, LateTileMonitor};
 use crate::lifecycle::{
     BlockAction, FrameGain, IdleCarrierFormat, LifecycleController, LifecycleState,
 };
@@ -912,18 +912,22 @@ impl LivePipeline {
             let control = control.clone();
             Arc::new(move || control.late_counters())
         };
+        // End-to-end feed-loop timing (read, prep, DSP, emit, device headroom). Same
+        // contract as above: the loop touches atomics only; reporting is off-thread.
+        let loop_telemetry = Arc::new(LoopTimingTelemetry::new());
         let _late_monitor = processor.late_telemetry().map(|telemetry| {
+            let headroom: HeadroomSource = {
+                let loop_telemetry = Arc::clone(&loop_telemetry);
+                Arc::new(move || loop_telemetry.take_headroom_window())
+            };
             LateTileMonitor::spawn(
                 telemetry,
                 late_counters,
                 self.settings.rt_report_interval(),
                 Some(processor.timings()),
+                Some(headroom),
             )
         });
-
-        // End-to-end feed-loop timing (read, prep, DSP, emit, device headroom). Same
-        // contract as above: the loop touches atomics only; reporting is off-thread.
-        let loop_telemetry = Arc::new(LoopTimingTelemetry::new());
         let mut loop_probe = LoopProbe::new(Arc::clone(&loop_telemetry));
         let _loop_monitor = LoopTimingMonitor::spawn(
             Arc::clone(&loop_telemetry),

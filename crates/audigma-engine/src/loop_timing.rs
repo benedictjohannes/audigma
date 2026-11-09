@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crate::late::{LATE_POLL_INTERVAL, LateCounterSource, LateCounters};
+use crate::late::{HeadroomWindow, LATE_POLL_INTERVAL, LateCounterSource, LateCounters};
 use crate::timing::{MaxSlot, PoolTimings, TimingReport, TimingTracker};
 use crate::traits::AudioOutput;
 
@@ -82,6 +82,10 @@ pub struct LoopTimingTelemetry {
     feed_gap_max_us: AtomicU64,
     headroom_min_us: AtomicI64,
     buffered_min_us: AtomicU64,
+    // Second, independently reset view of headroom for the late-tile aggregator; the
+    // health aggregator consumes the interval fields above.
+    late_headroom_min_us: AtomicI64,
+    late_buffered_peak_us: AtomicU64,
     starved: AtomicU64,
     total_starved: AtomicU64,
 }
@@ -104,6 +108,8 @@ impl LoopTimingTelemetry {
             feed_gap_max_us: AtomicU64::new(0),
             headroom_min_us: AtomicI64::new(NO_HEADROOM),
             buffered_min_us: AtomicU64::new(u64::MAX),
+            late_headroom_min_us: AtomicI64::new(NO_HEADROOM),
+            late_buffered_peak_us: AtomicU64::new(0),
             starved: AtomicU64::new(0),
             total_starved: AtomicU64::new(0),
         }
@@ -117,6 +123,18 @@ impl LoopTimingTelemetry {
     #[inline]
     pub fn total_starved(&self) -> u64 {
         self.total_starved.load(Ordering::Relaxed)
+    }
+
+    /// Takes and resets the headroom window read by the late-tile aggregator.
+    pub fn take_headroom_window(&self) -> HeadroomWindow {
+        let min = self
+            .late_headroom_min_us
+            .swap(NO_HEADROOM, Ordering::AcqRel);
+        let peak = self.late_buffered_peak_us.swap(0, Ordering::AcqRel);
+        HeadroomWindow {
+            min_us: (min != NO_HEADROOM).then_some(min),
+            buffered_peak_us: (peak != 0).then_some(peak),
+        }
     }
 
     /// Takes and resets the interval-scoped values.
@@ -183,6 +201,8 @@ impl LoopProbe {
             if let Some(buffered) = self.last_buffered_us {
                 let headroom = buffered as i64 - gap_us as i64;
                 t.headroom_min_us.fetch_min(headroom, Ordering::Relaxed);
+                t.late_headroom_min_us
+                    .fetch_min(headroom, Ordering::Relaxed);
                 if headroom < 0 {
                     t.starved.fetch_add(1, Ordering::Relaxed);
                     t.total_starved.fetch_add(1, Ordering::Relaxed);
@@ -199,6 +219,7 @@ impl LoopProbe {
         self.last_buffered_us = output.buffered_us();
         if let Some(b) = self.last_buffered_us {
             t.buffered_min_us.fetch_min(b, Ordering::Relaxed);
+            t.late_buffered_peak_us.fetch_max(b, Ordering::Relaxed);
         }
         // Take the baseline after the delay query so the query itself is not counted as gap.
         self.last_emit_end = Some(Instant::now());

@@ -60,6 +60,7 @@ fn monitor_flushes_open_episode_on_shutdown() {
         counters,
         Duration::from_secs(10),
         None,
+        None,
     );
 
     // Allow the 100 ms poll loop to observe the late tile and emit late_start.
@@ -77,8 +78,8 @@ fn monitor_flushes_open_episode_on_shutdown() {
     assert!(
         events
             .iter()
-            .any(|e| e["event"] == "late_start" && e["level"] == "WARN"),
-        "expected WARN late_start, got: {output}"
+            .any(|e| e["event"] == "late_start" && e["level"] == "DEBUG"),
+        "expected DEBUG late_start, got: {output}"
     );
     assert!(
         events
