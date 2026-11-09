@@ -14,6 +14,10 @@ use crate::worker::{
     WorkerSetup,
 };
 
+/// Pool entry point taking one block of planar PCM input.
+type PoolInputPcm =
+    fn(&mut ChannelWorkerPool, &[&[f64]], InputTileControls<'_>) -> Result<usize, EngineError>;
+
 /// Executes individual audio tiles through the half-band filter cascade and delta-sigma modulators,
 /// measuring wall-clock execution against real-time deadline budgets when real-time tracking is enabled.
 pub struct TileProcessor {
@@ -217,16 +221,39 @@ impl TileProcessor {
         inputs: &[&[f64]],
         controls: InputTileControls<'_>,
     ) -> Result<usize, EngineError> {
+        self.timed_input_pcm(inputs, controls, ChannelWorkerPool::process_input_pcm)
+    }
+
+    /// [`process_input_pcm`](Self::process_input_pcm) stopping after the interpolation
+    /// cascade (no modulation); `channel_pcm` holds the result.
+    pub fn process_input_pcm_interpolated(
+        &mut self,
+        inputs: &[&[f64]],
+        controls: InputTileControls<'_>,
+    ) -> Result<usize, EngineError> {
+        self.timed_input_pcm(
+            inputs,
+            controls,
+            ChannelWorkerPool::process_input_pcm_interpolated,
+        )
+    }
+
+    fn timed_input_pcm(
+        &mut self,
+        inputs: &[&[f64]],
+        controls: InputTileControls<'_>,
+        dispatch: PoolInputPcm,
+    ) -> Result<usize, EngineError> {
         if let Some(budget) = self.tile_budget {
             let frames = self
                 .worker_pool
                 .pcm_baseband_frames(inputs.first().map_or(0, |input| input.len()))?;
             let start = Instant::now();
-            let produced = self.worker_pool.process_input_pcm(inputs, controls)?;
+            let produced = dispatch(&mut self.worker_pool, inputs, controls)?;
             self.record_tile_metrics(frames, start.elapsed(), budget);
             Ok(produced)
         } else {
-            self.worker_pool.process_input_pcm(inputs, controls)
+            dispatch(&mut self.worker_pool, inputs, controls)
         }
     }
 

@@ -7,11 +7,10 @@
 //! Pass 1 evaluates only the LTI interpolation cascade to measure the true inter-sample peak
 //! `P` in dBFS, solving `gain_db = min(configured_gain_db, L - M - P)` per Design.md §4.4.
 
-use crate::decimator::ChannelDecimatorPool;
+use crate::offline_feed::PcmFeeder;
+use crate::processor::TileProcessor;
 use crate::traits::{AudioInput, EngineError};
-use crate::worker::ChannelWorkerPool;
 use audigma_dsp::config::DspConfiguration;
-use audigma_dsp::fir::PolyphaseResampler;
 
 /// Peak analysis measurement result from Pass 1.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -28,143 +27,55 @@ pub struct Pass1PeakResult {
     pub total_input_frames: u64,
 }
 
-/// Measures the true inter-sample peak across the LTI interpolation cascade using the channel worker pool.
+/// Measures the true inter-sample peak across the LTI interpolation cascade.
+///
+/// Runs the processor's own input stage (decimation, SRC) at unity gain and stops after the
+/// cascade, before any modulator. The processor must be configured with an input stage
+/// (`TileProcessor::new_with_input`). It is reset afterwards and `input` is rewound.
 pub fn measure_true_peak_pass1(
     input: &mut dyn AudioInput,
-    mut rational_src: Option<(PolyphaseResampler, PolyphaseResampler)>,
-    mut decimator: Option<ChannelDecimatorPool>,
-    worker_pool: &mut ChannelWorkerPool,
+    processor: &mut TileProcessor,
     dsp_config: &DspConfiguration,
-    tile_size: usize,
 ) -> Result<Pass1PeakResult, EngineError> {
     if !input.can_rewind() {
         return Err(EngineError::TwoPassRequiresSeekableInput);
     }
 
-    let mult = worker_pool.rate_multiplier();
-    let dec_divider = decimator.as_ref().map(|d| d.divider()).unwrap_or(1);
-    let in_tile_size = tile_size * dec_divider;
-
-    let mut in_left = vec![0.0; in_tile_size];
-    let mut in_right = vec![0.0; in_tile_size];
-
-    let mut dec_left = vec![0.0; tile_size * 2];
-    let mut dec_right = vec![0.0; tile_size * 2];
-
-    let mut src_out_left = vec![0.0; tile_size * 2];
-    let mut src_out_right = vec![0.0; tile_size * 2];
-
+    let mult = processor.rate_multiplier();
+    let mut feeder = PcmFeeder::new(processor);
     let mut max_peak = 0.0f64;
     let mut total_frames = 0u64;
 
+    let mut scan = |processor: &TileProcessor| {
+        for ch in 0..2 {
+            for &sample in processor.channel_pcm(ch) {
+                max_peak = max_peak.max(sample.abs());
+            }
+        }
+    };
+
     loop {
-        let frames_read = input.read_stereo(&mut in_left, &mut in_right)?;
+        let frames_read = feeder.read(input)?;
         if frames_read == 0 {
             break;
         }
         total_frames += frames_read as u64;
-
-        let (left_slice, right_slice) = if let Some(ref mut dec) = decimator {
-            let produced = dec.process(
-                &[&in_left[..frames_read], &in_right[..frames_read]],
-                &mut [&mut dec_left, &mut dec_right],
-            )?;
-            if produced == 0 {
-                continue;
-            }
-            (&dec_left[..produced], &dec_right[..produced])
-        } else {
-            (&in_left[..frames_read], &in_right[..frames_read])
-        };
-
-        match rational_src {
-            Some((ref mut src_l, ref mut src_r)) => {
-                let (_, prod_l) = src_l.process(left_slice, &mut src_out_left);
-                let (_, prod_r) = src_r.process(right_slice, &mut src_out_right);
-                let prod = prod_l.min(prod_r);
-
-                let mut offset = 0;
-                while offset < prod {
-                    let chunk = (prod - offset).min(tile_size);
-
-                    worker_pool.process_tile_pcm(&[
-                        &src_out_left[offset..offset + chunk],
-                        &src_out_right[offset..offset + chunk],
-                    ])?;
-
-                    let out_l = worker_pool.channel_pcm(0);
-                    let out_r = worker_pool.channel_pcm(1);
-
-                    for &sample in out_l {
-                        let abs = sample.abs();
-                        if abs > max_peak {
-                            max_peak = abs;
-                        }
-                    }
-                    for &sample in out_r {
-                        let abs = sample.abs();
-                        if abs > max_peak {
-                            max_peak = abs;
-                        }
-                    }
-
-                    offset += chunk;
-                }
-            }
-            None => {
-                worker_pool.process_tile_pcm(&[left_slice, right_slice])?;
-
-                let out_l = worker_pool.channel_pcm(0);
-                let out_r = worker_pool.channel_pcm(1);
-
-                for &sample in out_l {
-                    let abs = sample.abs();
-                    if abs > max_peak {
-                        max_peak = abs;
-                    }
-                }
-                for &sample in out_r {
-                    let abs = sample.abs();
-                    if abs > max_peak {
-                        max_peak = abs;
-                    }
-                }
-            }
+        if feeder.process(processor, frames_read, 1.0, true)? > 0 {
+            scan(processor);
         }
     }
 
     // Flush filter group delay with digital silence to capture filter tail overshoots
-    let delay_frames = worker_pool.total_group_delay_output_samples() / mult + 48;
-    in_left.fill(0.0);
-    in_right.fill(0.0);
-
+    let delay_frames = processor.total_group_delay_output_samples() / mult + 48;
     let mut flushed = 0;
     while flushed < delay_frames {
-        let chunk = (delay_frames - flushed).min(tile_size);
-
-        worker_pool.process_tile_pcm(&[&in_left[..chunk], &in_right[..chunk]])?;
-
-        let out_l = worker_pool.channel_pcm(0);
-        let out_r = worker_pool.channel_pcm(1);
-
-        for &sample in out_l {
-            let abs = sample.abs();
-            if abs > max_peak {
-                max_peak = abs;
-            }
-        }
-        for &sample in out_r {
-            let abs = sample.abs();
-            if abs > max_peak {
-                max_peak = abs;
-            }
-        }
-
-        flushed += chunk;
+        let chunk = (delay_frames - flushed).min(feeder.capacity());
+        flushed += feeder.process_silence(processor, chunk, 1.0, true)?;
+        scan(processor);
     }
 
     // Reset worker pool filters back to initial clean state
-    worker_pool.reset()?;
+    processor.reset()?;
 
     // Rewind input stream back to timestamp 0 for Pass 2
     input.rewind()?;

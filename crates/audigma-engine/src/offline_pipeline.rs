@@ -9,17 +9,17 @@
 //! - Tail management (`trim-to-duration` vs `preserve-tail`)
 //! - Container and transport packing (DSF, WAV, FLAC, Native DSD, DoP, Raw)
 
-use crate::decimator::ChannelDecimatorPool;
+use crate::offline_feed::PcmFeeder;
 use crate::peak::measure_true_peak_pass1;
 use crate::pipeline_topology::PipelineTopology;
 use crate::processor::TileProcessor;
 use crate::tail::TailManager;
 use crate::traits::{AudioInput, AudioOutput, EngineError};
 use crate::transport::{is_dsd_passthrough_eligible, transfer_offline_dsd_passthrough};
+use crate::worker::{InputDspConfig, InputResampling};
 use audigma_dsp::DSD_IDLE_BYTE;
 use audigma_dsp::PcmQuantizer;
 use audigma_dsp::config::{DspConfiguration, SampleFormat, TargetFormat, TargetRateSpec};
-use audigma_dsp::fir::PolyphaseResampler;
 use audigma_dsp::ftz::ScopedFtzDaz;
 use audigma_dsp::rates::PcmRateHz;
 use audigma_format::dop::{DopContainerFormat, DopPacker};
@@ -448,10 +448,7 @@ pub struct OfflinePipeline {
     plan: ResolvedPipelinePlan,
     settings: Settings,
     topology: PipelineTopology,
-    rational_src: Option<(PolyphaseResampler, PolyphaseResampler)>,
-    decimator: Option<ChannelDecimatorPool>,
     processor: TileProcessor,
-    tile_size: usize,
     mult: usize,
 }
 
@@ -473,30 +470,26 @@ impl OfflinePipeline {
         let topology = PipelineTopology::resolve(input_rate, plan.stream_spec.target)?;
         let intermediate_rate = topology.intermediate_rate;
 
-        // Determine if same-family FIR decimation is required
         const TILE_BASEBAND_FRAMES: usize = 512;
-        let decimator = if topology.decimation_stages > 0 {
-            Some(ChannelDecimatorPool::new(
-                topology.decimation_stages,
-                2,
-                TILE_BASEBAND_FRAMES * topology.decimation_divider() * 4,
-            ))
-        } else {
-            None
-        };
 
-        // Determine if cross-family rational SRC is required
-        let rational_src = if topology.requires_rational_src {
-            let src_l = PolyphaseResampler::new_rational(input_rate, intermediate_rate)?;
-            let src_r = PolyphaseResampler::new_rational(input_rate, intermediate_rate)?;
-            Some((src_l, src_r))
+        // Decimation and rational SRC run in the workers' input stage, as in the live loop.
+        let resampling = if topology.requires_rational_src {
+            InputResampling::Rational {
+                input_rate,
+                output_rate: intermediate_rate,
+            }
         } else {
-            None
+            InputResampling::None
+        };
+        let input_config = InputDspConfig {
+            pcm_decimation_stages: topology.decimation_stages,
+            dsd: None,
+            resampling,
         };
 
         let target_dsd = topology.target_dsd_config(&plan.dsp_config);
 
-        let processor = TileProcessor::new(
+        let processor = TileProcessor::new_with_input(
             2,
             plan.dsp_config.phase,
             plan.dsp_config.apodization,
@@ -504,6 +497,7 @@ impl OfflinePipeline {
             TILE_BASEBAND_FRAMES,
             target_dsd,
             false,
+            input_config,
             worker_setup,
         )?;
         let mult = processor.rate_multiplier();
@@ -512,10 +506,7 @@ impl OfflinePipeline {
             plan,
             settings,
             topology,
-            rational_src,
-            decimator,
             processor,
-            tile_size: TILE_BASEBAND_FRAMES,
             mult,
         })
     }
@@ -593,14 +584,8 @@ impl OfflinePipeline {
         // Step 1: Gain Staging (Single-Pass vs. Two-Pass)
         let (applied_gain_db, measured_peak_dbfs) = match peak_mode {
             PeakAnalysisMode::TwoPass => {
-                let peak_result = measure_true_peak_pass1(
-                    input,
-                    self.rational_src.clone(),
-                    self.decimator.clone(),
-                    &mut self.processor,
-                    &self.plan.dsp_config,
-                    self.tile_size,
-                )?;
+                let peak_result =
+                    measure_true_peak_pass1(input, &mut self.processor, &self.plan.dsp_config)?;
                 (peak_result.calibrated_gain_db, Some(peak_result.peak_dbfs))
             }
             PeakAnalysisMode::SinglePass => (self.plan.dsp_config.total_configured_gain_db(), None),
@@ -639,127 +624,26 @@ impl OfflinePipeline {
         let mut container_writer =
             ContainerWriter::new(&self.settings, &self.plan.dsp_config, &target_spec, output)?;
 
-        // Pre-allocate bounded buffers
-        let tile_size = self.tile_size;
-        let dec_divider = self.topology.decimation_divider();
-        let in_tile_size = tile_size * dec_divider;
-
-        let mut in_left = vec![0.0; in_tile_size];
-        let mut in_right = vec![0.0; in_tile_size];
-
-        let mut dec_left = vec![0.0; tile_size * 2];
-        let mut dec_right = vec![0.0; tile_size * 2];
-
-        let mut src_out_left = vec![0.0; tile_size * 2];
-        let mut src_out_right = vec![0.0; tile_size * 2];
-
+        let mut feeder = PcmFeeder::new(&self.processor);
         let mut total_input_frames = 0u64;
 
-        // Step 3: Stream Processing Loop
+        // Step 3: Stream Processing Loop. Decimation, the pre-modulator gain and rational
+        // SRC run in the workers' input stage (shared with the live loop).
         loop {
-            let frames_read = input.read_stereo(&mut in_left, &mut in_right)?;
+            let frames_read = feeder.read(input)?;
             if frames_read == 0 {
-                if let Some(ref mut dec) = self.decimator {
-                    let flushed = dec.flush(&mut [&mut dec_left, &mut dec_right])?;
-                    if flushed > 0 {
-                        for i in 0..flushed {
-                            dec_left[i] *= linear_gain;
-                            dec_right[i] *= linear_gain;
-                        }
-                        if is_dsd {
-                            self.processor
-                                .process_tile_dsd(&[&dec_left[..flushed], &dec_right[..flushed]])?;
-                        } else {
-                            self.processor
-                                .process_tile_pcm(&[&dec_left[..flushed], &dec_right[..flushed]])?;
-                        }
-                        self.process_interpolated_block(
-                            flushed,
-                            &mut tail_manager,
-                            &mut container_writer,
-                            &target_spec,
-                        )?;
-                    }
-                }
                 break;
             }
             total_input_frames += frames_read as u64;
 
-            let (baseband_left, baseband_right, baseband_frames) =
-                if let Some(ref mut dec) = self.decimator {
-                    let produced = dec.process(
-                        &[&in_left[..frames_read], &in_right[..frames_read]],
-                        &mut [&mut dec_left, &mut dec_right],
-                    )?;
-                    if produced == 0 {
-                        continue;
-                    }
-                    (
-                        &mut dec_left[..produced],
-                        &mut dec_right[..produced],
-                        produced,
-                    )
-                } else {
-                    (
-                        &mut in_left[..frames_read],
-                        &mut in_right[..frames_read],
-                        frames_read,
-                    )
-                };
-
-            // Apply pre-modulator gain
-            for i in 0..baseband_frames {
-                baseband_left[i] *= linear_gain;
-                baseband_right[i] *= linear_gain;
-            }
-
-            let left_slice = &*baseband_left;
-            let right_slice = &*baseband_right;
-
-            match self.rational_src {
-                Some((ref mut src_l, ref mut src_r)) => {
-                    let (_, prod_l) = src_l.process(left_slice, &mut src_out_left);
-                    let (_, prod_r) = src_r.process(right_slice, &mut src_out_right);
-                    let prod = prod_l.min(prod_r);
-
-                    let mut offset = 0;
-                    while offset < prod {
-                        let chunk = (prod - offset).min(tile_size);
-                        let in_l = &src_out_left[offset..offset + chunk];
-                        let in_r = &src_out_right[offset..offset + chunk];
-
-                        if is_dsd {
-                            self.processor.process_tile_dsd(&[in_l, in_r])?;
-                        } else {
-                            self.processor.process_tile_pcm(&[in_l, in_r])?;
-                        }
-
-                        self.process_interpolated_block(
-                            chunk,
-                            &mut tail_manager,
-                            &mut container_writer,
-                            &target_spec,
-                        )?;
-
-                        offset += chunk;
-                    }
-                }
-                None => {
-                    if is_dsd {
-                        self.processor
-                            .process_tile_dsd(&[left_slice, right_slice])?;
-                    } else {
-                        self.processor
-                            .process_tile_pcm(&[left_slice, right_slice])?;
-                    }
-
-                    self.process_interpolated_block(
-                        baseband_frames,
-                        &mut tail_manager,
-                        &mut container_writer,
-                        &target_spec,
-                    )?;
-                }
+            let produced = feeder.process(&mut self.processor, frames_read, linear_gain, false)?;
+            if produced > 0 {
+                self.process_interpolated_block(
+                    produced,
+                    &mut tail_manager,
+                    &mut container_writer,
+                    &target_spec,
+                )?;
             }
         }
 
@@ -774,31 +658,23 @@ impl OfflinePipeline {
         };
         tail_manager.set_target_output_samples(computed_target_output_samples);
 
-        // Step 4: Flush Filter Tail with Digital Silence
+        // Step 4: Flush the input-stage residue and filter tail with digital silence
+        // until `flush_delay_frames` baseband frames came out (or the target is met).
         let flush_delay_frames = (aligned_group_delay / self.mult) + 48;
-        in_left.fill(0.0);
-        in_right.fill(0.0);
-
         let mut flushed = 0;
         while flushed < flush_delay_frames && !tail_manager.is_target_satisfied() {
-            let chunk = (flush_delay_frames - flushed).min(tile_size);
-            let in_l = &in_left[..chunk];
-            let in_r = &in_right[..chunk];
-
-            if is_dsd {
-                self.processor.process_tile_dsd(&[in_l, in_r])?;
-            } else {
-                self.processor.process_tile_pcm(&[in_l, in_r])?;
+            let chunk = (flush_delay_frames - flushed).min(feeder.capacity());
+            let produced =
+                feeder.process_silence(&mut self.processor, chunk, linear_gain, false)?;
+            if produced > 0 {
+                self.process_interpolated_block(
+                    produced,
+                    &mut tail_manager,
+                    &mut container_writer,
+                    &target_spec,
+                )?;
             }
-
-            self.process_interpolated_block(
-                chunk,
-                &mut tail_manager,
-                &mut container_writer,
-                &target_spec,
-            )?;
-
-            flushed += chunk;
+            flushed += produced;
         }
 
         // Step 5: Finalize Container

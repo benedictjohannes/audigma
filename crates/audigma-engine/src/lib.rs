@@ -16,6 +16,7 @@ pub mod late;
 pub mod lifecycle;
 pub mod live_pipeline;
 pub mod loop_timing;
+mod offline_feed;
 pub mod offline_pipeline;
 pub mod peak;
 pub mod pipeline_topology;

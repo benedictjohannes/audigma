@@ -40,6 +40,9 @@ const CMD_INPUT_PCM: u32 = 5;
 const CMD_INPUT_DSD: u32 = 6;
 const CMD_RESET_OUTPUT: u32 = 7;
 const CMD_RECONFIGURE: u32 = 8;
+/// Input PCM through the input stage and interpolation cascade only (no modulator):
+/// two-pass peak analysis measures the cascade output before modulation.
+const CMD_INPUT_PCM_INTERP: u32 = 9;
 
 // At DSD512 this is 32 baseband frames; at DSD256 it is 64. Keep the
 // externally scheduled tile intact and interpolate/modulate each slice while
@@ -334,7 +337,7 @@ impl ChannelState {
                     )
                 }
             }
-            CMD_INPUT_PCM | CMD_INPUT_DSD => (|| {
+            CMD_INPUT_PCM | CMD_INPUT_DSD | CMD_INPUT_PCM_INTERP => (|| {
                 let processor =
                     self.input_processor
                         .as_mut()
@@ -355,7 +358,11 @@ impl ChannelState {
                 output_frames = frames;
                 let pcm_buf = unsafe { &mut *self.buffers.pcm_out_buf.get() };
                 let pcm_out = &mut pcm_buf[..frames * mult];
-                if let Some(ref mut m) = self.modulator {
+                if let Some(m) = self
+                    .modulator
+                    .as_mut()
+                    .filter(|_| cmd != CMD_INPUT_PCM_INTERP)
+                {
                     let dsd_buf = unsafe { &mut *self.buffers.dsd_out_buf.get() };
                     let dsd_bytes = pcm_out.len() / 8;
                     let result = process_dsd_tile(
@@ -765,7 +772,8 @@ impl ChannelWorkerPool {
                                 };
                                 (result, 0)
                             }
-                            CMD_PCM | CMD_DSD | CMD_INPUT_PCM | CMD_INPUT_DSD => {
+                            CMD_PCM | CMD_DSD | CMD_INPUT_PCM | CMD_INPUT_DSD
+                            | CMD_INPUT_PCM_INTERP => {
                                 // Execution time only: the wake-up is already behind us.
                                 let t0 = Instant::now();
                                 let out = run_channels(
@@ -1026,7 +1034,10 @@ impl ChannelWorkerPool {
 
     fn dispatch_command(&mut self, cmd: u32, frames: usize) -> Result<(), EngineError> {
         self.ensure_ready()?;
-        let timed = matches!(cmd, CMD_PCM | CMD_DSD | CMD_INPUT_PCM | CMD_INPUT_DSD);
+        let timed = matches!(
+            cmd,
+            CMD_PCM | CMD_DSD | CMD_INPUT_PCM | CMD_INPUT_DSD | CMD_INPUT_PCM_INTERP
+        );
         if self.inline {
             // The guard restores the caller's FP environment on return.
             let _ftz = ScopedFtzDaz::new();
@@ -1238,6 +1249,26 @@ impl ChannelWorkerPool {
         inputs: &[&[f64]],
         controls: InputTileControls<'_>,
     ) -> Result<usize, EngineError> {
+        self.process_input_pcm_cmd(CMD_INPUT_PCM, inputs, controls)
+    }
+
+    /// Like [`process_input_pcm`](Self::process_input_pcm) but stops after the
+    /// interpolation cascade: DSD targets are not modulated and `channel_pcm`
+    /// holds the cascade output. Used to measure true peaks before pass 2.
+    pub fn process_input_pcm_interpolated(
+        &mut self,
+        inputs: &[&[f64]],
+        controls: InputTileControls<'_>,
+    ) -> Result<usize, EngineError> {
+        self.process_input_pcm_cmd(CMD_INPUT_PCM_INTERP, inputs, controls)
+    }
+
+    fn process_input_pcm_cmd(
+        &mut self,
+        cmd: u32,
+        inputs: &[&[f64]],
+        controls: InputTileControls<'_>,
+    ) -> Result<usize, EngineError> {
         self.ensure_ready()?;
         let frames = self.validate_input_channels(inputs, self.input_frame_capacity())?;
         let baseband_frames = self.pcm_baseband_frames(frames)?;
@@ -1246,7 +1277,7 @@ impl ChannelWorkerPool {
             let buffer = unsafe { &mut *buffers.in_buf.get() };
             buffer[..frames].copy_from_slice(input);
         }
-        let result = self.dispatch_command(CMD_INPUT_PCM, frames);
+        let result = self.dispatch_command(cmd, frames);
         self.pcm_residue_frames =
             (self.pcm_residue_frames + frames) % self.input_bounds.unwrap().pcm_divider;
         result?;
