@@ -93,7 +93,7 @@ pub fn run_convert(args: ConvertArgs) -> Result<(), CliError> {
     settings.validate()?;
 
     // 2. Open AudioInput
-    let (mut input, input_rate): (Box<dyn AudioInput>, PcmRateHz) = if args.input == "-" {
+    let mut input: Box<dyn AudioInput> = if args.input == "-" {
         let sample_format = settings
             .input
             .as_ref()
@@ -109,10 +109,7 @@ pub fn run_convert(args: ConvertArgs) -> Result<(), CliError> {
             .as_ref()
             .and_then(|i| i.channels)
             .unwrap_or(2);
-        (
-            Box::new(StdioAudioInput::new(sample_format, sample_rate, channels)),
-            sample_rate,
-        )
+        Box::new(StdioAudioInput::new(sample_format, sample_rate, channels))
     } else {
         let dsd_gain_db = settings
             .input
@@ -120,10 +117,11 @@ pub fn run_convert(args: ConvertArgs) -> Result<(), CliError> {
             .map(|i| i.dsd_gain_db())
             .unwrap_or(6.0);
         let max_intermediate = settings.resolved_dsd_max_intermediate_rate_hz();
-        let file_input =
-            FileAudioInput::open_with_dsd_full_config(&args.input, dsd_gain_db, max_intermediate)?;
-        let rate = file_input.info().sample_rate;
-        (Box::new(file_input), rate)
+        Box::new(FileAudioInput::open_with_dsd_full_config(
+            &args.input,
+            dsd_gain_db,
+            max_intermediate,
+        )?)
     };
 
     // 3. Open AudioOutput
@@ -142,9 +140,9 @@ pub fn run_convert(args: ConvertArgs) -> Result<(), CliError> {
     let pipeline = {
         let placement = crate::runtime::resolve(&settings, 2, true)?;
         crate::runtime::apply_housekeeping(&placement);
-        OfflinePipeline::prepare_with_workers(
+        OfflinePipeline::prepare_for_input(
             settings,
-            input_rate,
+            &*input,
             Some(crate::runtime::worker_setup(&placement)),
         )?
     };

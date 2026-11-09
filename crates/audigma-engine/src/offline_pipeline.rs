@@ -9,12 +9,12 @@
 //! - Tail management (`trim-to-duration` vs `preserve-tail`)
 //! - Container and transport packing (DSF, WAV, FLAC, Native DSD, DoP, Raw)
 
-use crate::offline_feed::PcmFeeder;
+use crate::offline_feed::InputFeeder;
 use crate::peak::measure_true_peak_pass1;
 use crate::pipeline_topology::PipelineTopology;
 use crate::processor::TileProcessor;
 use crate::tail::TailManager;
-use crate::traits::{AudioInput, AudioOutput, EngineError};
+use crate::traits::{AudioInput, AudioOutput, DsdDecodeConfig, EngineError};
 use crate::transport::{is_dsd_passthrough_eligible, transfer_offline_dsd_passthrough};
 use crate::worker::{InputDspConfig, InputResampling};
 use audigma_dsp::DSD_IDLE_BYTE;
@@ -449,6 +449,8 @@ pub struct OfflinePipeline {
     settings: Settings,
     topology: PipelineTopology,
     processor: TileProcessor,
+    /// Raw DSD input decoded by the workers (`None`: the input delivers decoded PCM).
+    raw_dsd: bool,
     mult: usize,
 }
 
@@ -463,6 +465,30 @@ impl OfflinePipeline {
     pub fn prepare_with_workers(
         settings: Settings,
         input_rate: PcmRateHz,
+        worker_setup: Option<crate::worker::WorkerSetup>,
+    ) -> Result<Self, EngineError> {
+        Self::prepare_with_dsd_input(settings, input_rate, None, worker_setup)
+    }
+
+    /// Prepares the pipeline for a concrete `input`: its (decoded) PCM rate, and, when it
+    /// offers raw DSD (`dsd_decode_config`), DSD decoding in the workers as in the live loop.
+    pub fn prepare_for_input(
+        settings: Settings,
+        input: &dyn AudioInput,
+        worker_setup: Option<crate::worker::WorkerSetup>,
+    ) -> Result<Self, EngineError> {
+        Self::prepare_with_dsd_input(
+            settings,
+            input.info().sample_rate,
+            input.dsd_decode_config(),
+            worker_setup,
+        )
+    }
+
+    fn prepare_with_dsd_input(
+        settings: Settings,
+        input_rate: PcmRateHz,
+        dsd_input: Option<DsdDecodeConfig>,
         worker_setup: Option<crate::worker::WorkerSetup>,
     ) -> Result<Self, EngineError> {
         let plan = settings.explain_for_input_rate(input_rate)?;
@@ -483,7 +509,7 @@ impl OfflinePipeline {
         };
         let input_config = InputDspConfig {
             pcm_decimation_stages: topology.decimation_stages,
-            dsd: None,
+            dsd: dsd_input,
             resampling,
         };
 
@@ -507,6 +533,7 @@ impl OfflinePipeline {
             settings,
             topology,
             processor,
+            raw_dsd: dsd_input.is_some(),
             mult,
         })
     }
@@ -584,8 +611,12 @@ impl OfflinePipeline {
         // Step 1: Gain Staging (Single-Pass vs. Two-Pass)
         let (applied_gain_db, measured_peak_dbfs) = match peak_mode {
             PeakAnalysisMode::TwoPass => {
-                let peak_result =
-                    measure_true_peak_pass1(input, &mut self.processor, &self.plan.dsp_config)?;
+                let peak_result = measure_true_peak_pass1(
+                    input,
+                    &mut self.processor,
+                    self.raw_dsd,
+                    &self.plan.dsp_config,
+                )?;
                 (peak_result.calibrated_gain_db, Some(peak_result.peak_dbfs))
             }
             PeakAnalysisMode::SinglePass => (self.plan.dsp_config.total_configured_gain_db(), None),
@@ -624,19 +655,15 @@ impl OfflinePipeline {
         let mut container_writer =
             ContainerWriter::new(&self.settings, &self.plan.dsp_config, &target_spec, output)?;
 
-        let mut feeder = PcmFeeder::new(&self.processor);
+        let mut feeder = InputFeeder::new(&self.processor, self.raw_dsd);
         let mut total_input_frames = 0u64;
 
         // Step 3: Stream Processing Loop. Decimation, the pre-modulator gain and rational
         // SRC run in the workers' input stage (shared with the live loop).
-        loop {
-            let frames_read = feeder.read(input)?;
-            if frames_read == 0 {
-                break;
-            }
+        while let Some(frames_read) = feeder.read(&self.processor, input)? {
             total_input_frames += frames_read as u64;
 
-            let produced = feeder.process(&mut self.processor, frames_read, linear_gain, false)?;
+            let produced = feeder.process(&mut self.processor, linear_gain, false)?;
             if produced > 0 {
                 self.process_interpolated_block(
                     produced,
@@ -663,7 +690,7 @@ impl OfflinePipeline {
         let flush_delay_frames = (aligned_group_delay / self.mult) + 48;
         let mut flushed = 0;
         while flushed < flush_delay_frames && !tail_manager.is_target_satisfied() {
-            let chunk = (flush_delay_frames - flushed).min(feeder.capacity());
+            let chunk = (flush_delay_frames - flushed).min(feeder.silence_capacity());
             let produced =
                 feeder.process_silence(&mut self.processor, chunk, linear_gain, false)?;
             if produced > 0 {

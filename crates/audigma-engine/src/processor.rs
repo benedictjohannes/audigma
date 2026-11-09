@@ -14,6 +14,10 @@ use crate::worker::{
     WorkerSetup,
 };
 
+/// Pool entry point taking one block of raw planar DSD input.
+type PoolInputDsd =
+    fn(&mut ChannelWorkerPool, &[&[u8]], InputTileControls<'_>) -> Result<usize, EngineError>;
+
 /// Pool entry point taking one block of planar PCM input.
 type PoolInputPcm =
     fn(&mut ChannelWorkerPool, &[&[f64]], InputTileControls<'_>) -> Result<usize, EngineError>;
@@ -263,16 +267,39 @@ impl TileProcessor {
         inputs: &[&[u8]],
         controls: InputTileControls<'_>,
     ) -> Result<usize, EngineError> {
+        self.timed_input_dsd(inputs, controls, ChannelWorkerPool::process_input_dsd)
+    }
+
+    /// [`process_input_dsd`](Self::process_input_dsd) stopping after the interpolation
+    /// cascade (no modulation); `channel_pcm` holds the result.
+    pub fn process_input_dsd_interpolated(
+        &mut self,
+        inputs: &[&[u8]],
+        controls: InputTileControls<'_>,
+    ) -> Result<usize, EngineError> {
+        self.timed_input_dsd(
+            inputs,
+            controls,
+            ChannelWorkerPool::process_input_dsd_interpolated,
+        )
+    }
+
+    fn timed_input_dsd(
+        &mut self,
+        inputs: &[&[u8]],
+        controls: InputTileControls<'_>,
+        dispatch: PoolInputDsd,
+    ) -> Result<usize, EngineError> {
         if let Some(budget) = self.tile_budget {
             let frames = self
                 .worker_pool
                 .dsd_baseband_frames(inputs.first().map_or(0, |input| input.len()))?;
             let start = Instant::now();
-            let produced = self.worker_pool.process_input_dsd(inputs, controls)?;
+            let produced = dispatch(&mut self.worker_pool, inputs, controls)?;
             self.record_tile_metrics(frames, start.elapsed(), budget);
             Ok(produced)
         } else {
-            self.worker_pool.process_input_dsd(inputs, controls)
+            dispatch(&mut self.worker_pool, inputs, controls)
         }
     }
 

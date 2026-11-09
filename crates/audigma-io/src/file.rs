@@ -4,7 +4,7 @@
 
 use audigma_dsp::PcmRateHz;
 use audigma_dsp::fir::HalfBandDecimationCascade;
-use audigma_engine::traits::{AudioInput, AudioOutput, DecoderInput, EngineError};
+use audigma_engine::traits::{AudioInput, AudioOutput, DecoderInput, DsdDecodeConfig, EngineError};
 use audigma_format::AudioStreamInfo;
 use audigma_format::decoder::AudioDecoder;
 use audigma_format::dsf_reader::DsfReader;
@@ -23,6 +23,8 @@ enum FileInputSource {
         dsd_scratch_l: Vec<u8>,
         dsd_scratch_r: Vec<u8>,
         divider: usize,
+        /// Worker-side decode parameters offered through `dsd_decode_config`.
+        decode: DsdDecodeConfig,
     },
 }
 
@@ -98,6 +100,10 @@ impl FileAudioInput {
                     dsd_scratch_l: vec![0; max_frames / 8],
                     dsd_scratch_r: vec![0; max_frames / 8],
                     divider,
+                    decode: DsdDecodeConfig {
+                        decimation_stages: stages,
+                        gain_db: dsd_gain_db,
+                    },
                 },
             })
         } else {
@@ -163,6 +169,13 @@ impl AudioInput for FileAudioInput {
 
                 Ok(frames_l.min(frames_r))
             }
+        }
+    }
+
+    fn dsd_decode_config(&self) -> Option<DsdDecodeConfig> {
+        match &self.source {
+            FileInputSource::Pcm(_) => None,
+            FileInputSource::Dsf { decode, .. } => Some(*decode),
         }
     }
 

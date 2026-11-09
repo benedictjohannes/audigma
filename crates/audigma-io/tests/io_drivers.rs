@@ -228,3 +228,67 @@ fn test_offline_pipeline_dsf_decimation_to_wav() {
     assert_eq!(spec.channels, 2);
     assert_eq!(spec.sample_rate, 192000);
 }
+
+/// Offline conversion of a DSF must give the same output whether the file reader decodes
+/// DSD to PCM itself (`prepare`) or the workers decode raw DSD like the live loop
+/// (`prepare_for_input`).
+#[test]
+fn test_offline_dsf_raw_dsd_worker_decode_matches_reader_decode() {
+    use audigma_engine::traits::{AudioInput, SeekableSink};
+    use audigma_settings::{OutputContainer, PeakAnalysisMode, Settings};
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dsf_path = temp_dir.path().join("in_dsd64.dsf");
+
+    // First-order sigma-delta bitstream of a 1 kHz sine (MSB-first within each byte).
+    let num_bytes = 4096 * 3;
+    let mut bits = Vec::with_capacity(num_bytes * 8);
+    let (mut integ, mut prev) = (0.0f64, 0.0f64);
+    for i in 0..num_bytes * 8 {
+        let x = 0.5 * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / 2_822_400.0).sin();
+        integ += x - prev;
+        prev = if integ >= 0.0 { 1.0 } else { -1.0 };
+        bits.push(prev > 0.0);
+    }
+    let bytes: Vec<u8> = bits
+        .chunks(8)
+        .map(|c| c.iter().fold(0u8, |b, &bit| (b << 1) | bit as u8))
+        .collect();
+    let dsf = audigma_format::dsf::pack_stereo_dsf_file(
+        audigma_dsp::DsdBitRateHz::DSD64,
+        &bytes,
+        &bytes,
+        audigma_format::dsf::DsfBitOrder::MsbFirst,
+        audigma_format::dsf::DsfPadMode::SpecZero,
+    )
+    .expect("pack dsf");
+    std::fs::write(&dsf_path, &dsf).unwrap();
+
+    let convert = |raw: bool| {
+        let mut input = audigma_io::file::FileAudioInput::open(&dsf_path).unwrap();
+        assert!(input.dsd_decode_config().is_some());
+        let mut settings = Settings::default_offline(OutputContainer::Wav);
+        settings.gain.as_mut().unwrap().peak_analysis = PeakAnalysisMode::TwoPass;
+        let pipeline = if raw {
+            audigma_engine::OfflinePipeline::prepare_for_input(settings, &input, None)
+        } else {
+            audigma_engine::OfflinePipeline::prepare(settings, input.info().sample_rate)
+        }
+        .unwrap();
+        let mut out = std::io::Cursor::new(Vec::new());
+        let report = pipeline
+            .run(&mut input, Box::new(SeekableSink(&mut out)))
+            .unwrap();
+        (out.into_inner(), report)
+    };
+
+    let (decoded_bytes, decoded_report) = convert(false);
+    let (raw_bytes, raw_report) = convert(true);
+    assert!(raw_report.total_output_frames > 0);
+    assert_eq!(
+        raw_report.total_input_frames,
+        decoded_report.total_input_frames
+    );
+    assert_eq!(raw_report.applied_gain_db, decoded_report.applied_gain_db);
+    assert_eq!(raw_bytes, decoded_bytes);
+}

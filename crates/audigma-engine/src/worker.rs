@@ -43,6 +43,8 @@ const CMD_RECONFIGURE: u32 = 8;
 /// Input PCM through the input stage and interpolation cascade only (no modulator):
 /// two-pass peak analysis measures the cascade output before modulation.
 const CMD_INPUT_PCM_INTERP: u32 = 9;
+/// Raw DSD counterpart of [`CMD_INPUT_PCM_INTERP`].
+const CMD_INPUT_DSD_INTERP: u32 = 10;
 
 // At DSD512 this is 32 baseband frames; at DSD256 it is 64. Keep the
 // externally scheduled tile intact and interpolate/modulate each slice while
@@ -337,57 +339,58 @@ impl ChannelState {
                     )
                 }
             }
-            CMD_INPUT_PCM | CMD_INPUT_DSD | CMD_INPUT_PCM_INTERP => (|| {
-                let processor =
-                    self.input_processor
-                        .as_mut()
-                        .ok_or_else(|| EngineError::InvalidTopology {
+            CMD_INPUT_PCM | CMD_INPUT_DSD | CMD_INPUT_PCM_INTERP | CMD_INPUT_DSD_INTERP => {
+                (|| {
+                    let processor = self.input_processor.as_mut().ok_or_else(|| {
+                        EngineError::InvalidTopology {
                             message: "channel worker has no input DSP configuration".into(),
-                        })?;
-                let control_buffer = self.input_controls.as_ref().unwrap();
-                let controls = unsafe { control_buffer.controls() };
-                let in_len = input_len;
-                let prepared = if cmd == CMD_INPUT_DSD {
-                    let input = unsafe { &*self.buffers.dsd_in_buf.get() };
-                    processor.process_dsd(&input[..in_len], controls)?
-                } else {
-                    let input = unsafe { &*self.buffers.in_buf.get() };
-                    processor.process_pcm(&input[..in_len], controls)?
-                };
-                let frames = prepared.len();
-                output_frames = frames;
-                let pcm_buf = unsafe { &mut *self.buffers.pcm_out_buf.get() };
-                let pcm_out = &mut pcm_buf[..frames * mult];
-                if let Some(m) = self
-                    .modulator
-                    .as_mut()
-                    .filter(|_| cmd != CMD_INPUT_PCM_INTERP)
-                {
-                    let dsd_buf = unsafe { &mut *self.buffers.dsd_out_buf.get() };
-                    let dsd_bytes = pcm_out.len() / 8;
-                    let result = process_dsd_tile(
-                        &mut self.cascade,
-                        m,
-                        self.dc.as_mut(),
-                        prepared,
-                        pcm_out,
-                        &mut dsd_buf[..dsd_bytes],
-                        subtile_frames,
-                    );
-                    self.buffers
-                        .overload_count
-                        .store(m.overload_count(), Ordering::Relaxed);
-                    result
-                } else {
-                    process_pcm_tile(
-                        &mut self.cascade,
-                        self.dc.as_mut(),
-                        prepared,
-                        pcm_out,
-                        subtile_frames,
-                    )
-                }
-            })(),
+                        }
+                    })?;
+                    let control_buffer = self.input_controls.as_ref().unwrap();
+                    let controls = unsafe { control_buffer.controls() };
+                    let in_len = input_len;
+                    let prepared = if matches!(cmd, CMD_INPUT_DSD | CMD_INPUT_DSD_INTERP) {
+                        let input = unsafe { &*self.buffers.dsd_in_buf.get() };
+                        processor.process_dsd(&input[..in_len], controls)?
+                    } else {
+                        let input = unsafe { &*self.buffers.in_buf.get() };
+                        processor.process_pcm(&input[..in_len], controls)?
+                    };
+                    let frames = prepared.len();
+                    output_frames = frames;
+                    let pcm_buf = unsafe { &mut *self.buffers.pcm_out_buf.get() };
+                    let pcm_out = &mut pcm_buf[..frames * mult];
+                    if let Some(m) = self
+                        .modulator
+                        .as_mut()
+                        .filter(|_| !matches!(cmd, CMD_INPUT_PCM_INTERP | CMD_INPUT_DSD_INTERP))
+                    {
+                        let dsd_buf = unsafe { &mut *self.buffers.dsd_out_buf.get() };
+                        let dsd_bytes = pcm_out.len() / 8;
+                        let result = process_dsd_tile(
+                            &mut self.cascade,
+                            m,
+                            self.dc.as_mut(),
+                            prepared,
+                            pcm_out,
+                            &mut dsd_buf[..dsd_bytes],
+                            subtile_frames,
+                        );
+                        self.buffers
+                            .overload_count
+                            .store(m.overload_count(), Ordering::Relaxed);
+                        result
+                    } else {
+                        process_pcm_tile(
+                            &mut self.cascade,
+                            self.dc.as_mut(),
+                            prepared,
+                            pcm_out,
+                            subtile_frames,
+                        )
+                    }
+                })()
+            }
             _ => Ok(()),
         };
         (result, output_frames)
@@ -1036,7 +1039,12 @@ impl ChannelWorkerPool {
         self.ensure_ready()?;
         let timed = matches!(
             cmd,
-            CMD_PCM | CMD_DSD | CMD_INPUT_PCM | CMD_INPUT_DSD | CMD_INPUT_PCM_INTERP
+            CMD_PCM
+                | CMD_DSD
+                | CMD_INPUT_PCM
+                | CMD_INPUT_DSD
+                | CMD_INPUT_PCM_INTERP
+                | CMD_INPUT_DSD_INTERP
         );
         if self.inline {
             // The guard restores the caller's FP environment on return.
@@ -1294,6 +1302,25 @@ impl ChannelWorkerPool {
         inputs: &[&[u8]],
         controls: InputTileControls<'_>,
     ) -> Result<usize, EngineError> {
+        self.process_input_dsd_cmd(CMD_INPUT_DSD, inputs, controls)
+    }
+
+    /// Like [`process_input_dsd`](Self::process_input_dsd) but stops after the
+    /// interpolation cascade (no modulation); `channel_pcm` holds the result.
+    pub fn process_input_dsd_interpolated(
+        &mut self,
+        inputs: &[&[u8]],
+        controls: InputTileControls<'_>,
+    ) -> Result<usize, EngineError> {
+        self.process_input_dsd_cmd(CMD_INPUT_DSD_INTERP, inputs, controls)
+    }
+
+    fn process_input_dsd_cmd(
+        &mut self,
+        cmd: u32,
+        inputs: &[&[u8]],
+        controls: InputTileControls<'_>,
+    ) -> Result<usize, EngineError> {
         self.ensure_ready()?;
         let bytes = self.validate_input_channels(inputs, self.input_dsd_byte_capacity())?;
         let decoded_frames = self.dsd_decoded_frames(bytes)?;
@@ -1303,7 +1330,7 @@ impl ChannelWorkerPool {
             let buffer = unsafe { &mut *buffers.dsd_in_buf.get() };
             buffer[..bytes].copy_from_slice(input);
         }
-        let result = self.dispatch_command(CMD_INPUT_DSD, bytes);
+        let result = self.dispatch_command(cmd, bytes);
         self.pcm_residue_frames =
             (self.pcm_residue_frames + decoded_frames) % self.input_bounds.unwrap().pcm_divider;
         self.dsd_residue_bytes =

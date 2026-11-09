@@ -7,7 +7,7 @@
 //! Pass 1 evaluates only the LTI interpolation cascade to measure the true inter-sample peak
 //! `P` in dBFS, solving `gain_db = min(configured_gain_db, L - M - P)` per Design.md §4.4.
 
-use crate::offline_feed::PcmFeeder;
+use crate::offline_feed::InputFeeder;
 use crate::processor::TileProcessor;
 use crate::traits::{AudioInput, EngineError};
 use audigma_dsp::config::DspConfiguration;
@@ -31,10 +31,11 @@ pub struct Pass1PeakResult {
 ///
 /// Runs the processor's own input stage (decimation, SRC) at unity gain and stops after the
 /// cascade, before any modulator. The processor must be configured with an input stage
-/// (`TileProcessor::new_with_input`). It is reset afterwards and `input` is rewound.
+/// (`TileProcessor::new_with_input`); `raw_dsd` selects raw DSD reads when that stage decodes DSD. It is reset afterwards and `input` is rewound.
 pub fn measure_true_peak_pass1(
     input: &mut dyn AudioInput,
     processor: &mut TileProcessor,
+    raw_dsd: bool,
     dsp_config: &DspConfiguration,
 ) -> Result<Pass1PeakResult, EngineError> {
     if !input.can_rewind() {
@@ -42,7 +43,7 @@ pub fn measure_true_peak_pass1(
     }
 
     let mult = processor.rate_multiplier();
-    let mut feeder = PcmFeeder::new(processor);
+    let mut feeder = InputFeeder::new(processor, raw_dsd);
     let mut max_peak = 0.0f64;
     let mut total_frames = 0u64;
 
@@ -54,13 +55,9 @@ pub fn measure_true_peak_pass1(
         }
     };
 
-    loop {
-        let frames_read = feeder.read(input)?;
-        if frames_read == 0 {
-            break;
-        }
+    while let Some(frames_read) = feeder.read(processor, input)? {
         total_frames += frames_read as u64;
-        if feeder.process(processor, frames_read, 1.0, true)? > 0 {
+        if feeder.process(processor, 1.0, true)? > 0 {
             scan(processor);
         }
     }
@@ -69,7 +66,7 @@ pub fn measure_true_peak_pass1(
     let delay_frames = processor.total_group_delay_output_samples() / mult + 48;
     let mut flushed = 0;
     while flushed < delay_frames {
-        let chunk = (delay_frames - flushed).min(feeder.capacity());
+        let chunk = (delay_frames - flushed).min(feeder.silence_capacity());
         flushed += feeder.process_silence(processor, chunk, 1.0, true)?;
         scan(processor);
     }

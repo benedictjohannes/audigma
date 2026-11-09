@@ -180,9 +180,9 @@ pub fn run_play(args: PlayArgs) -> Result<(), CliError> {
     let pipeline = {
         let placement = crate::runtime::resolve(&settings, 2, true)?;
         crate::runtime::apply_housekeeping(&placement);
-        OfflinePipeline::prepare_with_workers(
+        OfflinePipeline::prepare_for_input(
             settings.clone(),
-            input_rate,
+            &*input,
             Some(crate::runtime::worker_setup(&placement)),
         )?
     };
