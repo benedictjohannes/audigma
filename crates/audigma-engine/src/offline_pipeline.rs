@@ -17,6 +17,7 @@ use crate::tail::TailManager;
 use crate::traits::{AudioInput, AudioOutput, EngineError};
 use crate::transport::{is_dsd_passthrough_eligible, transfer_offline_dsd_passthrough};
 use audigma_dsp::DSD_IDLE_BYTE;
+use audigma_dsp::PcmQuantizer;
 use audigma_dsp::config::{DspConfiguration, SampleFormat, TargetFormat, TargetRateSpec};
 use audigma_dsp::fir::PolyphaseResampler;
 use audigma_dsp::ftz::ScopedFtzDaz;
@@ -79,7 +80,7 @@ enum ContainerWriter<'a> {
     },
     RawPcm {
         output: Box<dyn AudioOutput + 'a>,
-        format: SampleFormat,
+        quantizer: PcmQuantizer,
         staging_pcm: Vec<u8>,
         frames_written: u64,
         bytes_written: u64,
@@ -89,9 +90,12 @@ enum ContainerWriter<'a> {
 impl<'a> ContainerWriter<'a> {
     fn new(
         settings: &Settings,
+        dsp_config: &DspConfiguration,
         target_spec: &TargetRateSpec,
         output: Box<dyn AudioOutput + 'a>,
     ) -> Result<Self, EngineError> {
+        let dither = dsp_config.dither;
+        let dither_seed = dsp_config.dither_tpdf_seed;
         let container = settings
             .output
             .as_ref()
@@ -137,7 +141,8 @@ impl<'a> ContainerWriter<'a> {
                         });
                     }
                 };
-                let writer = PcmWavWriter::new(output, pcm_rate, sample_format)?;
+                let writer = PcmWavWriter::new(output, pcm_rate, sample_format)?
+                    .with_dither(dither, dither_seed);
                 Ok(Self::Wav(writer))
             }
             OutputContainer::Flac => {
@@ -158,7 +163,8 @@ impl<'a> ContainerWriter<'a> {
                     SampleFormat::S24Le | SampleFormat::S24_3Le | SampleFormat::S32Le => 24,
                     _ => 24,
                 };
-                let writer = FlacEncoder::new(output, pcm_rate, bits_per_sample)?;
+                let writer = FlacEncoder::new(output, pcm_rate, bits_per_sample)?
+                    .with_dither(dither, dither_seed);
                 Ok(Self::Flac(writer))
             }
             OutputContainer::Raw => {
@@ -207,9 +213,13 @@ impl<'a> ContainerWriter<'a> {
                                 });
                             }
                         };
+                        let quantizer = PcmQuantizer::new(sample_format, dither, dither_seed, 2)
+                            .ok_or_else(|| EngineError::InvalidTopology {
+                                message: "raw PCM transport requires a PCM sample format".into(),
+                            })?;
                         Ok(Self::RawPcm {
                             output,
-                            format: sample_format,
+                            quantizer,
                             staging_pcm: Vec::new(),
                             frames_written: 0,
                             bytes_written: 0,
@@ -230,46 +240,14 @@ impl<'a> ContainerWriter<'a> {
             }
             Self::RawPcm {
                 output,
-                format,
+                quantizer,
                 staging_pcm,
                 frames_written,
                 bytes_written,
                 ..
             } => {
                 staging_pcm.clear();
-                for (&l, &r) in left.iter().zip(right.iter()) {
-                    let l_clamped = l.clamp(-1.0, 1.0);
-                    let r_clamped = r.clamp(-1.0, 1.0);
-                    match format {
-                        SampleFormat::S16Le => {
-                            let l_i16 = (l_clamped * 32767.0).round() as i16;
-                            let r_i16 = (r_clamped * 32767.0).round() as i16;
-                            staging_pcm.extend_from_slice(&l_i16.to_le_bytes());
-                            staging_pcm.extend_from_slice(&r_i16.to_le_bytes());
-                        }
-                        SampleFormat::S24_3Le => {
-                            let l_i24 = (l_clamped * 8388607.0).round() as i32;
-                            let r_i24 = (r_clamped * 8388607.0).round() as i32;
-                            let l_b = l_i24.to_le_bytes();
-                            let r_b = r_i24.to_le_bytes();
-                            staging_pcm.extend_from_slice(&l_b[..3]);
-                            staging_pcm.extend_from_slice(&r_b[..3]);
-                        }
-                        SampleFormat::S24Le | SampleFormat::S32Le => {
-                            let l_i32 = (l_clamped * 2147483647.0).round() as i32;
-                            let r_i32 = (r_clamped * 2147483647.0).round() as i32;
-                            staging_pcm.extend_from_slice(&l_i32.to_le_bytes());
-                            staging_pcm.extend_from_slice(&r_i32.to_le_bytes());
-                        }
-                        SampleFormat::F32 => {
-                            let l_f32 = l as f32;
-                            let r_f32 = r as f32;
-                            staging_pcm.extend_from_slice(&l_f32.to_le_bytes());
-                            staging_pcm.extend_from_slice(&r_f32.to_le_bytes());
-                        }
-                        _ => {}
-                    }
-                }
+                quantizer.write_interleaved(&[left, right], staging_pcm);
                 output.write_all(staging_pcm)?;
                 *frames_written += left.len() as u64;
                 *bytes_written += staging_pcm.len() as u64;
@@ -584,7 +562,8 @@ impl OfflinePipeline {
             // Automatic Opportunistic Bit-Exact DSD Passthrough (Design.md §1.6):
             // The input is DSD, target matches input rate, and software volume attenuation is unity (100%).
             // Direct bit-exact transfer bypassing decimation, filtering, and remodulation.
-            let mut container_writer = ContainerWriter::new(&self.settings, &target_spec, output)?;
+            let mut container_writer =
+                ContainerWriter::new(&self.settings, &self.plan.dsp_config, &target_spec, output)?;
             let total_input_frames = transfer_offline_dsd_passthrough(input, |l, r| {
                 container_writer.write_stereo_dsd(l, r)
             })?;
@@ -657,7 +636,8 @@ impl OfflinePipeline {
         let mut tail_manager =
             TailManager::new(tail_policy, aligned_group_delay, target_output_samples);
 
-        let mut container_writer = ContainerWriter::new(&self.settings, &target_spec, output)?;
+        let mut container_writer =
+            ContainerWriter::new(&self.settings, &self.plan.dsp_config, &target_spec, output)?;
 
         // Pre-allocate bounded buffers
         let tile_size = self.tile_size;

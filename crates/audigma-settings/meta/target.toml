@@ -130,7 +130,7 @@ caution = "Needs a DAC and USB link that support DSD512 and enough CPU for real-
 key = "sample_format"
 summary = "PCM sample encoding."
 description = """
-Sample word format of the PCM output. Applies to exclusive ALSA and file outputs only. Use the integer format your DAC or file container takes; `s32le` is the usual choice for 24-bit DACs. Integer formats are quantized with dither on the live path.
+Sample word format of the PCM output. Applies to exclusive ALSA and file outputs only. Use the integer format your DAC or file container takes; `s32le` is the usual choice for 24-bit DACs. Integer formats are quantized with the dither setting below.
 
 PipeWire output ignores this setting and always uses `f32`, because the graph carries unquantized floating point.
 """
@@ -170,7 +170,7 @@ summary = "32-bit floating point, unquantized."
 key = "dither"
 summary = "Dither applied when quantizing."
 description = """
-`tpdf` adds triangular-PDF dither in the 1-bit modulator and, for live integer PCM output, before quantization. This keeps quantization error uncorrelated with the music. Offline PCM file output does not dither yet.
+`tpdf` adds triangular-PDF dither in the 1-bit modulator and, for integer PCM output (live and WAV, FLAC or raw files), before quantization. This keeps quantization error uncorrelated with the music.
 
 `none` disables it. Results are bit-exact, but quantization error becomes correlated with the signal at low levels. Leave it on `tpdf` unless you are testing.
 """

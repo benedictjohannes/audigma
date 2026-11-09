@@ -3,7 +3,7 @@
 //! Supports 16-bit and 24-bit PCM at sampling rates up to 384 kHz.
 
 use crate::FormatError;
-use audigma_dsp::PcmRateHz;
+use audigma_dsp::{DitherType, PcmQuantizer, PcmRateHz, SampleFormat};
 use flacenc::component::BitRepr;
 use flacenc::error::Verify;
 use flacenc::source::MemSource;
@@ -15,6 +15,7 @@ pub struct FlacEncoder<W: Write> {
     sample_rate: PcmRateHz,
     bits_per_sample: usize,
     interleaved_samples: Vec<i32>,
+    quantizer: PcmQuantizer,
     frames_written: u64,
 }
 
@@ -47,8 +48,24 @@ impl<W: Write> FlacEncoder<W> {
             sample_rate,
             bits_per_sample: bits,
             interleaved_samples: Vec::new(),
+            quantizer: Self::quantizer_for(bits, DitherType::None, None),
             frames_written: 0,
         })
+    }
+
+    fn quantizer_for(bits: usize, dither: DitherType, seed: Option<u64>) -> PcmQuantizer {
+        let format = if bits == 16 {
+            SampleFormat::S16Le
+        } else {
+            SampleFormat::S24Le
+        };
+        PcmQuantizer::new(format, dither, seed, 2).expect("integer PCM format")
+    }
+
+    /// Selects the dither applied before integer quantization (default: none, plain rounding).
+    pub fn with_dither(mut self, dither: DitherType, seed: Option<u64>) -> Self {
+        self.quantizer = Self::quantizer_for(self.bits_per_sample, dither, seed);
+        self
     }
 
     /// Appends stereo PCM samples in normalized `[-1.0, 1.0]` floating-point range.
@@ -62,22 +79,11 @@ impl<W: Write> FlacEncoder<W> {
 
         self.interleaved_samples.reserve(left.len() * 2);
 
-        if self.bits_per_sample == 16 {
-            let scale = 32767.0_f64;
-            for (&l, &r) in left.iter().zip(right.iter()) {
-                let il = (l * scale).clamp(-32768.0, 32767.0).round() as i32;
-                let ir = (r * scale).clamp(-32768.0, 32767.0).round() as i32;
-                self.interleaved_samples.push(il);
-                self.interleaved_samples.push(ir);
-            }
-        } else {
-            let scale = 8388607.0_f64;
-            for (&l, &r) in left.iter().zip(right.iter()) {
-                let il = (l * scale).clamp(-8388608.0, 8388607.0).round() as i32;
-                let ir = (r * scale).clamp(-8388608.0, 8388607.0).round() as i32;
-                self.interleaved_samples.push(il);
-                self.interleaved_samples.push(ir);
-            }
+        for (&l, &r) in left.iter().zip(right.iter()) {
+            let il = self.quantizer.quantize(0, l);
+            let ir = self.quantizer.quantize(1, r);
+            self.interleaved_samples.push(il);
+            self.interleaved_samples.push(ir);
         }
 
         self.frames_written += left.len() as u64;

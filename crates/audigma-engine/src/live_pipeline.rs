@@ -30,9 +30,9 @@ use crate::transport::{
 use crate::worker::{
     InputDspConfig, InputResampling, InputTileControls, TargetDsdConfig, WorkerSetup,
 };
+use audigma_dsp::PcmQuantizer;
 use audigma_dsp::config::{DspConfiguration, SampleFormat, TargetRateSpec};
 use audigma_dsp::ftz::ScopedFtzDaz;
-use audigma_dsp::modulator::TpdfDither;
 use audigma_dsp::rates::PcmRateHz;
 use audigma_format::dop::DopPacker;
 use audigma_format::dsd_u32::STEREO_DSD_U32_FRAME_BYTES;
@@ -942,16 +942,12 @@ impl LivePipeline {
             TargetRateSpec::Pcm { sample_format, .. } => sample_format,
             _ => SampleFormat::F32,
         };
-        let mut pcm_dithers: Vec<TpdfDither> = if matches!(
+        let mut pcm_quantizer = PcmQuantizer::new(
             pcm_sample_format,
-            SampleFormat::S16Le | SampleFormat::S24Le | SampleFormat::S24_3Le | SampleFormat::S32Le
-        ) {
-            (0..num_channels)
-                .map(|c| TpdfDither::new(0x1234_5678_9abc_def0 + c as u64, 0.5))
-                .collect()
-        } else {
-            Vec::new()
-        };
+            self.plan.dsp_config.dither,
+            self.plan.dsp_config.dither_tpdf_seed,
+            num_channels,
+        );
         // The drift controller is shared; workers only apply its common ratio.
         let mut asrc_drift_ctrl = (drift_mode != DriftMode::Off).then(|| {
             ClockDriftController::new(
@@ -992,19 +988,7 @@ impl LivePipeline {
 
         // Pre-allocate the high-rate PCM output staging buffer so the streaming
         // loop never allocates per tile.
-        let pcm_bytes_per_sample = match pcm_sample_format {
-            SampleFormat::S16Le => 2,
-            SampleFormat::S24Le | SampleFormat::S24_3Le | SampleFormat::S32Le => {
-                if pcm_sample_format == SampleFormat::S24_3Le {
-                    3
-                } else {
-                    4
-                }
-            }
-            SampleFormat::F32 => 4,
-            SampleFormat::F64 => 8,
-            _ => 4,
-        };
+        let pcm_bytes_per_sample = pcm_quantizer.as_ref().map_or(4, |q| q.bytes_per_sample());
         let mut pcm_staging =
             Vec::with_capacity(cascade_tile_len * pcm_bytes_per_sample * num_channels);
 
@@ -1414,67 +1398,11 @@ impl LivePipeline {
                     // format. Writing f32 bit patterns into an integer ALSA stream
                     // previously caused extreme clipping.
                     pcm_staging.clear();
-                    for i in 0..req_out {
-                        for c in 0..num_channels {
-                            let out_c = processor.channel_pcm(c);
-                            let sample = out_c[i];
-                            match pcm_sample_format {
-                                SampleFormat::F32 => {
-                                    pcm_staging.extend_from_slice(&(sample as f32).to_le_bytes());
-                                }
-                                SampleFormat::F64 => {
-                                    pcm_staging.extend_from_slice(&sample.to_le_bytes());
-                                }
-                                SampleFormat::S16Le => {
-                                    let d = if c < pcm_dithers.len() {
-                                        pcm_dithers[c].next_sample()
-                                    } else {
-                                        0.0
-                                    };
-                                    let q = (sample * 32767.0 + d).clamp(-32768.0, 32767.0).round()
-                                        as i16;
-                                    pcm_staging.extend_from_slice(&q.to_le_bytes());
-                                }
-                                SampleFormat::S24Le => {
-                                    let d = if c < pcm_dithers.len() {
-                                        pcm_dithers[c].next_sample()
-                                    } else {
-                                        0.0
-                                    };
-                                    let q = (sample * 8388607.0 + d)
-                                        .clamp(-8388608.0, 8388607.0)
-                                        .round() as i32;
-                                    pcm_staging.extend_from_slice(&q.to_le_bytes());
-                                }
-                                SampleFormat::S24_3Le => {
-                                    let d = if c < pcm_dithers.len() {
-                                        pcm_dithers[c].next_sample()
-                                    } else {
-                                        0.0
-                                    };
-                                    let q = (sample * 8388607.0 + d)
-                                        .clamp(-8388608.0, 8388607.0)
-                                        .round() as i32;
-                                    pcm_staging.push((q & 0xFF) as u8);
-                                    pcm_staging.push(((q >> 8) & 0xFF) as u8);
-                                    pcm_staging.push(((q >> 16) & 0xFF) as u8);
-                                }
-                                SampleFormat::S32Le => {
-                                    let d = if c < pcm_dithers.len() {
-                                        pcm_dithers[c].next_sample()
-                                    } else {
-                                        0.0
-                                    };
-                                    let q = (sample * 2147483647.0 + d)
-                                        .clamp(-2147483648.0, 2147483647.0)
-                                        .round() as i32;
-                                    pcm_staging.extend_from_slice(&q.to_le_bytes());
-                                }
-                                _ => {
-                                    pcm_staging.extend_from_slice(&(sample as f32).to_le_bytes());
-                                }
-                            }
-                        }
+                    if let Some(quantizer) = pcm_quantizer.as_mut() {
+                        let channels: ChannelSlices<'_> = (0..num_channels)
+                            .map(|c| &processor.channel_pcm(c)[..req_out])
+                            .collect();
+                        quantizer.write_interleaved(&channels, &mut pcm_staging);
                     }
                     loop_probe.timed_emit(output, |o| write_output_all(o, &pcm_staging))?;
 

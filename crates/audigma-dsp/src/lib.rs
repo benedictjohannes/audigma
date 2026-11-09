@@ -9,6 +9,7 @@ pub mod defaults;
 pub mod fir;
 pub mod ftz;
 pub mod modulator;
+pub mod quantizer;
 pub mod rates;
 pub mod tables;
 pub mod volume;
@@ -41,6 +42,7 @@ pub use modulator::{
     GenericCrfbModulator, Modulator, ModulatorError, STABILITY_THRESHOLD, TpdfDither,
     max_stable_input_dbfs,
 };
+pub use quantizer::{DEFAULT_PCM_DITHER_SEED, PCM_DITHER_AMPLITUDE_LSB, PcmQuantizer};
 pub use rates::{
     DEFAULT_AUDIO_BASEBAND_HZ, DsdBitRateHz, DsdMultiplier, PcmRateHz, RateFamily,
     TransportFrameRateHz, select_dsd_intermediate_rate,

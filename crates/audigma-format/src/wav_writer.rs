@@ -3,7 +3,7 @@
 //! Supports 16, 24, 32-bit integer PCM and 32-bit float PCM at sampling rates up to 768 kHz.
 
 use crate::FormatError;
-use audigma_dsp::{PcmRateHz, SampleFormat};
+use audigma_dsp::{DitherType, PcmQuantizer, PcmRateHz, SampleFormat};
 use hound::{SampleFormat as HoundFormat, WavSpec, WavWriter};
 use std::io::{Seek, Write};
 
@@ -11,6 +11,7 @@ use std::io::{Seek, Write};
 pub struct PcmWavWriter<W: Write + Seek> {
     writer: WavWriter<W>,
     sample_format: SampleFormat,
+    quantizer: PcmQuantizer,
     frames_written: u64,
 }
 
@@ -45,11 +46,22 @@ impl<W: Write + Seek> PcmWavWriter<W> {
             FormatError::EncoderError(format!("failed to initialize WAV writer: {e}"))
         })?;
 
+        let quantizer = PcmQuantizer::new(sample_format, DitherType::None, None, 2)
+            .ok_or(FormatError::UnsupportedSampleFormat(sample_format))?;
+
         Ok(Self {
             writer: wav_writer,
             sample_format,
+            quantizer,
             frames_written: 0,
         })
+    }
+
+    /// Selects the dither applied before integer quantization (default: none, plain rounding).
+    pub fn with_dither(mut self, dither: DitherType, seed: Option<u64>) -> Self {
+        self.quantizer = PcmQuantizer::new(self.sample_format, dither, seed, 2)
+            .expect("sample format validated in `new`");
+        self
     }
 
     /// Writes stereo PCM samples in normalized `[-1.0, 1.0]` floating-point range.
@@ -62,31 +74,21 @@ impl<W: Write + Seek> PcmWavWriter<W> {
         }
 
         match self.sample_format {
-            SampleFormat::S16Le => {
-                let scale = 32767.0_f64;
+            SampleFormat::S16Le
+            | SampleFormat::S24Le
+            | SampleFormat::S24_3Le
+            | SampleFormat::S32Le => {
                 for (&l, &r) in left.iter().zip(right.iter()) {
-                    let il = (l * scale).clamp(-32768.0, 32767.0).round() as i16;
-                    let ir = (r * scale).clamp(-32768.0, 32767.0).round() as i16;
-                    self.writer.write_sample(il).map_err(map_hound_err)?;
-                    self.writer.write_sample(ir).map_err(map_hound_err)?;
-                }
-            }
-            SampleFormat::S24Le | SampleFormat::S24_3Le => {
-                let scale = 8388607.0_f64;
-                for (&l, &r) in left.iter().zip(right.iter()) {
-                    let il = (l * scale).clamp(-8388608.0, 8388607.0).round() as i32;
-                    let ir = (r * scale).clamp(-8388608.0, 8388607.0).round() as i32;
-                    self.writer.write_sample(il).map_err(map_hound_err)?;
-                    self.writer.write_sample(ir).map_err(map_hound_err)?;
-                }
-            }
-            SampleFormat::S32Le => {
-                let scale = 2147483647.0_f64;
-                for (&l, &r) in left.iter().zip(right.iter()) {
-                    let il = (l * scale).clamp(-2147483648.0, 2147483647.0).round() as i32;
-                    let ir = (r * scale).clamp(-2147483648.0, 2147483647.0).round() as i32;
-                    self.writer.write_sample(il).map_err(map_hound_err)?;
-                    self.writer.write_sample(ir).map_err(map_hound_err)?;
+                    let il = self.quantizer.quantize(0, l);
+                    let ir = self.quantizer.quantize(1, r);
+                    // hound takes i16 for 16-bit WAV and i32 for 24/32-bit.
+                    if self.sample_format == SampleFormat::S16Le {
+                        self.writer.write_sample(il as i16).map_err(map_hound_err)?;
+                        self.writer.write_sample(ir as i16).map_err(map_hound_err)?;
+                    } else {
+                        self.writer.write_sample(il).map_err(map_hound_err)?;
+                        self.writer.write_sample(ir).map_err(map_hound_err)?;
+                    }
                 }
             }
             SampleFormat::F32 => {
