@@ -1001,7 +1001,13 @@ impl LivePipeline {
         // Require at least ~70-100 ms of continuous zero frames before declaring the stream stopped/idle.
         let idle_threshold_tiles =
             (self.topology.intermediate_rate.get() as usize / (TILE_BASEBAND_FRAMES * 10)).max(20);
-        let mut consecutive_empty_polls = 0usize;
+        let mut empty_since: Option<Instant> = None;
+        // Idle fill must start while the device still holds audio: keep at least this much
+        // queued (two tiles plus scheduling slack) before the grace window gives up.
+        let idle_fill_margin_us = (2.0 * TILE_BASEBAND_FRAMES as f64
+            / self.topology.intermediate_rate.get() as f64
+            * 1e6) as u64
+            + 5_000;
         let mut empty_polls_total = 0u64;
         let mut idle_entries_total = 0u64;
         let mut idle_tiles_total = 0u64;
@@ -1177,7 +1183,7 @@ impl LivePipeline {
                         processor.reset_output()?;
                         let _ = lifecycle.start();
                     }
-                    consecutive_empty_polls = 0;
+                    empty_since = None;
                     consecutive_empty_tiles = 0;
                     total_input_frames += frames as u64;
                     total_output_frames += frames as u64;
@@ -1211,11 +1217,20 @@ impl LivePipeline {
 
             let t_read1 = Instant::now();
             if input_units == 0 && pending_rate_switch.is_none() {
-                consecutive_empty_polls = consecutive_empty_polls.saturating_add(1);
+                let empty_for = empty_since.get_or_insert_with(Instant::now).elapsed();
                 empty_polls_total = empty_polls_total.saturating_add(1);
-                // During active streaming, allow a generous grace window (~100 ms) for the next
+                // During active streaming, allow a grace window (up to ~100 ms) for the next
                 // PipeWire quantum to arrive before synthesizing and writing idle silence tiles.
-                if total_input_frames > 0 && !is_idle && consecutive_empty_polls <= 200 {
+                // The window ends early once the device buffer is nearly drained, so idle fill
+                // always starts before an underrun (a stop or track change mid-stream).
+                let device_low = output
+                    .buffered_us()
+                    .is_some_and(|b| b <= idle_fill_margin_us);
+                if total_input_frames > 0
+                    && !is_idle
+                    && empty_for < Duration::from_millis(100)
+                    && !device_low
+                {
                     sync_telemetry!(false);
                     std::thread::sleep(Duration::from_micros(500));
                     continue;
@@ -1270,7 +1285,7 @@ impl LivePipeline {
                 processor.reset_output()?;
                 let _ = lifecycle.start();
             }
-            consecutive_empty_polls = 0;
+            empty_since = None;
             consecutive_empty_tiles = 0;
             let baseband_frames = if read_raw_dsd {
                 processor.dsd_baseband_frames(input_units)?

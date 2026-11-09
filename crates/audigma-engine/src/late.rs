@@ -826,7 +826,8 @@ impl LateTileMonitor {
                         break;
                     }
 
-                    std::thread::sleep(LATE_POLL_INTERVAL);
+                    // Parked, not slept: `Drop` unparks so pipeline teardown never waits out the poll interval.
+                    std::thread::park_timeout(LATE_POLL_INTERVAL);
                 }
             })
             .ok();
@@ -849,6 +850,7 @@ impl Drop for LateTileMonitor {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(handle) = self.handle.take() {
+            handle.thread().unpark();
             let _ = handle.join();
         }
     }
