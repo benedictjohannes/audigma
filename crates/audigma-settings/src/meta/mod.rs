@@ -697,7 +697,7 @@ dsp_cpus = [2, 3]
 [logging]
 format = "text"
 level = "info"
-late_tile_report_interval_ms = 10000
+rt_report_interval_ms = 10000
 "#;
 
     fn leaves(prefix: &str, v: &toml::Value, out: &mut BTreeSet<String>) {

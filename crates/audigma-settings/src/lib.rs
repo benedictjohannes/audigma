@@ -670,14 +670,14 @@ pub struct LoggingConfig {
     pub format: Option<String>,
     pub level: Option<String>,
     /// Aggregation interval for `audigma::late` episode slices, in milliseconds.
-    pub late_tile_report_interval_ms: Option<u64>,
+    pub rt_report_interval_ms: Option<u64>,
 }
 
 impl LoggingConfig {
     /// Returns the configured late-tile report interval in milliseconds, clamped to a
     /// sane lower bound and defaulting to 10 seconds.
-    pub fn late_tile_report_interval_ms(&self) -> u64 {
-        self.late_tile_report_interval_ms
+    pub fn rt_report_interval_ms(&self) -> u64 {
+        self.rt_report_interval_ms
             .unwrap_or(DEFAULT_LATE_TILE_REPORT_INTERVAL_MS)
             .max(MIN_LATE_TILE_REPORT_INTERVAL_MS)
     }
@@ -1114,11 +1114,11 @@ impl Settings {
     }
 
     /// Returns the configured DSP deadline-miss aggregation interval.
-    pub fn late_tile_report_interval(&self) -> std::time::Duration {
+    pub fn rt_report_interval(&self) -> std::time::Duration {
         let ms = self
             .logging
             .as_ref()
-            .map(|l| l.late_tile_report_interval_ms())
+            .map(|l| l.rt_report_interval_ms())
             .unwrap_or(DEFAULT_LATE_TILE_REPORT_INTERVAL_MS);
         std::time::Duration::from_millis(ms)
     }
@@ -1412,7 +1412,7 @@ dsd_rate = "dsd128"
     }
 
     #[test]
-    fn test_late_tile_report_interval_default_and_override() {
+    fn test_rt_report_interval_default_and_override() {
         let base = r#"
 schema_version = 1
 
@@ -1423,7 +1423,7 @@ dsd_rate = "dsd128"
 "#;
         let settings = Settings::from_toml_str(base).unwrap();
         assert_eq!(
-            settings.late_tile_report_interval(),
+            settings.rt_report_interval(),
             std::time::Duration::from_millis(DEFAULT_LATE_TILE_REPORT_INTERVAL_MS)
         );
 
@@ -1431,7 +1431,7 @@ dsd_rate = "dsd128"
 schema_version = 1
 
 [logging]
-late_tile_report_interval_ms = 2500
+rt_report_interval_ms = 2500
 
 [target]
 format = "dsd"
@@ -1440,7 +1440,7 @@ dsd_rate = "dsd128"
 "#;
         let settings = Settings::from_toml_str(configured).unwrap();
         assert_eq!(
-            settings.late_tile_report_interval(),
+            settings.rt_report_interval(),
             std::time::Duration::from_millis(2_500)
         );
 
@@ -1448,7 +1448,7 @@ dsd_rate = "dsd128"
 schema_version = 1
 
 [logging]
-late_tile_report_interval_ms = 0
+rt_report_interval_ms = 0
 
 [target]
 format = "dsd"
@@ -1457,7 +1457,7 @@ dsd_rate = "dsd128"
 "#;
         let settings = Settings::from_toml_str(clamped).unwrap();
         assert_eq!(
-            settings.late_tile_report_interval(),
+            settings.rt_report_interval(),
             std::time::Duration::from_millis(MIN_LATE_TILE_REPORT_INTERVAL_MS)
         );
     }

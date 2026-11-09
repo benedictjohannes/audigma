@@ -916,7 +916,7 @@ impl LivePipeline {
             LateTileMonitor::spawn(
                 telemetry,
                 late_counters,
-                self.settings.late_tile_report_interval(),
+                self.settings.rt_report_interval(),
                 Some(processor.timings()),
             )
         });
@@ -931,7 +931,7 @@ impl LivePipeline {
                 let control = control.clone();
                 Arc::new(move || control.late_counters())
             },
-            self.settings.late_tile_report_interval(),
+            self.settings.rt_report_interval(),
             processor
                 .late_telemetry()
                 .map_or(0, |telemetry| telemetry.budget_us()),

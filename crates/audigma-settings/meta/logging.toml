@@ -70,10 +70,10 @@ label = "Trace"
 summary = "Everything, including per-event detail. Very verbose."
 
 [[field]]
-key = "late_tile_report_interval_ms"
-summary = "How often missed-deadline episodes are summarized (ms)."
+key = "rt_report_interval_ms"
+summary = "How often real-time health and missed-deadline reports are written (ms)."
 description = """
-When the DSP does not finish a block before its deadline, audigma does not log each miss. It aggregates them and writes one `late_slice` record per interval, with timing statistics per worker.
+The real-time loop never logs from the audio path. Instead audigma writes a periodic health record, and when the DSP does not finish a block before its deadline it aggregates the misses into one `late_slice` record per interval, with timing statistics per worker. This interval sets the cadence of both.
 
 Values below 100 ms are raised to 100 ms.
 """
