@@ -134,6 +134,17 @@ pub trait CrfbCore: std::fmt::Debug + Clone + Send + 'static {
 
     /// Computes the unrolled state-space update and checks for numerical instability.
     ///
+    /// `v` carries the comparator decision in its sign only: the quantizer output is `copysign(1, v)`
+    /// (callers pass the comparator input `y` itself, so `-0.0` decides `-1`).
+    ///
+    /// The CRFB update `x' = L^-1 (R s + b1 u e_0 - a v)` is evaluated expanded: `L^-1` (all `c = 1`) is a
+    /// prefix sum, so `x'_k = p_k - gamma_k v` with `p` the prefix sums of `w` (`w_k = s_k - g s_{k+1}` on
+    /// resonator stages, `s_k` elsewhere, `b1 u` folded into `w_0`) computed as a depth-3 parallel prefix, and
+    /// `gamma_k v` applied as `copysign(gamma_k, v)` (`gamma_k >= 0`). This keeps the decision off a branch and
+    /// out of the integrator chain: the loop-carried path is a few FP ops instead of two per stage
+    /// (measured 1.5-1.6x faster per bit than the stage-by-stage form). The operation order is
+    /// mirrored exactly by `tools/design/dsm_analysis.crfb_step` (bit-exact reference).
+    ///
     /// Returns the new state and `true` if an overload/NaN condition occurred.
     fn step(coeffs: &Self::Coeffs, state: &Self::State, u: f64, v: f64) -> (Self::State, bool);
 }
@@ -159,21 +170,17 @@ impl CrfbCore for CrfbCore5 {
 
     #[inline(always)]
     fn step(c: &Self::Coeffs, s: &Self::State, u: f64, v: f64) -> (Self::State, bool) {
-        let (x1, x2, x3, x4, x5) = if v >= 0.0 {
-            let x1 = s[0] - c.g1 * s[1] + c.b1 * u - c.a[0];
-            let x2 = s[1] + x1 - c.a[1];
-            let x3 = s[2] - c.g2 * s[3] + x2 - c.a[2];
-            let x4 = s[3] + x3 - c.a[3];
-            let x5 = s[4] + x4 - c.a[4];
-            (x1, x2, x3, x4, x5)
-        } else {
-            let x1 = s[0] - c.g1 * s[1] + c.b1 * u + c.a[0];
-            let x2 = s[1] + x1 + c.a[1];
-            let x3 = s[2] - c.g2 * s[3] + x2 + c.a[2];
-            let x4 = s[3] + x3 + c.a[3];
-            let x5 = s[4] + x4 + c.a[4];
-            (x1, x2, x3, x4, x5)
-        };
+        // Prefix-sum form (see `CrfbCore::step`); same operation order as `dsm_analysis.crfb_step`.
+        let w0 = (s[0] + c.b1 * u) - c.g1 * s[1];
+        let w2 = s[2] - c.g2 * s[3];
+        let t01 = w0 + s[1];
+        let t23 = w2 + s[3];
+        let p3 = t01 + t23;
+        let x1 = w0 - c.gamma[0].copysign(v);
+        let x2 = t01 - c.gamma[1].copysign(v);
+        let x3 = (t01 + w2) - c.gamma[2].copysign(v);
+        let x4 = p3 - c.gamma[3].copysign(v);
+        let x5 = (p3 + s[4]) - c.gamma[4].copysign(v);
 
         let max_state = max_state_magnitude(
             max_state_magnitude(max_state_magnitude(x1, x2), max_state_magnitude(x3, x4)),
@@ -206,25 +213,22 @@ impl CrfbCore for CrfbCore7 {
 
     #[inline(always)]
     fn step(c: &Self::Coeffs, s: &Self::State, u: f64, v: f64) -> (Self::State, bool) {
-        let (x1, x2, x3, x4, x5, x6, x7) = if v >= 0.0 {
-            let x1 = s[0] - c.g1 * s[1] + c.b1 * u - c.a[0];
-            let x2 = s[1] + x1 - c.a[1];
-            let x3 = s[2] - c.g2 * s[3] + x2 - c.a[2];
-            let x4 = s[3] + x3 - c.a[3];
-            let x5 = s[4] - c.g3 * s[5] + x4 - c.a[4];
-            let x6 = s[5] + x5 - c.a[5];
-            let x7 = s[6] + x6 - c.a[6];
-            (x1, x2, x3, x4, x5, x6, x7)
-        } else {
-            let x1 = s[0] - c.g1 * s[1] + c.b1 * u + c.a[0];
-            let x2 = s[1] + x1 + c.a[1];
-            let x3 = s[2] - c.g2 * s[3] + x2 + c.a[2];
-            let x4 = s[3] + x3 + c.a[3];
-            let x5 = s[4] - c.g3 * s[5] + x4 + c.a[4];
-            let x6 = s[5] + x5 + c.a[5];
-            let x7 = s[6] + x6 + c.a[6];
-            (x1, x2, x3, x4, x5, x6, x7)
-        };
+        // Prefix-sum form (see `CrfbCore::step`); same operation order as `dsm_analysis.crfb_step`.
+        let w0 = (s[0] + c.b1 * u) - c.g1 * s[1];
+        let w2 = s[2] - c.g2 * s[3];
+        let w4 = s[4] - c.g3 * s[5];
+        let t01 = w0 + s[1];
+        let t23 = w2 + s[3];
+        let t45 = w4 + s[5];
+        let t456 = t45 + s[6];
+        let p3 = t01 + t23;
+        let x1 = w0 - c.gamma[0].copysign(v);
+        let x2 = t01 - c.gamma[1].copysign(v);
+        let x3 = (t01 + w2) - c.gamma[2].copysign(v);
+        let x4 = p3 - c.gamma[3].copysign(v);
+        let x5 = (p3 + w4) - c.gamma[4].copysign(v);
+        let x6 = (p3 + t45) - c.gamma[5].copysign(v);
+        let x7 = (p3 + t456) - c.gamma[6].copysign(v);
 
         let max_state = max_state_magnitude(
             max_state_magnitude(max_state_magnitude(x1, x2), max_state_magnitude(x3, x4)),
@@ -321,7 +325,9 @@ impl<C: CrfbCore> GenericCrfbModulator<C> {
 
         // Quantizer comparator input
         let y = C::quantizer_input(&self.state) + dither_val;
-        let (v, bit) = if y >= 0.0 { (1.0, 1u8) } else { (-1.0, 0u8) };
+        // Sign-bit comparator: `v = y` carries the decision `copysign(1, y)` into `step`, branch-free.
+        let v = y;
+        let bit = (!y.is_sign_negative()) as u8;
 
         // Discrete integrator state update
         let (new_state, overloaded) = C::step(&self.coeffs, &self.state, u, v);
@@ -408,7 +414,9 @@ impl<C: CrfbCore> GenericCrfbModulator<C> {
                 };
 
                 let y = C::quantizer_input(&state) + dither_val;
-                let (v, bit) = if y >= 0.0 { (1.0, 1u8) } else { (-1.0, 0u8) };
+                // Sign-bit comparator: `v = y` carries the decision `copysign(1, y)` into `step`, branch-free.
+                let v = y;
+                let bit = (!y.is_sign_negative()) as u8;
 
                 let (new_state, overloaded) = C::step(&coeffs, &state, u, v);
                 if overloaded {
@@ -490,7 +498,9 @@ impl<C: CrfbCore> GenericCrfbModulator<C> {
                 };
 
                 let y = C::quantizer_input(&state) + dither_val;
-                let (v, bit) = if y >= 0.0 { (1.0, 1u32) } else { (-1.0, 0u32) };
+                // Sign-bit comparator: `v = y` carries the decision `copysign(1, y)` into `step`, branch-free.
+                let v = y;
+                let bit = (!y.is_sign_negative()) as u32;
 
                 let (new_state, overloaded) = C::step(&coeffs, &state, u, v);
                 if overloaded {

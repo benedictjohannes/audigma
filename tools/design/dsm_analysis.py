@@ -98,30 +98,62 @@ def _gains(res):
     return [res["g1"], res["g2"]] + ([res["g3"]] if res["order"] == 7 else [])
 
 
-def simulate_crfb(res, u, dither=None):
-    """Reference CRFB loop; returns bits (uint8, 1 = +1). Same operation order as modulator.rs.
+def feedback_gammas(a):
+    """Feedback of `v` into each state of the expanded loop: gamma_k = a_0 + ... + a_k, summed left to right.
 
+    The CRFB update x' = L^-1 (R x + b1 u e_0 - a v) has L^-1 = lower-triangular ones (all c = 1), so the `v` term of
+    state k is the prefix sum of `a`. Every gamma_k must be >= 0: the loop applies it as copysign(gamma_k, y).
+    """
+    gammas, acc = [], 0.0
+    for ak in a:
+        acc = acc + float(ak)
+        gammas.append(acc)
+    if any(gk < 0.0 for gk in gammas):
+        raise ValueError(f"negative feedback gamma {gammas}: the copysign comparator requires gamma_k >= 0")
+    return gammas
+
+
+def crfb_step(order, g, gamma, b1, x, un, v):
+    """One CRFB state update in the expanded prefix-sum form; same operation order as `modulator.rs`.
+
+    w_k = x_k - g x_{k+1} on resonator stages (x_k elsewhere, b1 u folded into w_0), p = prefix sums of w as a depth-3
+    parallel prefix, x'_k = p_k - gamma_k v. `v` is +-1, so gamma_k * v equals Rust's copysign(gamma_k, y) exactly.
+    """
+    w0 = (x[0] + b1 * un) - g[0] * x[1]
+    w1 = x[1]
+    w2 = x[2] - g[1] * x[3]
+    w3 = x[3]
+    t01 = w0 + w1
+    t23 = w2 + w3
+    p3 = t01 + t23
+    if order == 5:
+        p = (w0, t01, t01 + w2, p3, p3 + x[4])
+    else:
+        w4 = x[4] - g[2] * x[5]
+        w5 = x[5]
+        w6 = x[6]
+        t45 = w4 + w5
+        t456 = t45 + w6
+        p = (w0, t01, t01 + w2, p3, p3 + w4, p3 + t45, p3 + t456)
+    return [pk - gk * v for pk, gk in zip(p, gamma)]
+
+
+def simulate_crfb(res, u, dither=None):
+    """Reference CRFB loop; returns bits (uint8, 1 = +1). Same operation order as modulator.rs (bit-exact).
+
+    Comparator: v = copysign(1, y), so y = -0.0 decides -1 like the Rust sign-bit comparator.
     `u` and `dither` are sequences of floats; `dither` is added to the quantizer input only.
     Pure Python (about 1 us/sample).
     """
     order = res["order"]
-    a, b1, g = res["a"], res["b1"], _gains(res)
+    gamma, b1, g = res["gamma"], res["b1"], _gains(res)
     x = [0.0] * order
     out = np.empty(len(u), dtype=np.uint8)
     for n, un in enumerate(u):
         y = x[-1] if dither is None else x[-1] + dither[n]
-        v = 1.0 if y >= 0.0 else -1.0
+        v = math.copysign(1.0, y)
         out[n] = v > 0.0
-        x1 = x[0] - g[0] * x[1] + b1 * un - a[0] * v
-        x2 = x[1] + x1 - a[1] * v
-        x3 = x[2] - g[1] * x[3] + x2 - a[2] * v
-        x4 = x[3] + x3 - a[3] * v
-        if order == 5:
-            x = [x1, x2, x3, x4, x[4] + x4 - a[4] * v]
-        else:
-            x5 = x[4] - g[2] * x[5] + x4 - a[4] * v
-            x6 = x[5] + x5 - a[5] * v
-            x = [x1, x2, x3, x4, x5, x6, x[6] + x6 - a[6] * v]
+        x = crfb_step(order, g, gamma, b1, x, un, v)
     return out
 
 

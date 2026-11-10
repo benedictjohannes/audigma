@@ -16,6 +16,8 @@ pub struct CrfbCoefficients {
     pub g2: f64,
     /// Quantizer DAC feedback gains a1..a5.
     pub a: [f64; 5],
+    /// Feedback of the quantizer output into each state of the expanded loop: gamma_k = a_1 + ... + a_k (all >= 0).
+    pub gamma: [f64; 5],
     /// Input feed-in gain b1 calibrated for exact unity DC STF gain.
     pub b1: f64,
     /// Out-of-band NTF gain the loop was synthesised for (`design_crfb.py`).
@@ -38,6 +40,8 @@ pub struct CrfbCoefficients7 {
     pub g3: f64,
     /// Quantizer DAC feedback gains a1..a7.
     pub a: [f64; 7],
+    /// Feedback of the quantizer output into each state of the expanded loop: gamma_k = a_1 + ... + a_k (all >= 0).
+    pub gamma: [f64; 7],
     /// Input feed-in gain b1 calibrated for exact unity DC STF gain.
     pub b1: f64,
     /// Out-of-band NTF gain the loop was synthesised for (`design_crfb.py`).
@@ -56,6 +60,13 @@ pub const CRFB5_DSD64: CrfbCoefficients5 = CrfbCoefficients5 {
         2.88336255145021508e-02,
         1.46655529838546683e-01,
         4.90357534336210654e-01,
+    ],
+    gamma: [
+        2.64797649221942312e-04,
+        4.14684313387800492e-03,
+        3.29804686483801540e-02,
+        1.79635998486926851e-01,
+        6.69993532823137450e-01,
     ],
     b1: 2.81828677454357720e-04,
     ntf_h_inf: 1.4,
@@ -76,6 +87,13 @@ pub const CRFB5_DSD128: CrfbCoefficients5 = CrfbCoefficients5 {
         1.47210713446912361e-01,
         4.89936374472106473e-01,
     ],
+    gamma: [
+        2.75951186032151734e-04,
+        4.19157784419666932e-03,
+        3.36789019490681962e-02,
+        1.80889615395980557e-01,
+        6.70825989868087058e-01,
+    ],
     b1: 2.80216993691115030e-04,
     ntf_h_inf: 1.4,
     max_stable_input_dbfs: -4.0,
@@ -94,6 +112,13 @@ pub const CRFB5_DSD256: CrfbCoefficients5 = CrfbCoefficients5 {
         2.96505866046490041e-02,
         1.47349771058375684e-01,
         4.89831035704774598e-01,
+    ],
+    gamma: [
+        2.78748253764421092e-04,
+        4.20276267591283229e-03,
+        3.38533492805618355e-02,
+        1.81203120338937512e-01,
+        6.71034156043712082e-01,
     ],
     b1: 2.79815208127285307e-04,
     ntf_h_inf: 1.4,
@@ -114,6 +139,13 @@ pub const CRFB5_DSD512: CrfbCoefficients5 = CrfbCoefficients5 {
         1.47384551827823562e-01,
         4.89804697962100910e-01,
     ],
+    gamma: [
+        2.79448062613629462e-04,
+        4.20555895833954647e-03,
+        3.38969510427172688e-02,
+        1.81281502870540845e-01,
+        6.71086200832641699e-01,
+    ],
     b1: 2.79714832596142718e-04,
     ntf_h_inf: 1.4,
     max_stable_input_dbfs: -4.0,
@@ -132,6 +164,13 @@ pub const CRFB5_DSD64_48: CrfbCoefficients5 = CrfbCoefficients5 {
         2.89695916620441307e-02,
         1.46770795017526073e-01,
         4.90270015824008198e-01,
+    ],
+    gamma: [
+        2.67111493761916497e-04,
+        4.15614130347013999e-03,
+        3.31257329655142707e-02,
+        1.79896527983040344e-01,
+        6.70166543807048543e-01,
     ],
     b1: 2.81493066567700635e-04,
     ntf_h_inf: 1.4,
@@ -152,6 +191,13 @@ pub const CRFB5_DSD128_48: CrfbCoefficients5 = CrfbCoefficients5 {
         1.47239609976865943e-01,
         4.89914479880668940e-01,
     ],
+    gamma: [
+        2.76532311729818243e-04,
+        4.19390273557766757e-03,
+        3.37151686763400224e-02,
+        1.80954778653205972e-01,
+        6.70869258533874913e-01,
+    ],
     b1: 2.80133439355578675e-04,
     ntf_h_inf: 1.4,
     max_stable_input_dbfs: -4.0,
@@ -171,6 +217,13 @@ pub const CRFB5_DSD256_48: CrfbCoefficients5 = CrfbCoefficients5 {
         1.47357000209583172e-01,
         4.89825561121567055e-01,
     ],
+    gamma: [
+        2.78893701398823083e-04,
+        4.20334392152927911e-03,
+        3.38624128744126271e-02,
+        1.81219413083995806e-01,
+        6.71044974205562861e-01,
+    ],
     b1: 2.79794341276754725e-04,
     ntf_h_inf: 1.4,
     max_stable_input_dbfs: -4.0,
@@ -189,6 +242,13 @@ pub const CRFB5_DSD512_48: CrfbCoefficients5 = CrfbCoefficients5 {
         2.96935124769315620e-02,
         1.47386359429317992e-01,
         4.89803329257786801e-01,
+    ],
+    gamma: [
+        2.79484434905025278e-04,
+        4.20570427117923033e-03,
+        3.38992167481107914e-02,
+        1.81285576177428798e-01,
+        6.71088905435215599e-01,
     ],
     b1: 2.79709617240986297e-04,
     ntf_h_inf: 1.4,
@@ -212,6 +272,15 @@ pub const CRFB7_DSD64: CrfbCoefficients7 = CrfbCoefficients7 {
         1.45835131412549279e-01,
         4.90612219059147259e-01,
     ],
+    gamma: [
+        1.07675193575399742e-06,
+        3.35139838292937241e-05,
+        4.73013372654872881e-04,
+        4.84424726419240264e-03,
+        3.39948590741064732e-02,
+        1.79829990486655766e-01,
+        6.70442209545803025e-01,
+    ],
     b1: 1.23093684661515681e-06,
     ntf_h_inf: 1.4,
     max_stable_input_dbfs: -4.5,
@@ -230,6 +299,15 @@ pub const CRFB7_DSD128: CrfbCoefficients7 = CrfbCoefficients7 {
         3.00361431905944165e-02,
         1.46643437403492116e-01,
         4.90000107180781797e-01,
+    ],
+    gamma: [
+        1.17763816300441707e-06,
+        3.42670468993015156e-05,
+        5.00731404263853649e-04,
+        4.96773532079414909e-03,
+        3.50038785113885656e-02,
+        1.81647315914880675e-01,
+        6.71647423095662499e-01,
     ],
     b1: 1.21638781108979656e-06,
     ntf_h_inf: 1.4,
@@ -250,6 +328,15 @@ pub const CRFB7_DSD256: CrfbCoefficients7 = CrfbCoefficients7 {
         1.46846050406908624e-01,
         4.89846972647642709e-01,
     ],
+    gamma: [
+        1.20307336810980504e-06,
+        3.44557907770705422e-05,
+        5.07719945712772750e-04,
+        4.99864353285198963e-03,
+        3.52557827238158053e-02,
+        1.82101833130724422e-01,
+        6.71948805778367131e-01,
+    ],
     b1: 1.21277348803548944e-06,
     ntf_h_inf: 1.4,
     max_stable_input_dbfs: -4.75,
@@ -268,6 +355,15 @@ pub const CRFB7_DSD512: CrfbCoefficients7 = CrfbCoefficients7 {
         3.03123639719055718e-02,
         1.46896737227113605e-01,
         4.89808682371472681e-01,
+    ],
+    gamma: [
+        1.20944551138581402e-06,
+        3.45030065764443704e-05,
+        5.09470760799239837e-04,
+        5.00637286610753490e-03,
+        3.53187368380131067e-02,
+        1.82215474065126726e-01,
+        6.72024156436599407e-01,
     ],
     b1: 1.21187133552038262e-06,
     ntf_h_inf: 1.4,
@@ -288,6 +384,15 @@ pub const CRFB7_DSD64_48: CrfbCoefficients7 = CrfbCoefficients7 {
         1.46002867110106904e-01,
         4.90485038802746853e-01,
     ],
+    gamma: [
+        1.09760996396565898e-06,
+        3.36702666962091651e-05,
+        4.78743798770360951e-04,
+        4.86989710231337716e-03,
+        3.42047830634015990e-02,
+        1.80207650173508510e-01,
+        6.70692688976255336e-01,
+    ],
     b1: 1.22790049772708983e-06,
     ntf_h_inf: 1.4,
     max_stable_input_dbfs: -4.5,
@@ -306,6 +411,15 @@ pub const CRFB7_DSD128_48: CrfbCoefficients7 = CrfbCoefficients7 {
         3.00820931906890590e-02,
         1.46685535794194272e-01,
         4.89968279452054234e-01,
+    ],
+    gamma: [
+        1.18291821028431754e-06,
+        3.43062643465928533e-05,
+        5.02182134666118531e-04,
+        4.97415884414346803e-03,
+        3.50562520348325288e-02,
+        1.81741787829026807e-01,
+        6.71710067281081069e-01,
     ],
     b1: 1.21563576828555556e-06,
     ntf_h_inf: 1.4,
@@ -326,6 +440,15 @@ pub const CRFB7_DSD256_48: CrfbCoefficients7 = CrfbCoefficients7 {
         1.46856585317945876e-01,
         4.89839013717180638e-01,
     ],
+    gamma: [
+        1.20439747216089433e-06,
+        3.44656042990090222e-05,
+        5.08083757196088268e-04,
+        5.00025011353876815e-03,
+        3.52688693846066881e-02,
+        1.82125454702552564e-01,
+        6.71964468419733230e-01,
+    ],
     b1: 1.21258591592372954e-06,
     ntf_h_inf: 1.4,
     max_stable_input_dbfs: -4.75,
@@ -344,6 +467,15 @@ pub const CRFB7_DSD512_48: CrfbCoefficients7 = CrfbCoefficients7 {
         3.03152335298689617e-02,
         1.46899371606580148e-01,
         4.89806692529549448e-01,
+    ],
+    gamma: [
+        1.20977679339740672e-06,
+        3.45054605335383971e-05,
+        5.09561784214316378e-04,
+        5.00677455554040043e-03,
+        3.53220080854093621e-02,
+        1.82221379691989510e-01,
+        6.72028072221538930e-01,
     ],
     b1: 1.21182447017460252e-06,
     ntf_h_inf: 1.4,
@@ -3282,6 +3414,35 @@ mod tests {
         assert_eq!(dsd512_7.a.len(), 7);
         for &a_val in &dsd512_7.a {
             assert!(a_val > 0.0);
+        }
+    }
+
+    /// The modulator applies `gamma_k` as `copysign(gamma_k, y)`, which needs `gamma_k >= 0`; gamma is the
+    /// left-to-right prefix sum of `a` (`dsm_analysis.feedback_gammas`).
+    #[test]
+    fn test_crfb_feedback_gammas() {
+        fn check(a: &[f64], gamma: &[f64]) {
+            let mut acc = 0.0;
+            for (&ak, &gk) in a.iter().zip(gamma) {
+                acc += ak;
+                assert_eq!(gk.to_bits(), acc.to_bits());
+                assert!(gk >= 0.0);
+            }
+        }
+        for rate in [
+            DsdBitRateHz::DSD64,
+            DsdBitRateHz::DSD128,
+            DsdBitRateHz::DSD256,
+            DsdBitRateHz::DSD512,
+            DsdBitRateHz::DSD64_48,
+            DsdBitRateHz::DSD128_48,
+            DsdBitRateHz::DSD256_48,
+            DsdBitRateHz::DSD512_48,
+        ] {
+            let c5 = get_crfb5_coefficients(rate).unwrap();
+            check(&c5.a, &c5.gamma);
+            let c7 = get_crfb7_coefficients(rate).unwrap();
+            check(&c7.a, &c7.gamma);
         }
     }
 

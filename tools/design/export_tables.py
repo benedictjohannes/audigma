@@ -54,6 +54,8 @@ def generate_tables_rs(halfband, src, crfb5_rates, crfb7_rates):
     code.append("    pub g2: f64,")
     code.append("    /// Quantizer DAC feedback gains a1..a5.")
     code.append("    pub a: [f64; 5],")
+    code.append("    /// Feedback of the quantizer output into each state of the expanded loop: gamma_k = a_1 + ... + a_k (all >= 0).")
+    code.append("    pub gamma: [f64; 5],")
     code.append("    /// Input feed-in gain b1 calibrated for exact unity DC STF gain.")
     code.append("    pub b1: f64,")
     code.append("    /// Out-of-band NTF gain the loop was synthesised for (`design_crfb.py`).")
@@ -75,6 +77,8 @@ def generate_tables_rs(halfband, src, crfb5_rates, crfb7_rates):
     code.append("    pub g3: f64,")
     code.append("    /// Quantizer DAC feedback gains a1..a7.")
     code.append("    pub a: [f64; 7],")
+    code.append("    /// Feedback of the quantizer output into each state of the expanded loop: gamma_k = a_1 + ... + a_k (all >= 0).")
+    code.append("    pub gamma: [f64; 7],")
     code.append("    /// Input feed-in gain b1 calibrated for exact unity DC STF gain.")
     code.append("    pub b1: f64,")
     code.append("    /// Out-of-band NTF gain the loop was synthesised for (`design_crfb.py`).")
@@ -95,6 +99,7 @@ def generate_tables_rs(halfband, src, crfb5_rates, crfb7_rates):
         code.append(f"    g1: {g1:.17e},")
         code.append(f"    g2: {g2:.17e},")
         code.append(f"    a: [{a_formatted}],")
+        code.append(f"    gamma: [{', '.join(f'{v:.17e}' for v in item['gamma'])}],")
         code.append(f"    b1: {b1:.17e},")
         code.append(f"    ntf_h_inf: {item['H_inf']!r},")
         code.append(f"    max_stable_input_dbfs: {item['stable_msa_dbfs']!r},")
@@ -116,6 +121,7 @@ def generate_tables_rs(halfband, src, crfb5_rates, crfb7_rates):
         code.append(f"    g2: {g2:.17e},")
         code.append(f"    g3: {g3:.17e},")
         code.append(f"    a: [{a_formatted}],")
+        code.append(f"    gamma: [{', '.join(f'{v:.17e}' for v in item['gamma'])}],")
         code.append(f"    b1: {b1:.17e},")
         code.append(f"    ntf_h_inf: {item['H_inf']!r},")
         code.append(f"    max_stable_input_dbfs: {item['stable_msa_dbfs']!r},")
@@ -319,6 +325,29 @@ mod tests {
         assert_eq!(dsd512_7.a.len(), 7);
         for &a_val in &dsd512_7.a {
             assert!(a_val > 0.0);
+        }
+    }
+
+    /// The modulator applies `gamma_k` as `copysign(gamma_k, y)`, which needs `gamma_k >= 0`; gamma is the
+    /// left-to-right prefix sum of `a` (`dsm_analysis.feedback_gammas`).
+    #[test]
+    fn test_crfb_feedback_gammas() {
+        fn check(a: &[f64], gamma: &[f64]) {
+            let mut acc = 0.0;
+            for (&ak, &gk) in a.iter().zip(gamma) {
+                acc += ak;
+                assert_eq!(gk.to_bits(), acc.to_bits());
+                assert!(gk >= 0.0);
+            }
+        }
+        for rate in [
+            DsdBitRateHz::DSD64, DsdBitRateHz::DSD128, DsdBitRateHz::DSD256, DsdBitRateHz::DSD512,
+            DsdBitRateHz::DSD64_48, DsdBitRateHz::DSD128_48, DsdBitRateHz::DSD256_48, DsdBitRateHz::DSD512_48,
+        ] {
+            let c5 = get_crfb5_coefficients(rate).unwrap();
+            check(&c5.a, &c5.gamma);
+            let c7 = get_crfb7_coefficients(rate).unwrap();
+            check(&c7.a, &c7.gamma);
         }
     }
 

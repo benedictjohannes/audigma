@@ -27,7 +27,7 @@ import numpy as np
 import scipy.signal as signal
 from scipy.optimize import root_scalar
 
-from dsm_analysis import analyze_record, simulate_crfb
+from dsm_analysis import analyze_record, feedback_gammas, simulate_crfb
 
 
 B_AUDIO_HZ = 20000.0
@@ -66,21 +66,33 @@ def _msa_kernel():
     import numba
 
     @numba.njit(cache=True)
-    def first_divergence(order, g, a, b1, u, d, bound):
-        """Index of the first sample whose state exceeds `bound` (-1 if none); same loop as `simulate_crfb`."""
+    def first_divergence(order, g, gamma, b1, u, d, bound):
+        """Index of the first sample whose state exceeds `bound` (-1 if none); same loop as `simulate_crfb`
+        (`dsm_analysis.crfb_step`, same operation order)."""
         x = np.zeros(order)
+        p = np.zeros(order)
         for n in range(u.shape[0]):
-            v = 1.0 if x[order - 1] + d[n] >= 0.0 else -1.0
-            x[0] = x[0] - g[0] * x[1] + b1 * u[n] - a[0] * v
-            x[1] = x[1] + x[0] - a[1] * v
-            x[2] = x[2] - g[1] * x[3] + x[1] - a[2] * v
-            x[3] = x[3] + x[2] - a[3] * v
+            v = np.copysign(1.0, x[order - 1] + d[n])
+            w0 = (x[0] + b1 * u[n]) - g[0] * x[1]
+            w2 = x[2] - g[1] * x[3]
+            t01 = w0 + x[1]
+            t23 = w2 + x[3]
+            p3 = t01 + t23
+            p[0] = w0
+            p[1] = t01
+            p[2] = t01 + w2
+            p[3] = p3
             if order == 5:
-                x[4] = x[4] + x[3] - a[4] * v
+                p[4] = p3 + x[4]
             else:
-                x[4] = x[4] - g[2] * x[5] + x[3] - a[4] * v
-                x[5] = x[5] + x[4] - a[5] * v
-                x[6] = x[6] + x[5] - a[6] * v
+                w4 = x[4] - g[2] * x[5]
+                t45 = w4 + x[5]
+                t456 = t45 + x[6]
+                p[4] = p3 + w4
+                p[5] = p3 + t45
+                p[6] = p3 + t456
+            for i in range(order):
+                x[i] = p[i] - gamma[i] * v
             for i in range(order):
                 if abs(x[i]) > bound:
                     return n
@@ -100,7 +112,7 @@ def measure_msa_dbfs(res):
     kernel = _msa_kernel()
     order = res["order"]
     g = np.array([res["g1"], res["g2"], res.get("g3", 0.0)])
-    a = np.array(res["a"], dtype=float)
+    gamma = np.array(res["gamma"], dtype=float)
     n = np.arange(MSA_SAMPLES)
     dithers = [np.zeros(MSA_SAMPLES)] + [
         np.random.default_rng(seed).triangular(-MSA_DITHER_PEAK, 0.0, MSA_DITHER_PEAK, MSA_SAMPLES)
@@ -108,7 +120,7 @@ def measure_msa_dbfs(res):
     ]
 
     def stable(u):
-        return all(kernel(order, g, a, res["b1"], u, d, MSA_STATE_BOUND) < 0 for d in dithers)
+        return all(kernel(order, g, gamma, res["b1"], u, d, MSA_STATE_BOUND) < 0 for d in dithers)
 
     worst = 0.0
     for f in MSA_STIMULI_HZ:
@@ -214,6 +226,8 @@ def synthesize_crfb(f_bit_hz, order=5, H_inf=1.40, name="DSD", sweep_msa=False):
         "g2": float(g[1]),
         "c": c,
         "a": a,
+        # Feedback of v into each state of the expanded loop (prefix sums of a; the loop's coefficients).
+        "gamma": feedback_gammas(a),
         "b1": b1,
     }
     if order == 7:

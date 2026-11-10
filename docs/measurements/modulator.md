@@ -1,6 +1,6 @@
 # audigma — Modulator Measurements
 
-> **Generated:** `2026-11-08 12:06:33Z`  
+> **Generated:** `2026-11-10 00:35:07Z`  
 > **Evaluated on:** `AMD Ryzen AI 7 350 w/ Radeon 860M (x86_64)` running `CachyOS (Linux 7.3.1-1-cachyos)`  
 > **Rust compiler:** `rustc 1.98.0 (88d9e12ae 2026-08-18)`  
 > **Hardware FTZ/DAZ:** `Active (hardware-verified)`  
@@ -18,8 +18,8 @@ CRFB modulators: direct-sine verification against the synthesis oracle, stabilit
 | **Input limit L (compiled, all rates)** | -4.25 to -4.00 dBFS | -4.75 to -4.50 dBFS | — |
 | **DSD64 (OSR ~70.6)** | **115.22 dB** (Oracle: 115.5 dB) | **133.82 dB** (Oracle: 134.6 dB) | 7th-order higher SNR by 19 dB |
 | **DSD128 (OSR ~141.1)** | **148.52 dB** (Oracle: 149.0 dB) | **179.05 dB** (Oracle: 180.9 dB) | 7th-order higher SNR by 31 dB |
-| **DSD256 (OSR ~282.2)** | **181.66 dB** (Oracle: 184.6 dB) | **223.97 dB** (Oracle: 226.3 dB) | 7th-order higher SNR by 42 dB |
-| **DSD512 (OSR ~564.5)** | **215.59 dB** (Oracle: 221.2 dB) | **269.89 dB** (Oracle: 268.0 dB) | 7th-order higher SNR by 54 dB |
+| **DSD256 (OSR ~282.2)** | **181.66 dB** (Oracle: 184.6 dB) | **224.31 dB** (Oracle: 225.9 dB) | 7th-order higher SNR by 43 dB |
+| **DSD512 (OSR ~564.5)** | **215.59 dB** (Oracle: 221.2 dB) | **270.09 dB** (Oracle: 270.4 dB) | 7th-order higher SNR by 54 dB |
 
 > [!NOTE]
 > All measurements in this report evaluate the **compiled Rust DSP code** against live theoretical oracle synthesis from `tools/design/design_crfb.py`.
@@ -50,13 +50,13 @@ Verdict = stable and bit-exact against the reference loop. Quality figures here 
 | Target Rate | Family | f_bit (Hz) | OSR | Tone (dBFS) | Theoretical Oracle SNR | Measured In-Band SNR | Delta | Analysis floor | SINAD (dB) | THD (dB) | Ultrasonic 20–100 kHz | Worst spur (dBc) | Peak abs state | Bit-exact vs reference | Verdict |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|:---:|:---:|
 | `DSD64` | 44.1k | 2,822,400 | 70.6 | -9.01 | 134.6 dB | **133.82 dB** | -0.8 dB | 150 dB | 133.17 | -141.73 | -19.87 dB | -148.6 | 1.0015 | yes | **PASS** |
-| `DSD128` | 44.1k | 5,644,800 | 141.1 | -9.01 | 180.9 dB | **179.05 dB** | -1.8 dB | 201 dB | 177.97 | -184.54 | -46.23 dB | -193.0 | 0.9898 | yes | **PASS** |
-| `DSD256` | 44.1k | 11,289,600 | 282.2 | -9.01 | 226.3 dB | **223.97 dB** | -2.3 dB | 242 dB | 222.01 | -226.41 | -91.78 dB | -234.4 | 0.9917 | yes | **PASS** |
-| `DSD512` | 44.1k | 22,579,200 | 564.5 | -9.01 | 268.0 dB | **269.89 dB** | +1.8 dB | 281 dB | 266.08 | -268.41 | -136.14 dB | -280.3 | 0.9886 | yes | **PASS** |
+| `DSD128` | 44.1k | 5,644,800 | 141.1 | -9.01 | 180.9 dB | **179.05 dB** | -1.8 dB | 201 dB | 177.97 | -184.54 | -46.23 dB | -193.1 | 1.0061 | yes | **PASS** |
+| `DSD256` | 44.1k | 11,289,600 | 282.2 | -9.01 | 225.9 dB | **224.31 dB** | -1.6 dB | 242 dB | 221.99 | -225.83 | -91.66 dB | -234.7 | 0.9970 | yes | **PASS** |
+| `DSD512` | 44.1k | 22,579,200 | 564.5 | -9.01 | 270.4 dB | **270.09 dB** | -0.3 dB | 281 dB | 266.08 | -268.28 | -136.40 dB | -282.3 | 1.0282 | yes | **PASS** |
 | `DSD64_48` | 48k | 3,072,000 | 76.8 | -9.01 | 140.1 dB | **139.46 dB** | -0.7 dB | 172 dB | 138.67 | -146.45 | -20.51 dB | -154.3 | 0.9851 | yes | **PASS** |
-| `DSD128_48` | 48k | 6,144,000 | 153.6 | -9.01 | 186.1 dB | **184.32 dB** | -1.8 dB | 201 dB | 183.04 | -188.99 | -51.76 dB | -195.1 | 0.9886 | yes | **PASS** |
-| `DSD256_48` | 48k | 12,288,000 | 307.2 | -9.01 | 230.8 dB | **229.77 dB** | -1.1 dB | 253 dB | 227.02 | -230.30 | -96.61 dB | -239.8 | 1.0091 | yes | **PASS** |
-| `DSD512_48` | 48k | 24,576,000 | 614.4 | -9.01 | 269.7 dB | **>= 272 dB** | — | 282 dB | 271.41 | -273.26 | -142.11 dB | -286.3 | 1.0002 | yes | **PASS** |
+| `DSD128_48` | 48k | 6,144,000 | 153.6 | -9.01 | 186.1 dB | **184.62 dB** | -1.5 dB | 201 dB | 183.27 | -188.98 | -51.53 dB | -198.2 | 0.9900 | yes | **PASS** |
+| `DSD256_48` | 48k | 12,288,000 | 307.2 | -9.01 | 230.8 dB | **229.88 dB** | -1.0 dB | 253 dB | 227.54 | -231.35 | -97.09 dB | -241.6 | 0.9899 | yes | **PASS** |
+| `DSD512_48` | 48k | 24,576,000 | 614.4 | -9.01 | 266.2 dB | **>= 272 dB** | — | 282 dB | 271.55 | -274.00 | -141.61 dB | -282.6 | 0.9885 | yes | **PASS** |
 
 > [!NOTE]
 > **Method** (`tools/design/dsm_analysis.py`). Each bitstream is analysed with one full-record periodic Nuttall window (4-term, continuous first derivative: -93 dB sidelobes, 18 dB/octave decay); the tone is coherent (on a bin). Noise excludes the tone lobe and harmonic lobes (bins +-4); "Worst spur" is the strongest 9-bin group in the remaining 20 Hz-20 kHz bins relative to the tone. The modulator runs without dither here, so these are noise-shaper limits.
@@ -92,11 +92,11 @@ Modulator stability was evaluated across four distinct dynamic edge cases per `D
 | `DSD64` | 0.5000 | 0 / 0 | `[0.0000, 0.0000, 0.0005, 0.0055, 0.0392, 0.2053, 0.6999]` | 0 | **PASS** |
 | `DSD128` | 0.5000 | 0 / 0 | `[0.0000, 0.0000, 0.0005, 0.0057, 0.0419, 0.2108, 0.7002]` | 0 | **PASS** |
 | `DSD256` | 0.5000 | 0 / 0 | `[0.0000, 0.0000, 0.0006, 0.0059, 0.0417, 0.2093, 0.7008]` | 0 | **PASS** |
-| `DSD512` | 0.5000 | 0 / 0 | `[0.0000, 0.0000, 0.0006, 0.0059, 0.0416, 0.2099, 0.7024]` | 0 | **PASS** |
+| `DSD512` | 0.5000 | 0 / 0 | `[0.0000, 0.0000, 0.0006, 0.0057, 0.0414, 0.2087, 0.6996]` | 0 | **PASS** |
 | `DSD64_48` | 0.5000 | 0 / 0 | `[0.0000, 0.0000, 0.0005, 0.0055, 0.0396, 0.2069, 0.6983]` | 0 | **PASS** |
 | `DSD128_48` | 0.5000 | 0 / 0 | `[0.0000, 0.0000, 0.0006, 0.0058, 0.0412, 0.2090, 0.7028]` | 0 | **PASS** |
 | `DSD256_48` | 0.5000 | 0 / 0 | `[0.0000, 0.0000, 0.0006, 0.0057, 0.0416, 0.2109, 0.7011]` | 0 | **PASS** |
-| `DSD512_48` | 0.5000 | 0 / 0 | `[0.0000, 0.0000, 0.0006, 0.0057, 0.0413, 0.2094, 0.6987]` | 0 | **PASS** |
+| `DSD512_48` | 0.5000 | 0 / 0 | `[0.0000, 0.0000, 0.0006, 0.0057, 0.0415, 0.2103, 0.6992]` | 0 | **PASS** |
 
 ### Positive DC Offset (+0.5 Normalized)
 - Evaluates behavior under sustained DC bias within the stable operating envelope.
@@ -105,20 +105,20 @@ Modulator stability was evaluated across four distinct dynamic edge cases per `D
 |---|:---:|---:|---:|---:|:---:|:---:|
 | `DSD64` | 5 | +0.50 | 0.7500 | 0.9849 | 0 | **PASS** |
 | `DSD128` | 5 | +0.50 | 0.7500 | 0.9922 | 0 | **PASS** |
-| `DSD256` | 5 | +0.50 | 0.7500 | 0.9861 | 0 | **PASS** |
-| `DSD512` | 5 | +0.50 | 0.7500 | 0.9842 | 0 | **PASS** |
+| `DSD256` | 5 | +0.50 | 0.7500 | 0.9895 | 0 | **PASS** |
+| `DSD512` | 5 | +0.50 | 0.7500 | 0.9858 | 0 | **PASS** |
 | `DSD64_48` | 5 | +0.50 | 0.7500 | 0.9874 | 0 | **PASS** |
 | `DSD128_48` | 5 | +0.50 | 0.7500 | 0.9850 | 0 | **PASS** |
-| `DSD256_48` | 5 | +0.50 | 0.7500 | 0.9878 | 0 | **PASS** |
-| `DSD512_48` | 5 | +0.50 | 0.7500 | 0.9905 | 0 | **PASS** |
+| `DSD256_48` | 5 | +0.50 | 0.7500 | 0.9905 | 0 | **PASS** |
+| `DSD512_48` | 5 | +0.50 | 0.7500 | 0.9869 | 0 | **PASS** |
 | `DSD64` | 7 | +0.50 | 0.7500 | 1.0003 | 0 | **PASS** |
 | `DSD128` | 7 | +0.50 | 0.7500 | 1.0139 | 0 | **PASS** |
-| `DSD256` | 7 | +0.50 | 0.7500 | 1.0060 | 0 | **PASS** |
-| `DSD512` | 7 | +0.50 | 0.7500 | 1.0070 | 0 | **PASS** |
-| `DSD64_48` | 7 | +0.50 | 0.7500 | 1.0067 | 0 | **PASS** |
-| `DSD128_48` | 7 | +0.50 | 0.7500 | 1.0130 | 0 | **PASS** |
-| `DSD256_48` | 7 | +0.50 | 0.7500 | 1.0061 | 0 | **PASS** |
-| `DSD512_48` | 7 | +0.50 | 0.7500 | 1.0224 | 0 | **PASS** |
+| `DSD256` | 7 | +0.50 | 0.7500 | 1.0090 | 0 | **PASS** |
+| `DSD512` | 7 | +0.50 | 0.7500 | 1.0028 | 0 | **PASS** |
+| `DSD64_48` | 7 | +0.50 | 0.7500 | 1.0095 | 0 | **PASS** |
+| `DSD128_48` | 7 | +0.50 | 0.7500 | 1.0091 | 0 | **PASS** |
+| `DSD256_48` | 7 | +0.50 | 0.7500 | 1.0082 | 0 | **PASS** |
+| `DSD512_48` | 7 | +0.50 | 0.7500 | 1.0094 | 0 | **PASS** |
 
 ### High-Crest Multitone Bursts
 - Sum of simultaneous audio frequencies with peak amplitude within -6.0 dBFS.
@@ -131,8 +131,8 @@ Modulator stability was evaluated across four distinct dynamic edge cases per `D
 | `DSD512` | 5 | 10-Tone Composite (100Hz–18kHz) | 0.9196 | 0 | **PASS** |
 | `DSD64` | 7 | 10-Tone Composite (100Hz–18kHz) | 0.9150 | 0 | **PASS** |
 | `DSD128` | 7 | 10-Tone Composite (100Hz–18kHz) | 0.9030 | 0 | **PASS** |
-| `DSD256` | 7 | 10-Tone Composite (100Hz–18kHz) | 0.9152 | 0 | **PASS** |
-| `DSD512` | 7 | 10-Tone Composite (100Hz–18kHz) | 0.9084 | 0 | **PASS** |
+| `DSD256` | 7 | 10-Tone Composite (100Hz–18kHz) | 0.9461 | 0 | **PASS** |
+| `DSD512` | 7 | 10-Tone Composite (100Hz–18kHz) | 0.9258 | 0 | **PASS** |
 
 ### Input limit L (compiled, per order and rate)
 - `L` is `max_stable_input_dbfs` from the coefficient tables (generated by `design_crfb.measure_msa_dbfs`: DC and 50 Hz-20 kHz sines, 0.25 dB
@@ -150,15 +150,15 @@ Modulator stability was evaluated across four distinct dynamic edge cases per `D
 | `dsd64_48` | 5 | -4.25 | -4.75 | 1.186 | 0, 0, 0, 0, 0, 0, 0 | **PASS** |
 | `dsd128_48` | 5 | -4.00 | -4.50 | 1.305 | 0, 0, 0, 0, 0, 0, 0 | **PASS** |
 | `dsd256_48` | 5 | -4.00 | -4.50 | 1.246 | 0, 0, 0, 0, 0, 0, 0 | **PASS** |
-| `dsd512_48` | 5 | -4.25 | -4.75 | 1.156 | 0, 0, 0, 0, 0, 0, 0 | **PASS** |
+| `dsd512_48` | 5 | -4.25 | -4.75 | 1.167 | 0, 0, 0, 0, 0, 0, 0 | **PASS** |
 | `dsd64` | 7 | -4.50 | -5.00 | 1.264 | 0, 0, 0, 0, 0, 0, 0 | **PASS** |
 | `dsd128` | 7 | -4.75 | -5.25 | 1.167 | 0, 0, 0, 0, 0, 0, 0 | **PASS** |
 | `dsd256` | 7 | -4.75 | -5.25 | 1.256 | 0, 0, 0, 0, 0, 0, 0 | **PASS** |
-| `dsd512` | 7 | -4.75 | -5.25 | 1.260 | 0, 0, 0, 0, 0, 0, 0 | **PASS** |
+| `dsd512` | 7 | -4.75 | -5.25 | 1.256 | 0, 0, 0, 0, 0, 0, 0 | **PASS** |
 | `dsd64_48` | 7 | -4.50 | -5.00 | 1.247 | 0, 0, 0, 0, 0, 0, 0 | **PASS** |
 | `dsd128_48` | 7 | -4.75 | -5.25 | 1.300 | 0, 0, 0, 0, 0, 0, 0 | **PASS** |
-| `dsd256_48` | 7 | -4.75 | -5.25 | 1.236 | 0, 0, 0, 0, 0, 0, 0 | **PASS** |
-| `dsd512_48` | 7 | -4.75 | -5.25 | 1.187 | 0, 0, 0, 0, 0, 0, 0 | **PASS** |
+| `dsd256_48` | 7 | -4.75 | -5.25 | 1.216 | 0, 0, 0, 0, 0, 0, 0 | **PASS** |
+| `dsd512_48` | 7 | -4.75 | -5.25 | 1.348 | 0, 0, 0, 0, 0, 0, 0 | **PASS** |
 
 ### Intentional Overload & Autonomous Recovery
 - Injects a severe +5.0 step (2 tiles) into a 0.1-amplitude 1 kHz sine (timed at each target's own bit rate), triggering `OverloadPolicy::MuteRecover`.
@@ -174,5 +174,5 @@ Modulator stability was evaluated across four distinct dynamic edge cases per `D
 | `DSD512` | 5 | 341 / 0 | 341 | 0 | 7.35e-03 | 7.15e-03 | **PASS** |
 | `DSD64` | 7 | 215 / 0 | 242 | 0 | 8.64e-03 | 8.48e-03 | **PASS** |
 | `DSD128` | 7 | 215 / 0 | 215 | 0 | 7.81e-03 | 7.94e-03 | **PASS** |
-| `DSD256` | 7 | 215 / 0 | 215 | 0 | 7.53e-03 | 7.57e-03 | **PASS** |
-| `DSD512` | 7 | 215 / 0 | 242 | 0 | 7.64e-03 | 7.73e-03 | **PASS** |
+| `DSD256` | 7 | 215 / 0 | 215 | 0 | 7.53e-03 | 7.64e-03 | **PASS** |
+| `DSD512` | 7 | 215 / 0 | 242 | 0 | 7.66e-03 | 7.64e-03 | **PASS** |
