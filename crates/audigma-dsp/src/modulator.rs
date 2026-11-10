@@ -20,27 +20,50 @@ use thiserror::Error;
 /// Maximum integrator state magnitude before triggering overload protection.
 pub const STABILITY_THRESHOLD: f64 = 50.0;
 
-/// Maximum magnitude, preserving a NaN in the right-hand operand.
+/// True when any state has a magnitude above the stability threshold or is NaN.
 ///
-/// Unlike `f64::max`, this allows a hardware maximum without the extra
-/// handling needed to discard NaNs. The final reduction operand must
-/// be the last integrator, to which any NaN in the recurrence propagates.
-#[inline(always)]
-fn max_state_magnitude(a: f64, b: f64) -> f64 {
-    let a = a.abs();
-    let b = b.abs();
-    if a > b { a } else { b }
-}
-
-/// True when `magnitude` is above the stability threshold or is NaN.
+/// Per lane the test is `!(|x| <= T)`. The negation is deliberate: every comparison with NaN is
+/// false, so a diverged (NaN) state is flagged as overloaded, whereas the "simplified" `|x| > T`
+/// would silently report it as stable. The lanes are tested independently and OR-ed, so the
+/// result does not depend on which state carries the NaN or on the order of the states.
 ///
-/// The negated `<=` is deliberate: every comparison with NaN is false, so
-/// `!(x <= T)` flags a diverged (NaN) state as overloaded, whereas the
-/// "simplified" `x > T` would silently report it as stable.
+/// On x86-64 this is packed SSE2 (baseline there, no runtime detection): two states per
+/// `cmpnlepd`, one `movmskpd` and a single branch, instead of a serial `max` reduction chain.
 #[inline(always)]
-#[allow(clippy::neg_cmp_op_on_partial_ord)]
-fn exceeds_stability(magnitude: f64) -> bool {
-    !(magnitude <= STABILITY_THRESHOLD)
+fn any_state_exceeds<const N: usize>(x: &[f64; N]) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::x86_64::{
+            _mm_andnot_pd, _mm_cmpnle_pd, _mm_movemask_pd, _mm_or_pd, _mm_set_pd, _mm_set1_pd,
+            _mm_setzero_pd,
+        };
+        // SAFETY: SSE2 is part of the x86-64 baseline; these intrinsics only touch registers.
+        unsafe {
+            let sign = _mm_set1_pd(-0.0);
+            let threshold = _mm_set1_pd(STABILITY_THRESHOLD);
+            let mut flags = _mm_setzero_pd();
+            let mut k = 0;
+            while k < N {
+                // An odd tail duplicates the last state (idempotent under OR).
+                let hi = x[if k + 1 < N { k + 1 } else { k }];
+                let magnitude = _mm_andnot_pd(sign, _mm_set_pd(hi, x[k]));
+                flags = _mm_or_pd(flags, _mm_cmpnle_pd(magnitude, threshold));
+                k += 2;
+            }
+            _mm_movemask_pd(flags) != 0
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let mut any = false;
+        for v in x {
+            #[allow(clippy::neg_cmp_op_on_partial_ord)]
+            {
+                any |= !(v.abs() <= STABILITY_THRESHOLD);
+            }
+        }
+        any
+    }
 }
 
 /// Modulator error conditions.
@@ -182,13 +205,8 @@ impl CrfbCore for CrfbCore5 {
         let x4 = p3 - c.gamma[3].copysign(v);
         let x5 = (p3 + s[4]) - c.gamma[4].copysign(v);
 
-        let max_state = max_state_magnitude(
-            max_state_magnitude(max_state_magnitude(x1, x2), max_state_magnitude(x3, x4)),
-            x5,
-        );
-        let overloaded = exceeds_stability(max_state);
-
-        ([x1, x2, x3, x4, x5], overloaded)
+        let x = [x1, x2, x3, x4, x5];
+        (x, any_state_exceeds(&x))
     }
 }
 
@@ -230,13 +248,8 @@ impl CrfbCore for CrfbCore7 {
         let x6 = (p3 + t45) - c.gamma[5].copysign(v);
         let x7 = (p3 + t456) - c.gamma[6].copysign(v);
 
-        let max_state = max_state_magnitude(
-            max_state_magnitude(max_state_magnitude(x1, x2), max_state_magnitude(x3, x4)),
-            max_state_magnitude(max_state_magnitude(x5, x6), x7),
-        );
-        let overloaded = exceeds_stability(max_state);
-
-        ([x1, x2, x3, x4, x5, x6, x7], overloaded)
+        let x = [x1, x2, x3, x4, x5, x6, x7];
+        (x, any_state_exceeds(&x))
     }
 }
 
