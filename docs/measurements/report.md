@@ -1,10 +1,10 @@
 # audigma — DSP Quality Report
 
 > **Authoritative specification:** `Design.md §4` and `§8`.  
-> **Generated:** `2026-11-10 02:28:14Z` on `AMD Ryzen AI 7 350 w/ Radeon 860M (x86_64)` running `CachyOS (Linux 7.3.1-1-cachyos)`  
+> **Generated:** `2026-11-10 03:08:12Z` on `AMD Ryzen AI 7 350 w/ Radeon 860M (x86_64)` running `CachyOS (Linux 7.3.1-1-cachyos)`  
 > **Rust compiler:** `rustc 1.98.0 (88d9e12ae 2026-08-18)`  
 > **Hardware FTZ/DAZ:** `Active (hardware-verified)`  
-> **Benchmark:** last run `2026-11-10 02:28:14Z`, placement `cpu [0], highest_perf 208`  
+> **Benchmark:** last run `2026-11-10 03:08:12Z`, placement `cpu [0], highest_perf 208`  
 > **Harness:** `crates/audigma-measurements` (`measure_harness`) analysed by `tools/measure/measure_spectral.py`.
 
 This index lists the per-family reports and the invariant check. Filter and resampler quality figures are reported
@@ -18,7 +18,7 @@ This index lists the per-family reports and the invariant check. Filter and resa
 | [Cascade](cascade.md) | Half-band interpolation cascade as implemented (impulse response, tones) and cascade + modulator end to end. | Worst image rejection 145.8 dB over 60 filter/stage combinations; 0 failing check(s) |
 | [Resampler](resampler.md) | Polyphase rational SRC (44.1k <-> 48k families) and ASRC (clock-drift tracking). | Worst spur on 1-18 kHz tones: 44.1k->48k -146 dBc, 48k->44.1k -157 dBc, ASRC at +50 ppm -146 dBc; worst in-band error -141.4 dB re input (requirement <= -141); 0 failing check(s) |
 | [Signal](signal.md) | Production DSD chain (gain L - M, DC blocker, cascade, dithered modulator): quality tiers, level sweep, dither, DC, IMD, ultrasonic noise, rate families. | Production chain: DSD64 DR (A) 118 dB (5th) / 137 dB (7th); quality tiers (§8.6) met, documented exception DSD64 5th order (DR (A)); 0 failing check(s) |
-| [Benchmark](benchmark.md) | CPU throughput and real-time deadline budget (pinned like a runtime DSP worker). | 5.0x to 38.8x real-time; p99.9 up to 27.0% of budget (last run 2026-11-10 02:28:14Z) |
+| [Benchmark](benchmark.md) | CPU throughput and real-time deadline budget (pinned like a runtime DSP worker). | 5.8x to 47.9x real-time; p99.9 up to 25.2% of budget (last run 2026-11-10 03:08:12Z) |
 
 ## Invariants & Compliance Audit
 
@@ -29,8 +29,8 @@ This index lists the per-family reports and the invariant check. Filter and resa
 | **Modulator Stability Envelope** | `Design.md §4.3` | Bounded states across silence, DC (+0.5), multitone, step overload recovery | Compliant |
 | **DSD Silence Byte Invariant** | `Design.md §1.3` | 0x69 idle pattern confirmed (2,278 clamp bytes); 0 rail-lock bytes (0x00/0xFF) across 16,777,216 silence bits | Compliant |
 | **Hardware FTZ/DAZ** | `Design.md §4.1` | Active (hardware-verified) | Compliant |
-| **Real-Time Throughput** | `Design.md §8.5` | >= 2.0x sustained real-time throughput (Measured: 4.95x to 38.79x) | Compliant |
-| **p99.9 Deadline Budget** | `Design.md §8.5` | <= 70% of audio block duration (Measured peak: 27.0%) | Compliant |
+| **Real-Time Throughput** | `Design.md §8.5` | >= 2.0x sustained real-time throughput (Measured: 5.78x to 47.92x) | Compliant |
+| **p99.9 Deadline Budget** | `Design.md §8.5` | <= 70% of audio block duration (Measured peak: 25.2%) | Compliant |
 
 ## Conclusion
 

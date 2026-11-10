@@ -33,6 +33,150 @@ pub enum FirError {
     UnalignedDecimationInput { len: usize, factor: usize },
 }
 
+/// Largest number of outputs a vector kernel computes per step; the seam is padded to a multiple
+/// of it so a power-of-two tile hits no scalar tail.
+const SEAM_ALIGN: usize = 8;
+
+/// Carries the last `hist` input samples of a 2x interpolation stage across tiles.
+///
+/// Output `n` of a tile reads the window `x[n - hist ..= n]` (oldest first). The first `hist`
+/// outputs of a tile need samples of the previous tile, so they read from `seam = [last hist
+/// inputs | head of this tile]`; every later output reads the input slice directly. The head is
+/// `hist` rounded up to `SEAM_ALIGN` outputs, so neither call ends in a partial vector step for
+/// power-of-two tiles. Consecutive outputs read consecutive, overlapping windows, which the
+/// vector kernels need, and no per-sample history writes or wrap branch remain.
+#[derive(Debug, Clone)]
+struct Seam {
+    hist: usize,
+    /// Outputs computed from the seam (`hist` rounded up to `SEAM_ALIGN`).
+    head_cap: usize,
+    /// `seam[..hist]` = previous inputs (oldest first); `seam[hist..]` = the tile head.
+    seam: Vec<f64>,
+}
+
+impl Seam {
+    fn new(hist: usize) -> Self {
+        let head_cap = hist.next_multiple_of(SEAM_ALIGN);
+        Self {
+            hist,
+            head_cap,
+            seam: vec![0.0; hist + head_cap],
+        }
+    }
+
+    fn reset(&mut self) {
+        self.seam.fill(0.0);
+    }
+
+    /// Runs `kernel(line, out, count)` over one tile, where output `j` of a call reads
+    /// `line[j ..= j + hist]` and writes `out[2j]`, `out[2j + 1]`; then retires the tile.
+    #[inline(always)]
+    fn run(
+        &mut self,
+        input: &[f64],
+        output: &mut [f64],
+        mut kernel: impl FnMut(&[f64], &mut [f64], usize),
+    ) {
+        let hist = self.hist;
+        let n = input.len();
+        let head = n.min(self.head_cap);
+        self.seam[hist..hist + head].copy_from_slice(&input[..head]);
+        kernel(&self.seam[..hist + head], &mut output[..2 * head], head);
+        if n > head {
+            kernel(
+                &input[head - hist..],
+                &mut output[2 * head..2 * n],
+                n - head,
+            );
+        }
+        if n >= hist {
+            self.seam[..hist].copy_from_slice(&input[n - hist..]);
+        } else {
+            // n < hist <= head_cap, so the whole tile is in seam[hist..hist + n].
+            self.seam.copy_within(n..n + hist, 0);
+        }
+    }
+}
+
+/// Half-band odd-branch outputs `start..count`, scalar, in the production accumulation order.
+///
+/// Output `j` reads `line[j .. j + 2K]`: `odd = 2 * sum_i taps[i] * (pre_i + post_i)` with
+/// `pre_i = line[j + K - 1 - i]`, `post_i = line[j + K + i]`, taps in ascending order; the even
+/// branch is the delayed centre sample `line[j + K - 1]`. Every vector kernel must reproduce this
+/// order per lane exactly (bit-identical output).
+#[inline(always)]
+fn halfband_scalar(
+    taps: &[f64],
+    k: usize,
+    line: &[f64],
+    out: &mut [f64],
+    start: usize,
+    count: usize,
+) {
+    for j in start..count {
+        let mut odd_acc = 0.0;
+        for i in 0..k {
+            odd_acc += taps[i] * (line[j + k - 1 - i] + line[j + k + i]);
+        }
+        out[2 * j] = line[j + k - 1];
+        out[2 * j + 1] = 2.0 * odd_acc;
+    }
+}
+
+/// Half-band kernel: `2V` consecutive outputs per step, one output per SSE2 lane.
+///
+/// Each lane runs exactly the `halfband_scalar` order for its own output, so the result is
+/// bit-identical; vectorizing across outputs (not across taps) needs no reassociation.
+#[inline(always)]
+fn halfband_kernel<const K: usize, const V: usize>(
+    taps: &[f64],
+    line: &[f64],
+    out: &mut [f64],
+    count: usize,
+) {
+    let k = if K == 0 { taps.len() } else { K };
+    assert!(taps.len() >= k && line.len() >= count + 2 * k - 1 && out.len() >= 2 * count);
+    #[allow(unused_mut)]
+    let mut done = 0;
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::x86_64::{
+            _mm_add_pd, _mm_loadu_pd, _mm_mul_pd, _mm_set1_pd, _mm_setzero_pd, _mm_storeu_pd,
+            _mm_unpackhi_pd, _mm_unpacklo_pd,
+        };
+        let lp = line.as_ptr();
+        let op = out.as_mut_ptr();
+        // SAFETY: SSE2 is part of the x86-64 baseline. For b = done + 2v with b + 2 <= count and
+        // i < k, the loads touch line[b + k - 1 - i ..= b + k - i] and line[b + k + i ..= b + k + i
+        // + 1], both below count + 2k - 1 <= line.len(); stores touch out[2b .. 2b + 4] within
+        // 2 * count <= out.len() (asserted above). `taps[i]` is in bounds since i < k <= taps.len().
+        unsafe {
+            let two = _mm_set1_pd(2.0);
+            while done + 2 * V <= count {
+                let mut acc = [_mm_setzero_pd(); V];
+                for i in 0..k {
+                    let tap = _mm_set1_pd(*taps.get_unchecked(i));
+                    for (v, a) in acc.iter_mut().enumerate() {
+                        let b = done + 2 * v;
+                        let pre = _mm_loadu_pd(lp.add(b + k - 1 - i));
+                        let post = _mm_loadu_pd(lp.add(b + k + i));
+                        *a = _mm_add_pd(*a, _mm_mul_pd(tap, _mm_add_pd(pre, post)));
+                    }
+                }
+                for (v, a) in acc.iter().enumerate() {
+                    let b = done + 2 * v;
+                    let odd = _mm_mul_pd(two, *a);
+                    let even = _mm_loadu_pd(lp.add(b + k - 1));
+                    _mm_storeu_pd(op.add(2 * b), _mm_unpacklo_pd(even, odd));
+                    _mm_storeu_pd(op.add(2 * b + 2), _mm_unpackhi_pd(even, odd));
+                }
+                done += 2 * V;
+            }
+        }
+    }
+    halfband_scalar(taps, k, line, out, done, count);
+}
+
 /// Single-stage 2x linear-phase half-band FIR interpolation stage.
 ///
 /// Exploits half-band structural symmetry:
@@ -45,29 +189,28 @@ pub struct HalfBandStage {
     taps: &'static [f64],
     /// Number of odd taps ($K$).
     num_odd_taps: usize,
-    /// Circular double-buffer history line of size $4K$.
-    history: Vec<f64>,
-    /// Head write pointer in circular buffer ($0 \dots 2K-1$).
-    head: usize,
+    /// Last $2K - 1$ input samples.
+    seam: Seam,
 }
 
 impl HalfBandStage {
     /// Creates a new 2x half-band stage initialized to digital silence.
     pub fn new(taps: &'static [f64]) -> Self {
+        assert!(
+            !taps.is_empty(),
+            "half-band stage needs at least one odd tap"
+        );
         let num_odd_taps = taps.len();
-        let history_len = num_odd_taps * 4;
         Self {
             taps,
             num_odd_taps,
-            history: vec![0.0; history_len],
-            head: 0,
+            seam: Seam::new(2 * num_odd_taps - 1),
         }
     }
 
     /// Resets all internal delay lines to zero.
     pub fn reset(&mut self) {
-        self.history.fill(0.0);
-        self.head = 0;
+        self.seam.reset();
     }
 
     /// Returns the group delay of this stage in input sample periods ($K$).
@@ -84,23 +227,6 @@ impl HalfBandStage {
 
     /// Processes a slice of input samples, writing exactly `2 * input.len()` samples into `output`.
     pub fn process_tile(&mut self, input: &[f64], output: &mut [f64]) -> Result<(), FirError> {
-        // The high-rate stages use these short kernels. Dispatch once per tile so
-        // LLVM can unroll their tap loops without changing accumulation order.
-        match self.num_odd_taps {
-            2 => self.process_tile_kernel::<2>(input, output),
-            3 => self.process_tile_kernel::<3>(input, output),
-            4 => self.process_tile_kernel::<4>(input, output),
-            5 => self.process_tile_kernel::<5>(input, output),
-            8 => self.process_tile_kernel::<8>(input, output),
-            _ => self.process_tile_kernel::<0>(input, output),
-        }
-    }
-
-    fn process_tile_kernel<const K: usize>(
-        &mut self,
-        input: &[f64],
-        output: &mut [f64],
-    ) -> Result<(), FirError> {
         let required_out = input.len() * 2;
         if output.len() < required_out {
             return Err(FirError::OutputBufferTooSmall {
@@ -108,50 +234,115 @@ impl HalfBandStage {
                 provided: output.len(),
             });
         }
-
-        let k = if K == 0 { self.num_odd_taps } else { K };
-        let window_len = 2 * k;
-
-        for (in_idx, &sample) in input.iter().enumerate() {
-            // Insert sample into mirrored positions in double-buffer
-            self.history[self.head] = sample;
-            self.history[self.head + window_len] = sample;
-
-            // Window of 2K chronological samples from oldest to newest
-            let window_start = self.head + 1;
-            let window = &self.history[window_start..window_start + window_len];
-
-            // Odd branch: convolve symmetric odd taps
-            // Midpoint is between window[k - 1] and window[k]
-            let pre_ptr = &window[k - 1] as *const f64;
-            let post_ptr = &window[k] as *const f64;
-            let mut odd_acc = 0.0;
-            for i in 0..k {
-                let tap = self.taps[i];
-                // Safety: i < k, so pre_ptr.sub(i) >= window[0] and post_ptr.add(i) <= window[2k - 1]
-                let s_pre = unsafe { *pre_ptr.sub(i) };
-                let s_post = unsafe { *post_ptr.add(i) };
-                odd_acc += tap * (s_pre + s_post);
-            }
-            // Scale by 2.0 to restore unity DC gain for zero-stuffed interpolation
-            let odd_sample = 2.0 * odd_acc;
-
-            // Even branch: delayed center tap sample
-            let even_sample = window[k - 1];
-
-            // Interleaved output
-            output[in_idx * 2] = even_sample;
-            output[in_idx * 2 + 1] = odd_sample;
-
-            // Advance head pointer
-            self.head += 1;
-            if self.head >= window_len {
-                self.head = 0;
-            }
+        // Tap counts come from the filter design (`tools/design`), so dispatch on K, never on
+        // the stage index. Short kernels are throughput-bound and run 4 outputs per step
+        // (8 for K <= 3, where the extra lanes still pay); long ones are latency-bound and run 8.
+        let taps = self.taps;
+        let output = &mut output[..required_out];
+        match self.num_odd_taps {
+            2 => self.seam.run(input, output, |l, o, c| {
+                halfband_kernel::<2, 4>(taps, l, o, c)
+            }),
+            3 => self.seam.run(input, output, |l, o, c| {
+                halfband_kernel::<3, 4>(taps, l, o, c)
+            }),
+            4 => self.seam.run(input, output, |l, o, c| {
+                halfband_kernel::<4, 2>(taps, l, o, c)
+            }),
+            5 => self.seam.run(input, output, |l, o, c| {
+                halfband_kernel::<5, 2>(taps, l, o, c)
+            }),
+            8 => self.seam.run(input, output, |l, o, c| {
+                halfband_kernel::<8, 2>(taps, l, o, c)
+            }),
+            _ => self.seam.run(input, output, |l, o, c| {
+                halfband_kernel::<0, 4>(taps, l, o, c)
+            }),
         }
-
         Ok(())
     }
+}
+
+/// Polyphase outputs `start..count`, scalar, in the production accumulation order.
+///
+/// Output `j` reads `line[j .. j + M]` (oldest first): `even = sum_idx even_taps[idx] * d_idx`,
+/// `odd = sum_idx odd_taps[idx] * d_idx` with `d_idx = line[j + M - 1 - idx]`, idx ascending.
+#[inline(always)]
+fn polyphase_scalar(
+    even_taps: &[f64],
+    odd_taps: &[f64],
+    m: usize,
+    line: &[f64],
+    out: &mut [f64],
+    start: usize,
+    count: usize,
+) {
+    for j in start..count {
+        let mut even_acc = 0.0;
+        let mut odd_acc = 0.0;
+        for idx in 0..m {
+            let delayed = line[j + m - 1 - idx];
+            even_acc += even_taps[idx] * delayed;
+            odd_acc += odd_taps[idx] * delayed;
+        }
+        out[2 * j] = even_acc;
+        out[2 * j + 1] = odd_acc;
+    }
+}
+
+/// Polyphase kernel: `2V` consecutive outputs per step, one output per SSE2 lane, each lane in
+/// the `polyphase_scalar` order (bit-identical). `M = 0` means a runtime tap count.
+#[inline(always)]
+fn polyphase_kernel<const M: usize, const V: usize>(
+    even_taps: &[f64],
+    odd_taps: &[f64],
+    line: &[f64],
+    out: &mut [f64],
+    count: usize,
+) {
+    let m = if M == 0 { even_taps.len() } else { M };
+    assert!(
+        even_taps.len() >= m
+            && odd_taps.len() >= m
+            && line.len() + 1 >= count + m
+            && out.len() >= 2 * count
+    );
+    #[allow(unused_mut)]
+    let mut done = 0;
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::x86_64::{
+            _mm_add_pd, _mm_loadu_pd, _mm_mul_pd, _mm_set1_pd, _mm_setzero_pd, _mm_storeu_pd,
+            _mm_unpackhi_pd, _mm_unpacklo_pd,
+        };
+        let lp = line.as_ptr();
+        let op = out.as_mut_ptr();
+        // SAFETY: SSE2 is x86-64 baseline. For b = done + 2v with b + 2 <= count and idx < m,
+        // the load touches line[b + m - 1 - idx ..= b + m - idx], below count + m - 1 <= line.len();
+        // stores touch out[2b .. 2b + 4] within 2 * count <= out.len(); tap reads idx < m (asserted).
+        unsafe {
+            while done + 2 * V <= count {
+                let mut even_acc = [_mm_setzero_pd(); V];
+                let mut odd_acc = [_mm_setzero_pd(); V];
+                for idx in 0..m {
+                    let even_tap = _mm_set1_pd(*even_taps.get_unchecked(idx));
+                    let odd_tap = _mm_set1_pd(*odd_taps.get_unchecked(idx));
+                    for v in 0..V {
+                        let delayed = _mm_loadu_pd(lp.add(done + 2 * v + m - 1 - idx));
+                        even_acc[v] = _mm_add_pd(even_acc[v], _mm_mul_pd(even_tap, delayed));
+                        odd_acc[v] = _mm_add_pd(odd_acc[v], _mm_mul_pd(odd_tap, delayed));
+                    }
+                }
+                for v in 0..V {
+                    let b = done + 2 * v;
+                    _mm_storeu_pd(op.add(2 * b), _mm_unpacklo_pd(even_acc[v], odd_acc[v]));
+                    _mm_storeu_pd(op.add(2 * b + 2), _mm_unpackhi_pd(even_acc[v], odd_acc[v]));
+                }
+                done += 2 * V;
+            }
+        }
+    }
+    polyphase_scalar(even_taps, odd_taps, m, line, out, done, count);
 }
 
 /// Generic 2x polyphase FIR interpolation stage for asymmetric / non-half-band prototypes.
@@ -169,10 +360,8 @@ pub struct PolyphaseInterpolationStage {
     odd_taps: Vec<f64>,
     /// Number of taps per polyphase branch ($M = \lceil L / 2 \rceil$).
     taps_per_phase: usize,
-    /// Circular double-buffer history line of size $2M$.
-    history: Vec<f64>,
-    /// Head write pointer in the circular buffer.
-    head: usize,
+    /// Last $M - 1$ input samples.
+    seam: Seam,
     /// Impulse-response peak index, used as the alignment delay in output samples.
     group_delay_output_samples: usize,
 }
@@ -204,16 +393,14 @@ impl PolyphaseInterpolationStage {
             even_taps,
             odd_taps,
             taps_per_phase,
-            history: vec![0.0; taps_per_phase * 2],
-            head: 0,
+            seam: Seam::new(taps_per_phase - 1),
             group_delay_output_samples: peak_index,
         }
     }
 
     /// Resets all internal delay lines to zero.
     pub fn reset(&mut self) {
-        self.history.fill(0.0);
-        self.head = 0;
+        self.seam.reset();
     }
 
     /// Returns the alignment delay of this stage in 2x output sample periods.
@@ -231,36 +418,30 @@ impl PolyphaseInterpolationStage {
                 provided: output.len(),
             });
         }
-
-        let m = self.taps_per_phase;
-        for (in_idx, &sample) in input.iter().enumerate() {
-            // Insert sample into mirrored positions in the double-buffer.
-            self.history[self.head] = sample;
-            self.history[self.head + m] = sample;
-
-            // Window of M chronological samples from oldest to newest.
-            let window_start = self.head + 1;
-            let window = &self.history[window_start..window_start + m];
-
-            let mut even_acc = 0.0;
-            let mut odd_acc = 0.0;
-            for (idx, (even_tap, odd_tap)) in
-                self.even_taps.iter().zip(self.odd_taps.iter()).enumerate()
-            {
-                let delayed = window[m - 1 - idx];
-                even_acc += even_tap * delayed;
-                odd_acc += odd_tap * delayed;
-            }
-
-            output[in_idx * 2] = even_acc;
-            output[in_idx * 2 + 1] = odd_acc;
-
-            self.head += 1;
-            if self.head >= m {
-                self.head = 0;
-            }
+        // Dispatch on the design's branch length M (short minimum-phase stages get unrolled
+        // tap loops); 8 outputs per step, since every chain is serial in its taps.
+        let (e, o) = (&self.even_taps[..], &self.odd_taps[..]);
+        let output = &mut output[..required_out];
+        match self.taps_per_phase {
+            4 => self.seam.run(input, output, |l, out, c| {
+                polyphase_kernel::<4, 4>(e, o, l, out, c)
+            }),
+            6 => self.seam.run(input, output, |l, out, c| {
+                polyphase_kernel::<6, 4>(e, o, l, out, c)
+            }),
+            8 => self.seam.run(input, output, |l, out, c| {
+                polyphase_kernel::<8, 4>(e, o, l, out, c)
+            }),
+            10 => self.seam.run(input, output, |l, out, c| {
+                polyphase_kernel::<10, 4>(e, o, l, out, c)
+            }),
+            16 => self.seam.run(input, output, |l, out, c| {
+                polyphase_kernel::<16, 4>(e, o, l, out, c)
+            }),
+            _ => self.seam.run(input, output, |l, out, c| {
+                polyphase_kernel::<0, 4>(e, o, l, out, c)
+            }),
         }
-
         Ok(())
     }
 }
@@ -1251,35 +1432,211 @@ impl PolyphaseResampler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tables::{HALFBAND_MAX_STAGES, get_halfband_minimum_taps};
 
-    #[test]
-    fn test_short_halfband_kernels_bit_exact() {
-        for stage in 1..crate::tables::HALFBAND_MAX_STAGES {
-            let taps = get_halfband_odd_taps(stage);
-            let mut specialized = HalfBandStage::new(taps);
-            let mut generic = specialized.clone();
-            let input: Vec<f64> = (0..257)
-                .map(|i| ((i * 7919 % 65521) as f64 / 65521.0 - 0.5) * 0.9)
-                .collect();
-            // Irregular tile boundaries exercise history wraparound as well as
-            // every specialised tap count, including empty and oversized output.
-            for tile in std::iter::once(&input[..0]).chain(input.chunks(13)) {
-                let mut actual = vec![-1.0; tile.len() * 2 + 3];
-                let mut expected = actual.clone();
-                specialized.process_tile(tile, &mut actual).unwrap();
-                generic
-                    .process_tile_kernel::<0>(tile, &mut expected)
-                    .unwrap();
-                for (a, b) in actual.iter().zip(&expected) {
-                    assert_eq!(a.to_bits(), b.to_bits(), "stage {stage}");
+    /// The pre-vectorization half-band kernel (circular double buffer), kept verbatim as the
+    /// bit-exact reference for `HalfBandStage`.
+    struct CircularHalfBand {
+        taps: &'static [f64],
+        history: Vec<f64>,
+        head: usize,
+    }
+
+    impl CircularHalfBand {
+        fn new(taps: &'static [f64]) -> Self {
+            Self {
+                taps,
+                history: vec![0.0; taps.len() * 4],
+                head: 0,
+            }
+        }
+
+        fn process(&mut self, input: &[f64], output: &mut [f64]) {
+            let k = self.taps.len();
+            let window_len = 2 * k;
+            for (in_idx, &sample) in input.iter().enumerate() {
+                self.history[self.head] = sample;
+                self.history[self.head + window_len] = sample;
+                let window = &self.history[self.head + 1..self.head + 1 + window_len];
+                let mut odd_acc = 0.0;
+                for i in 0..k {
+                    odd_acc += self.taps[i] * (window[k - 1 - i] + window[k + i]);
+                }
+                output[in_idx * 2] = window[k - 1];
+                output[in_idx * 2 + 1] = 2.0 * odd_acc;
+                self.head += 1;
+                if self.head >= window_len {
+                    self.head = 0;
                 }
             }
-            assert_eq!(specialized.head, generic.head);
-            assert_eq!(specialized.history, generic.history);
+        }
+    }
+
+    /// The pre-vectorization polyphase kernel, kept verbatim as the bit-exact reference.
+    struct CircularPolyphase {
+        even_taps: Vec<f64>,
+        odd_taps: Vec<f64>,
+        history: Vec<f64>,
+        head: usize,
+    }
+
+    impl CircularPolyphase {
+        fn new(stage: &PolyphaseInterpolationStage) -> Self {
+            let m = stage.taps_per_phase;
+            Self {
+                even_taps: stage.even_taps.clone(),
+                odd_taps: stage.odd_taps.clone(),
+                history: vec![0.0; 2 * m],
+                head: 0,
+            }
+        }
+
+        fn process(&mut self, input: &[f64], output: &mut [f64]) {
+            let m = self.even_taps.len();
+            for (in_idx, &sample) in input.iter().enumerate() {
+                self.history[self.head] = sample;
+                self.history[self.head + m] = sample;
+                let window = &self.history[self.head + 1..self.head + 1 + m];
+                let mut even_acc = 0.0;
+                let mut odd_acc = 0.0;
+                for (idx, (even_tap, odd_tap)) in
+                    self.even_taps.iter().zip(self.odd_taps.iter()).enumerate()
+                {
+                    let delayed = window[m - 1 - idx];
+                    even_acc += even_tap * delayed;
+                    odd_acc += odd_tap * delayed;
+                }
+                output[in_idx * 2] = even_acc;
+                output[in_idx * 2 + 1] = odd_acc;
+                self.head += 1;
+                if self.head >= m {
+                    self.head = 0;
+                }
+            }
+        }
+    }
+
+    fn test_signal(len: usize) -> Vec<f64> {
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                ((state >> 11) as f64 / (1u64 << 53) as f64 - 0.5) * 1.8
+            })
+            .collect()
+    }
+
+    /// Irregular tiles: empty, shorter than every history (the seam-only path), around the
+    /// longest history (polyphase M - 1 = 204) and long ones.
+    fn irregular_tiles(input: &[f64]) -> Vec<&[f64]> {
+        let sizes = [
+            0, 1, 3, 2, 13, 5, 250, 1, 204, 205, 7, 99, 100, 512, 0, 31, 600,
+        ];
+        let mut tiles = Vec::new();
+        let mut offset = 0;
+        for &size in sizes.iter().cycle() {
+            if offset + size > input.len() {
+                break;
+            }
+            tiles.push(&input[offset..offset + size]);
+            offset += size;
+        }
+        tiles
+    }
+
+    fn assert_bits_eq(actual: &[f64], expected: &[f64], what: &str) {
+        for (j, (a, b)) in actual.iter().zip(expected).enumerate() {
+            assert_eq!(a.to_bits(), b.to_bits(), "{what}: output {j}: {a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn test_halfband_stage_bit_exact_vs_circular_reference() {
+        let input = test_signal(6000);
+        for stage in 0..HALFBAND_MAX_STAGES {
+            let taps = get_halfband_odd_taps(stage);
+            let mut actual_stage = HalfBandStage::new(taps);
+            let mut reference = CircularHalfBand::new(taps);
+            for tile in irregular_tiles(&input) {
+                // Oversized output: samples beyond 2 * len must stay untouched.
+                let mut actual = vec![-7.0; tile.len() * 2 + 3];
+                let mut expected = actual.clone();
+                actual_stage.process_tile(tile, &mut actual).unwrap();
+                reference.process(tile, &mut expected);
+                assert_bits_eq(&actual, &expected, &format!("half-band stage {stage}"));
+            }
             assert!(matches!(
-                specialized.process_tile(&[1.0], &mut [0.0]),
+                actual_stage.process_tile(&[1.0], &mut [0.0]),
                 Err(FirError::OutputBufferTooSmall { .. })
             ));
+        }
+    }
+
+    #[test]
+    fn test_polyphase_stage_bit_exact_vs_circular_reference() {
+        let input = test_signal(6000);
+        let mut prototypes: Vec<(String, &'static [f64])> = (0..HALFBAND_MAX_STAGES)
+            .map(|stage| {
+                (
+                    format!("minimum stage {stage}"),
+                    get_halfband_minimum_taps(stage),
+                )
+            })
+            .collect();
+        for phase in [FilterPhase::Linear, FilterPhase::Minimum] {
+            for apodization in Apodization::ALL {
+                if let HalfBandTaps::General(taps) =
+                    get_interpolation_stage_filter(0, phase, apodization)
+                {
+                    prototypes.push((format!("stage 0 {phase:?}/{apodization:?}"), taps));
+                }
+            }
+        }
+        for (name, taps) in prototypes {
+            let mut actual_stage = PolyphaseInterpolationStage::new(taps);
+            let mut reference = CircularPolyphase::new(&actual_stage);
+            for tile in irregular_tiles(&input) {
+                let mut actual = vec![-7.0; tile.len() * 2 + 3];
+                let mut expected = actual.clone();
+                actual_stage.process_tile(tile, &mut actual).unwrap();
+                reference.process(tile, &mut expected);
+                assert_bits_eq(&actual, &expected, &name);
+            }
+        }
+    }
+
+    /// The scalar kernels are the non-x86 path and the vector tail; compare them with the
+    /// vector kernels on x86 so the fallback is compiled and checked everywhere.
+    #[test]
+    fn test_vector_kernels_match_scalar_kernels() {
+        let line = test_signal(400);
+        let taps = test_signal(64);
+        for count in [0, 1, 2, 3, 7, 8, 9, 64, 101] {
+            let mut scalar = vec![0.0; 2 * count];
+            let mut vector = scalar.clone();
+            for k in [1, 2, 3, 4, 5, 8, 50] {
+                halfband_scalar(&taps[..k], k, &line, &mut scalar, 0, count);
+                halfband_kernel::<0, 1>(&taps[..k], &line, &mut vector, count);
+                assert_bits_eq(
+                    &vector,
+                    &scalar,
+                    &format!("half-band V=1 k={k} count={count}"),
+                );
+                halfband_kernel::<0, 4>(&taps[..k], &line, &mut vector, count);
+                assert_bits_eq(
+                    &vector,
+                    &scalar,
+                    &format!("half-band V=4 k={k} count={count}"),
+                );
+            }
+            for m in [1, 2, 4, 6, 16, 32] {
+                let (even, odd) = taps.split_at(32);
+                polyphase_scalar(&even[..m], &odd[..m], m, &line, &mut scalar, 0, count);
+                polyphase_kernel::<0, 4>(&even[..m], &odd[..m], &line, &mut vector, count);
+                assert_bits_eq(&vector, &scalar, &format!("polyphase m={m} count={count}"));
+            }
         }
     }
 
