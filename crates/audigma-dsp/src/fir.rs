@@ -673,6 +673,91 @@ pub fn unpack_dsd_bytes_to_floats(bytes: &[u8], out: &mut [f64]) -> Result<usize
     Ok(required)
 }
 
+/// Outputs a decimation stage computes per deinterleaved chunk (bounds its phase buffers).
+const DECIMATION_CHUNK: usize = 512;
+
+/// Half-band decimation outputs `start..count`, scalar, in the production accumulation order.
+///
+/// With the input split into phases `E[t] = x[2t]`, `O[t] = x[2t + 1]` (each line starting with
+/// `2K - 1` history samples), output `j` is `0.5 * O[j + K - 1] + sum_i taps[i] * (pre_i + post_i)`
+/// with `pre_i = E[j + K - 1 - i]`, `post_i = E[j + K + i]`, taps ascending and the tap sum
+/// accumulated from 0.0 before the centre term is added. Every vector kernel must reproduce this
+/// order per lane exactly (bit-identical output).
+#[inline(always)]
+fn decimation_scalar(
+    taps: &[f64],
+    k: usize,
+    even: &[f64],
+    odd: &[f64],
+    out: &mut [f64],
+    start: usize,
+    count: usize,
+) {
+    for j in start..count {
+        let mut odd_acc = 0.0;
+        for i in 0..k {
+            odd_acc += taps[i] * (even[j + k - 1 - i] + even[j + k + i]);
+        }
+        out[j] = 0.5 * odd[j + k - 1] + odd_acc;
+    }
+}
+
+/// Half-band decimation kernel: `2V` consecutive outputs per step, one output per SSE2 lane, each
+/// lane in the `decimation_scalar` order (bit-identical). `K = 0` means a runtime tap count.
+#[inline(always)]
+fn decimation_kernel<const K: usize, const V: usize>(
+    taps: &[f64],
+    even: &[f64],
+    odd: &[f64],
+    out: &mut [f64],
+    count: usize,
+) {
+    let k = if K == 0 { taps.len() } else { K };
+    assert!(
+        taps.len() >= k
+            && even.len() >= count + 2 * k - 1
+            && odd.len() >= count + k
+            && out.len() >= count
+    );
+    #[allow(unused_mut)]
+    let mut done = 0;
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::x86_64::{
+            _mm_add_pd, _mm_loadu_pd, _mm_mul_pd, _mm_set1_pd, _mm_setzero_pd, _mm_storeu_pd,
+        };
+        let ep = even.as_ptr();
+        let opp = odd.as_ptr();
+        let outp = out.as_mut_ptr();
+        // SAFETY: SSE2 is x86-64 baseline. For b = done + 2v with b + 2 <= count and i < k, the
+        // even loads touch even[b + k - 1 - i ..= b + k - i] and even[b + k + i ..= b + k + i + 1],
+        // below count + 2k - 1 <= even.len(); the centre load touches odd[b + k - 1 ..= b + k],
+        // below count + k <= odd.len(); stores touch out[b .. b + 2] within count <= out.len().
+        unsafe {
+            let half = _mm_set1_pd(0.5);
+            while done + 2 * V <= count {
+                let mut acc = [_mm_setzero_pd(); V];
+                for i in 0..k {
+                    let tap = _mm_set1_pd(*taps.get_unchecked(i));
+                    for (v, a) in acc.iter_mut().enumerate() {
+                        let b = done + 2 * v;
+                        let pre = _mm_loadu_pd(ep.add(b + k - 1 - i));
+                        let post = _mm_loadu_pd(ep.add(b + k + i));
+                        *a = _mm_add_pd(*a, _mm_mul_pd(tap, _mm_add_pd(pre, post)));
+                    }
+                }
+                for (v, a) in acc.iter().enumerate() {
+                    let b = done + 2 * v;
+                    let centre = _mm_loadu_pd(opp.add(b + k - 1));
+                    _mm_storeu_pd(outp.add(b), _mm_add_pd(_mm_mul_pd(half, centre), *a));
+                }
+                done += 2 * V;
+            }
+        }
+    }
+    decimation_scalar(taps, k, even, odd, out, done, count);
+}
+
 /// Single-stage 2x linear-phase half-band FIR decimation stage (`Design.md §1.6`, `§4.2`).
 ///
 /// Takes $2N$ input samples at rate $2 F_s$ and produces $N$ output samples at rate $F_s$.
@@ -680,35 +765,43 @@ pub fn unpack_dsd_bytes_to_floats(bytes: &[u8], out: &mut [f64]) -> Result<usize
 /// - Even non-center taps are identically 0.0.
 /// - Center tap is 0.5 (scaled by 1.0 at DC).
 /// - Odd taps are symmetric ($h[-k] = h[k]$), allowing paired sample addition before multiplication.
+///
+/// The odd taps only ever meet even-phase input samples and the centre tap only odd-phase ones,
+/// so the input is split into the two phases chunk by chunk; consecutive outputs then read
+/// consecutive phase samples, which the vector kernels need.
 #[derive(Debug, Clone)]
 pub struct HalfBandDecimationStage {
     /// Positive-offset odd taps ($h[1], h[3], \dots$).
     taps: &'static [f64],
     /// Number of odd taps ($K$).
     num_odd_taps: usize,
-    /// Circular double-buffer history line.
-    history: Vec<f64>,
-    /// Head write pointer in circular buffer.
-    head: usize,
+    /// Even-phase line: `2K - 1` history samples, then the current chunk.
+    even: Vec<f64>,
+    /// Odd-phase line, same layout.
+    odd: Vec<f64>,
 }
 
 impl HalfBandDecimationStage {
     /// Creates a new 2x half-band decimation stage initialized to digital silence.
     pub fn new(taps: &'static [f64]) -> Self {
+        assert!(
+            !taps.is_empty(),
+            "half-band stage needs at least one odd tap"
+        );
         let num_odd_taps = taps.len();
-        let window_len = 4 * num_odd_taps;
+        let line_len = 2 * num_odd_taps - 1 + DECIMATION_CHUNK;
         Self {
             taps,
             num_odd_taps,
-            history: vec![0.0; window_len * 2 + 4],
-            head: 0,
+            even: vec![0.0; line_len],
+            odd: vec![0.0; line_len],
         }
     }
 
     /// Resets all internal delay lines to zero.
     pub fn reset(&mut self) {
-        self.history.fill(0.0);
-        self.head = 0;
+        self.even.fill(0.0);
+        self.odd.fill(0.0);
     }
 
     /// Returns the group delay of this stage in input sample periods ($2K - 1$).
@@ -718,6 +811,8 @@ impl HalfBandDecimationStage {
     }
 
     /// Processes a slice of input samples, writing exactly `input.len() / 2` samples into `output`.
+    ///
+    /// A trailing odd input sample is ignored (callers pass aligned tiles).
     pub fn process_tile(&mut self, input: &[f64], output: &mut [f64]) -> Result<usize, FirError> {
         let out_len = input.len() / 2;
         if output.len() < out_len {
@@ -727,40 +822,35 @@ impl HalfBandDecimationStage {
             });
         }
 
-        let k = self.num_odd_taps;
-        let window_len = 4 * k;
-        let center_offset = 2 * k - 1;
-
-        for (out_idx, pair) in input.chunks_exact(2).enumerate() {
-            // Push 2 chronological samples into circular double buffer
-            self.history[self.head] = pair[0];
-            self.history[self.head + 1] = pair[1];
-            self.history[self.head + window_len] = pair[0];
-            self.history[self.head + 1 + window_len] = pair[1];
-
-            // Window of 4K samples from oldest to newest
-            let window_start = self.head + 2;
-            let window = &self.history[window_start..window_start + window_len];
-
-            // Center tap is at index center_offset (2K - 1)
-            let center_sample = window[center_offset];
-
-            // Odd taps are symmetric around center_offset:
-            // offsets are 1, 3, ..., 2K - 1 (step 2)
-            let mut odd_acc = 0.0;
-            for (i, &tap) in self.taps.iter().enumerate() {
-                let delta = 2 * i + 1;
-                let s_pre = window[center_offset - delta];
-                let s_post = window[center_offset + delta];
-                odd_acc += tap * (s_pre + s_post);
+        let hist = 2 * self.num_odd_taps - 1;
+        let taps = self.taps;
+        let mut done = 0;
+        while done < out_len {
+            let count = (out_len - done).min(DECIMATION_CHUNK);
+            let pairs = input[2 * done..2 * (done + count)].chunks_exact(2);
+            let lines = self.even[hist..hist + count]
+                .iter_mut()
+                .zip(&mut self.odd[hist..hist + count]);
+            for ((e, o), pair) in lines.zip(pairs) {
+                *e = pair[0];
+                *o = pair[1];
             }
 
-            output[out_idx] = 0.5 * center_sample + odd_acc;
-
-            self.head += 2;
-            if self.head >= window_len {
-                self.head = 0;
+            let (even, odd) = (&self.even[..hist + count], &self.odd[..hist + count]);
+            let out = &mut output[done..done + count];
+            // Dispatch on K (design output), never on the stage position.
+            match self.num_odd_taps {
+                2 => decimation_kernel::<2, 4>(taps, even, odd, out, count),
+                3 => decimation_kernel::<3, 4>(taps, even, odd, out, count),
+                4 => decimation_kernel::<4, 2>(taps, even, odd, out, count),
+                5 => decimation_kernel::<5, 2>(taps, even, odd, out, count),
+                8 => decimation_kernel::<8, 2>(taps, even, odd, out, count),
+                _ => decimation_kernel::<0, 4>(taps, even, odd, out, count),
             }
+
+            self.even.copy_within(count..count + hist, 0);
+            self.odd.copy_within(count..count + hist, 0);
+            done += count;
         }
 
         Ok(out_len)
@@ -1607,6 +1697,73 @@ mod tests {
         }
     }
 
+    /// The pre-vectorization decimation kernel (circular double buffer), kept verbatim as the
+    /// bit-exact reference for `HalfBandDecimationStage`.
+    struct CircularDecimation {
+        taps: &'static [f64],
+        history: Vec<f64>,
+        head: usize,
+    }
+
+    impl CircularDecimation {
+        fn new(taps: &'static [f64]) -> Self {
+            Self {
+                taps,
+                history: vec![0.0; taps.len() * 8 + 4],
+                head: 0,
+            }
+        }
+
+        fn process(&mut self, input: &[f64], output: &mut [f64]) {
+            let k = self.taps.len();
+            let window_len = 4 * k;
+            let center_offset = 2 * k - 1;
+            for (out_idx, pair) in input.chunks_exact(2).enumerate() {
+                self.history[self.head] = pair[0];
+                self.history[self.head + 1] = pair[1];
+                self.history[self.head + window_len] = pair[0];
+                self.history[self.head + 1 + window_len] = pair[1];
+                let window = &self.history[self.head + 2..self.head + 2 + window_len];
+                let center_sample = window[center_offset];
+                let mut odd_acc = 0.0;
+                for (i, &tap) in self.taps.iter().enumerate() {
+                    let delta = 2 * i + 1;
+                    odd_acc +=
+                        tap * (window[center_offset - delta] + window[center_offset + delta]);
+                }
+                output[out_idx] = 0.5 * center_sample + odd_acc;
+                self.head += 2;
+                if self.head >= window_len {
+                    self.head = 0;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_decimation_stage_bit_exact_vs_circular_reference() {
+        let input = test_signal(12000);
+        for stage in 0..HALFBAND_MAX_STAGES {
+            let taps = get_halfband_odd_taps(stage);
+            let mut actual_stage = HalfBandDecimationStage::new(taps);
+            let mut reference = CircularDecimation::new(taps);
+            // Odd tile lengths drop their last sample in both kernels; long tiles cross the
+            // deinterleave chunk (512 outputs) boundary.
+            let mut tiles = irregular_tiles(&input);
+            tiles.extend([&input[..2048], &input[..1026], &input[..3]]);
+            for tile in tiles {
+                let mut actual = vec![-7.0; tile.len() / 2 + 3];
+                let mut expected = actual.clone();
+                assert_eq!(
+                    actual_stage.process_tile(tile, &mut actual).unwrap(),
+                    tile.len() / 2
+                );
+                reference.process(tile, &mut expected);
+                assert_bits_eq(&actual, &expected, &format!("decimation stage {stage}"));
+            }
+        }
+    }
+
     /// The scalar kernels are the non-x86 path and the vector tail; compare them with the
     /// vector kernels on x86 so the fallback is compiled and checked everywhere.
     #[test]
@@ -1629,6 +1786,18 @@ mod tests {
                     &vector,
                     &scalar,
                     &format!("half-band V=4 k={k} count={count}"),
+                );
+            }
+            for k in [1, 2, 3, 4, 5, 8, 50] {
+                let mut scalar_dec = vec![0.0; count];
+                let mut vector_dec = scalar_dec.clone();
+                let odd = &line[200..];
+                decimation_scalar(&taps[..k], k, &line, odd, &mut scalar_dec, 0, count);
+                decimation_kernel::<0, 4>(&taps[..k], &line, odd, &mut vector_dec, count);
+                assert_bits_eq(
+                    &vector_dec,
+                    &scalar_dec,
+                    &format!("decimation k={k} count={count}"),
                 );
             }
             for m in [1, 2, 4, 6, 16, 32] {
