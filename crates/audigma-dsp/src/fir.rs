@@ -35,7 +35,181 @@ pub enum FirError {
 
 /// Largest number of outputs a vector kernel computes per step; the seam is padded to a multiple
 /// of it so a power-of-two tile hits no scalar tail.
-const SEAM_ALIGN: usize = 8;
+const SEAM_ALIGN: usize = 16;
+
+/// Vector instruction set the FIR stage kernels run with, chosen once per stage at construction.
+///
+/// Every level computes one output per lane in the scalar accumulation order with plain IEEE adds
+/// and multiplies (no FMA), so all levels produce bit-identical output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SimdLevel {
+    /// Scalar kernels only (non-x86 targets; on x86 used by tests).
+    #[cfg_attr(all(target_arch = "x86_64", not(test)), allow(dead_code))]
+    Scalar,
+    /// SSE2, 2 lanes (x86-64 baseline, no detection needed).
+    #[cfg(target_arch = "x86_64")]
+    Sse2,
+    /// AVX, 4 lanes (runtime-detected; only 256-bit add/mul/load/store/shuffle are used).
+    #[cfg(target_arch = "x86_64")]
+    Avx,
+}
+
+impl SimdLevel {
+    fn detect() -> Self {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if std::arch::is_x86_feature_detected!("avx") {
+                Self::Avx
+            } else {
+                Self::Sse2
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            Self::Scalar
+        }
+    }
+
+    /// Every level the running CPU supports (tests run each kernel at each level).
+    #[cfg(test)]
+    fn available() -> Vec<Self> {
+        #[allow(unused_mut)]
+        let mut levels = vec![Self::Scalar];
+        #[cfg(target_arch = "x86_64")]
+        {
+            levels.push(Self::Sse2);
+            if std::arch::is_x86_feature_detected!("avx") {
+                levels.push(Self::Avx);
+            }
+        }
+        levels
+    }
+}
+
+/// Lane operations of one x86 vector width, so each kernel is written once for SSE2 and AVX.
+#[cfg(target_arch = "x86_64")]
+mod lanes {
+    use std::arch::x86_64::{
+        __m128d, __m256d, _mm_add_pd, _mm_loadu_pd, _mm_mul_pd, _mm_set1_pd, _mm_setzero_pd,
+        _mm_storeu_pd, _mm_unpackhi_pd, _mm_unpacklo_pd, _mm256_add_pd, _mm256_loadu_pd,
+        _mm256_mul_pd, _mm256_permute2f128_pd, _mm256_set1_pd, _mm256_setzero_pd, _mm256_storeu_pd,
+        _mm256_unpackhi_pd, _mm256_unpacklo_pd,
+    };
+
+    /// One vector width. Only plain IEEE operations: a kernel written against this trait computes
+    /// exactly the scalar result in every lane.
+    ///
+    /// # Safety
+    /// Callers must run on a CPU with the instruction set (`Avx` only inside an
+    /// `#[target_feature(enable = "avx")]` function), and pointers must cover `LANES` values
+    /// (`2 * LANES` for `store_interleaved`).
+    pub(super) trait Lanes {
+        type V: Copy;
+        const LANES: usize;
+        unsafe fn splat(x: f64) -> Self::V;
+        unsafe fn zero() -> Self::V;
+        unsafe fn load(p: *const f64) -> Self::V;
+        unsafe fn store(p: *mut f64, v: Self::V);
+        unsafe fn add(a: Self::V, b: Self::V) -> Self::V;
+        unsafe fn mul(a: Self::V, b: Self::V) -> Self::V;
+        /// Stores `even[0], odd[0], even[1], odd[1], ...`.
+        unsafe fn store_interleaved(p: *mut f64, even: Self::V, odd: Self::V);
+    }
+
+    pub(super) struct Sse2;
+    pub(super) struct Avx;
+
+    impl Lanes for Sse2 {
+        type V = __m128d;
+        const LANES: usize = 2;
+        #[inline(always)]
+        unsafe fn splat(x: f64) -> __m128d {
+            unsafe { _mm_set1_pd(x) }
+        }
+        #[inline(always)]
+        unsafe fn zero() -> __m128d {
+            unsafe { _mm_setzero_pd() }
+        }
+        #[inline(always)]
+        unsafe fn load(p: *const f64) -> __m128d {
+            unsafe { _mm_loadu_pd(p) }
+        }
+        #[inline(always)]
+        unsafe fn store(p: *mut f64, v: __m128d) {
+            unsafe { _mm_storeu_pd(p, v) }
+        }
+        #[inline(always)]
+        unsafe fn add(a: __m128d, b: __m128d) -> __m128d {
+            unsafe { _mm_add_pd(a, b) }
+        }
+        #[inline(always)]
+        unsafe fn mul(a: __m128d, b: __m128d) -> __m128d {
+            unsafe { _mm_mul_pd(a, b) }
+        }
+        #[inline(always)]
+        unsafe fn store_interleaved(p: *mut f64, even: __m128d, odd: __m128d) {
+            unsafe {
+                _mm_storeu_pd(p, _mm_unpacklo_pd(even, odd));
+                _mm_storeu_pd(p.add(2), _mm_unpackhi_pd(even, odd));
+            }
+        }
+    }
+
+    impl Lanes for Avx {
+        type V = __m256d;
+        const LANES: usize = 4;
+        #[inline(always)]
+        unsafe fn splat(x: f64) -> __m256d {
+            unsafe { _mm256_set1_pd(x) }
+        }
+        #[inline(always)]
+        unsafe fn zero() -> __m256d {
+            unsafe { _mm256_setzero_pd() }
+        }
+        #[inline(always)]
+        unsafe fn load(p: *const f64) -> __m256d {
+            unsafe { _mm256_loadu_pd(p) }
+        }
+        #[inline(always)]
+        unsafe fn store(p: *mut f64, v: __m256d) {
+            unsafe { _mm256_storeu_pd(p, v) }
+        }
+        #[inline(always)]
+        unsafe fn add(a: __m256d, b: __m256d) -> __m256d {
+            unsafe { _mm256_add_pd(a, b) }
+        }
+        #[inline(always)]
+        unsafe fn mul(a: __m256d, b: __m256d) -> __m256d {
+            unsafe { _mm256_mul_pd(a, b) }
+        }
+        #[inline(always)]
+        unsafe fn store_interleaved(p: *mut f64, even: __m256d, odd: __m256d) {
+            unsafe {
+                // unpack works per 128-bit half: lo = e0 o0 e2 o2, hi = e1 o1 e3 o3.
+                let lo = _mm256_unpacklo_pd(even, odd);
+                let hi = _mm256_unpackhi_pd(even, odd);
+                _mm256_storeu_pd(p, _mm256_permute2f128_pd::<0x20>(lo, hi));
+                _mm256_storeu_pd(p.add(4), _mm256_permute2f128_pd::<0x31>(lo, hi));
+            }
+        }
+    }
+}
+
+/// Runs the vector body of a kernel at `level`; `$avx` is its `#[target_feature(enable = "avx")]`
+/// entry point. Evaluates to the number of outputs done (the scalar tail does the rest).
+macro_rules! dispatch_lanes {
+    ($level:expr, sse2: $sse2:expr, avx: $avx:expr) => {
+        match $level {
+            SimdLevel::Scalar => 0,
+            #[cfg(target_arch = "x86_64")]
+            // SAFETY: SSE2 is x86-64 baseline; the caller asserted the kernel's slice bounds.
+            SimdLevel::Sse2 => unsafe { $sse2 },
+            #[cfg(target_arch = "x86_64")]
+            // SAFETY: `Avx` is only chosen after runtime detection; bounds asserted by the caller.
+            SimdLevel::Avx => unsafe { $avx },
+        }
+    };
+}
 
 /// Carries the last `hist` input samples of a 2x interpolation stage across tiles.
 ///
@@ -123,12 +297,72 @@ fn halfband_scalar(
     }
 }
 
-/// Half-band kernel: `2V` consecutive outputs per step, one output per SSE2 lane.
+/// Vector body of the half-band kernel: `S::LANES * V` consecutive outputs per step, one output
+/// per lane in the `halfband_scalar` order (bit-identical); returns the outputs done.
 ///
-/// Each lane runs exactly the `halfband_scalar` order for its own output, so the result is
-/// bit-identical; vectorizing across outputs (not across taps) needs no reassociation.
+/// # Safety
+/// CPU supports `S`; `taps.len() >= k`, `line.len() >= count + 2k - 1`, `out.len() >= 2 * count`.
+#[cfg(target_arch = "x86_64")]
 #[inline(always)]
-fn halfband_kernel<const K: usize, const V: usize>(
+unsafe fn halfband_lanes<S: lanes::Lanes, const V: usize>(
+    taps: &[f64],
+    k: usize,
+    line: &[f64],
+    out: &mut [f64],
+    count: usize,
+) -> usize {
+    let (lp, op) = (line.as_ptr(), out.as_mut_ptr());
+    let step = S::LANES * V;
+    let mut done = 0;
+    // SAFETY (bounds): for b = done + LANES * v with b + LANES <= count and i < k, the loads touch
+    // line[b + k - 1 - i .. b + k - 1 - i + LANES] and line[b + k + i .. b + k + i + LANES], below
+    // count + 2k - 1 <= line.len(); stores touch out[2b .. 2b + 2 LANES] within 2 * count.
+    unsafe {
+        let two = S::splat(2.0);
+        while done + step <= count {
+            let mut acc = [S::zero(); V];
+            for i in 0..k {
+                let tap = S::splat(*taps.get_unchecked(i));
+                for (v, a) in acc.iter_mut().enumerate() {
+                    let b = done + S::LANES * v;
+                    let pre = S::load(lp.add(b + k - 1 - i));
+                    let post = S::load(lp.add(b + k + i));
+                    *a = S::add(*a, S::mul(tap, S::add(pre, post)));
+                }
+            }
+            for (v, a) in acc.iter().enumerate() {
+                let b = done + S::LANES * v;
+                let even = S::load(lp.add(b + k - 1));
+                S::store_interleaved(op.add(2 * b), even, S::mul(two, *a));
+            }
+            done += step;
+        }
+    }
+    done
+}
+
+/// AVX entry point of the half-band kernel (`K = 0`: runtime tap count).
+///
+/// # Safety
+/// CPU supports AVX; bounds as for `halfband_lanes`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+unsafe fn halfband_avx<const K: usize, const V: usize>(
+    taps: &[f64],
+    line: &[f64],
+    out: &mut [f64],
+    count: usize,
+) -> usize {
+    let k = if K == 0 { taps.len() } else { K };
+    unsafe { halfband_lanes::<lanes::Avx, V>(taps, k, line, out, count) }
+}
+
+/// Half-band kernel: vector body at `level` (`VS` / `VA` vectors per step for SSE2 / AVX), then
+/// the scalar tail. Vectorizing across outputs (not across taps) needs no reassociation, so the
+/// result is bit-identical at every level.
+#[inline(always)]
+fn halfband_kernel<const K: usize, const VS: usize, const VA: usize>(
+    level: SimdLevel,
     taps: &[f64],
     line: &[f64],
     out: &mut [f64],
@@ -136,44 +370,9 @@ fn halfband_kernel<const K: usize, const V: usize>(
 ) {
     let k = if K == 0 { taps.len() } else { K };
     assert!(taps.len() >= k && line.len() >= count + 2 * k - 1 && out.len() >= 2 * count);
-    #[allow(unused_mut)]
-    let mut done = 0;
-    #[cfg(target_arch = "x86_64")]
-    {
-        use std::arch::x86_64::{
-            _mm_add_pd, _mm_loadu_pd, _mm_mul_pd, _mm_set1_pd, _mm_setzero_pd, _mm_storeu_pd,
-            _mm_unpackhi_pd, _mm_unpacklo_pd,
-        };
-        let lp = line.as_ptr();
-        let op = out.as_mut_ptr();
-        // SAFETY: SSE2 is part of the x86-64 baseline. For b = done + 2v with b + 2 <= count and
-        // i < k, the loads touch line[b + k - 1 - i ..= b + k - i] and line[b + k + i ..= b + k + i
-        // + 1], both below count + 2k - 1 <= line.len(); stores touch out[2b .. 2b + 4] within
-        // 2 * count <= out.len() (asserted above). `taps[i]` is in bounds since i < k <= taps.len().
-        unsafe {
-            let two = _mm_set1_pd(2.0);
-            while done + 2 * V <= count {
-                let mut acc = [_mm_setzero_pd(); V];
-                for i in 0..k {
-                    let tap = _mm_set1_pd(*taps.get_unchecked(i));
-                    for (v, a) in acc.iter_mut().enumerate() {
-                        let b = done + 2 * v;
-                        let pre = _mm_loadu_pd(lp.add(b + k - 1 - i));
-                        let post = _mm_loadu_pd(lp.add(b + k + i));
-                        *a = _mm_add_pd(*a, _mm_mul_pd(tap, _mm_add_pd(pre, post)));
-                    }
-                }
-                for (v, a) in acc.iter().enumerate() {
-                    let b = done + 2 * v;
-                    let odd = _mm_mul_pd(two, *a);
-                    let even = _mm_loadu_pd(lp.add(b + k - 1));
-                    _mm_storeu_pd(op.add(2 * b), _mm_unpacklo_pd(even, odd));
-                    _mm_storeu_pd(op.add(2 * b + 2), _mm_unpackhi_pd(even, odd));
-                }
-                done += 2 * V;
-            }
-        }
-    }
+    let done = dispatch_lanes!(level,
+        sse2: halfband_lanes::<lanes::Sse2, VS>(taps, k, line, out, count),
+        avx: halfband_avx::<K, VA>(taps, line, out, count));
     halfband_scalar(taps, k, line, out, done, count);
 }
 
@@ -191,6 +390,8 @@ pub struct HalfBandStage {
     num_odd_taps: usize,
     /// Last $2K - 1$ input samples.
     seam: Seam,
+    /// Vector instruction set of the kernel.
+    simd: SimdLevel,
 }
 
 impl HalfBandStage {
@@ -205,6 +406,7 @@ impl HalfBandStage {
             taps,
             num_odd_taps,
             seam: Seam::new(2 * num_odd_taps - 1),
+            simd: SimdLevel::detect(),
         }
     }
 
@@ -235,28 +437,28 @@ impl HalfBandStage {
             });
         }
         // Tap counts come from the filter design (`tools/design`), so dispatch on K, never on
-        // the stage index. Short kernels are throughput-bound and run 4 outputs per step
-        // (8 for K <= 3, where the extra lanes still pay); long ones are latency-bound and run 8.
-        let taps = self.taps;
+        // the stage index. Vectors per step `<K, SSE2, AVX>` were tuned with an isolated kernel
+        // benchmark: 8 / 16 outputs for K <= 3 and long kernels, 4 / 8 otherwise.
+        let (taps, simd) = (self.taps, self.simd);
         let output = &mut output[..required_out];
         match self.num_odd_taps {
             2 => self.seam.run(input, output, |l, o, c| {
-                halfband_kernel::<2, 4>(taps, l, o, c)
+                halfband_kernel::<2, 4, 4>(simd, taps, l, o, c)
             }),
             3 => self.seam.run(input, output, |l, o, c| {
-                halfband_kernel::<3, 4>(taps, l, o, c)
+                halfband_kernel::<3, 4, 4>(simd, taps, l, o, c)
             }),
             4 => self.seam.run(input, output, |l, o, c| {
-                halfband_kernel::<4, 2>(taps, l, o, c)
+                halfband_kernel::<4, 2, 2>(simd, taps, l, o, c)
             }),
             5 => self.seam.run(input, output, |l, o, c| {
-                halfband_kernel::<5, 2>(taps, l, o, c)
+                halfband_kernel::<5, 2, 2>(simd, taps, l, o, c)
             }),
             8 => self.seam.run(input, output, |l, o, c| {
-                halfband_kernel::<8, 2>(taps, l, o, c)
+                halfband_kernel::<8, 2, 2>(simd, taps, l, o, c)
             }),
             _ => self.seam.run(input, output, |l, o, c| {
-                halfband_kernel::<0, 4>(taps, l, o, c)
+                halfband_kernel::<0, 4, 4>(simd, taps, l, o, c)
             }),
         }
         Ok(())
@@ -290,10 +492,73 @@ fn polyphase_scalar(
     }
 }
 
-/// Polyphase kernel: `2V` consecutive outputs per step, one output per SSE2 lane, each lane in
-/// the `polyphase_scalar` order (bit-identical). `M = 0` means a runtime tap count.
+/// Vector body of the polyphase kernel: `S::LANES * V` consecutive outputs per step, one output
+/// per lane in the `polyphase_scalar` order (bit-identical); returns the outputs done.
+///
+/// # Safety
+/// CPU supports `S`; both tap slices hold `m` taps, `line.len() >= count + m - 1`,
+/// `out.len() >= 2 * count`.
+#[cfg(target_arch = "x86_64")]
 #[inline(always)]
-fn polyphase_kernel<const M: usize, const V: usize>(
+unsafe fn polyphase_lanes<S: lanes::Lanes, const V: usize>(
+    even_taps: &[f64],
+    odd_taps: &[f64],
+    m: usize,
+    line: &[f64],
+    out: &mut [f64],
+    count: usize,
+) -> usize {
+    let (lp, op) = (line.as_ptr(), out.as_mut_ptr());
+    let step = S::LANES * V;
+    let mut done = 0;
+    // SAFETY (bounds): for b = done + LANES * v with b + LANES <= count and idx < m, the load
+    // touches line[b + m - 1 - idx .. + LANES], below count + m - 1 <= line.len(); stores touch
+    // out[2b .. 2b + 2 LANES] within 2 * count.
+    unsafe {
+        while done + step <= count {
+            let mut even_acc = [S::zero(); V];
+            let mut odd_acc = [S::zero(); V];
+            for idx in 0..m {
+                let even_tap = S::splat(*even_taps.get_unchecked(idx));
+                let odd_tap = S::splat(*odd_taps.get_unchecked(idx));
+                for v in 0..V {
+                    let delayed = S::load(lp.add(done + S::LANES * v + m - 1 - idx));
+                    even_acc[v] = S::add(even_acc[v], S::mul(even_tap, delayed));
+                    odd_acc[v] = S::add(odd_acc[v], S::mul(odd_tap, delayed));
+                }
+            }
+            for v in 0..V {
+                let b = done + S::LANES * v;
+                S::store_interleaved(op.add(2 * b), even_acc[v], odd_acc[v]);
+            }
+            done += step;
+        }
+    }
+    done
+}
+
+/// AVX entry point of the polyphase kernel (`M = 0`: runtime branch length).
+///
+/// # Safety
+/// CPU supports AVX; bounds as for `polyphase_lanes`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+unsafe fn polyphase_avx<const M: usize, const V: usize>(
+    even_taps: &[f64],
+    odd_taps: &[f64],
+    line: &[f64],
+    out: &mut [f64],
+    count: usize,
+) -> usize {
+    let m = if M == 0 { even_taps.len() } else { M };
+    unsafe { polyphase_lanes::<lanes::Avx, V>(even_taps, odd_taps, m, line, out, count) }
+}
+
+/// Polyphase kernel: vector body at `level` (`VS` / `VA` vectors per step), then the scalar tail
+/// (bit-identical at every level). `M = 0` means a runtime tap count.
+#[inline(always)]
+fn polyphase_kernel<const M: usize, const VS: usize, const VA: usize>(
+    level: SimdLevel,
     even_taps: &[f64],
     odd_taps: &[f64],
     line: &[f64],
@@ -307,41 +572,9 @@ fn polyphase_kernel<const M: usize, const V: usize>(
             && line.len() + 1 >= count + m
             && out.len() >= 2 * count
     );
-    #[allow(unused_mut)]
-    let mut done = 0;
-    #[cfg(target_arch = "x86_64")]
-    {
-        use std::arch::x86_64::{
-            _mm_add_pd, _mm_loadu_pd, _mm_mul_pd, _mm_set1_pd, _mm_setzero_pd, _mm_storeu_pd,
-            _mm_unpackhi_pd, _mm_unpacklo_pd,
-        };
-        let lp = line.as_ptr();
-        let op = out.as_mut_ptr();
-        // SAFETY: SSE2 is x86-64 baseline. For b = done + 2v with b + 2 <= count and idx < m,
-        // the load touches line[b + m - 1 - idx ..= b + m - idx], below count + m - 1 <= line.len();
-        // stores touch out[2b .. 2b + 4] within 2 * count <= out.len(); tap reads idx < m (asserted).
-        unsafe {
-            while done + 2 * V <= count {
-                let mut even_acc = [_mm_setzero_pd(); V];
-                let mut odd_acc = [_mm_setzero_pd(); V];
-                for idx in 0..m {
-                    let even_tap = _mm_set1_pd(*even_taps.get_unchecked(idx));
-                    let odd_tap = _mm_set1_pd(*odd_taps.get_unchecked(idx));
-                    for v in 0..V {
-                        let delayed = _mm_loadu_pd(lp.add(done + 2 * v + m - 1 - idx));
-                        even_acc[v] = _mm_add_pd(even_acc[v], _mm_mul_pd(even_tap, delayed));
-                        odd_acc[v] = _mm_add_pd(odd_acc[v], _mm_mul_pd(odd_tap, delayed));
-                    }
-                }
-                for v in 0..V {
-                    let b = done + 2 * v;
-                    _mm_storeu_pd(op.add(2 * b), _mm_unpacklo_pd(even_acc[v], odd_acc[v]));
-                    _mm_storeu_pd(op.add(2 * b + 2), _mm_unpackhi_pd(even_acc[v], odd_acc[v]));
-                }
-                done += 2 * V;
-            }
-        }
-    }
+    let done = dispatch_lanes!(level,
+        sse2: polyphase_lanes::<lanes::Sse2, VS>(even_taps, odd_taps, m, line, out, count),
+        avx: polyphase_avx::<M, VA>(even_taps, odd_taps, line, out, count));
     polyphase_scalar(even_taps, odd_taps, m, line, out, done, count);
 }
 
@@ -362,6 +595,8 @@ pub struct PolyphaseInterpolationStage {
     taps_per_phase: usize,
     /// Last $M - 1$ input samples.
     seam: Seam,
+    /// Vector instruction set of the kernel.
+    simd: SimdLevel,
     /// Impulse-response peak index, used as the alignment delay in output samples.
     group_delay_output_samples: usize,
 }
@@ -394,6 +629,7 @@ impl PolyphaseInterpolationStage {
             odd_taps,
             taps_per_phase,
             seam: Seam::new(taps_per_phase - 1),
+            simd: SimdLevel::detect(),
             group_delay_output_samples: peak_index,
         }
     }
@@ -419,27 +655,28 @@ impl PolyphaseInterpolationStage {
             });
         }
         // Dispatch on the design's branch length M (short minimum-phase stages get unrolled
-        // tap loops); 8 outputs per step, since every chain is serial in its taps.
-        let (e, o) = (&self.even_taps[..], &self.odd_taps[..]);
+        // tap loops); 8 / 16 outputs per step (SSE2 / AVX), since every chain is serial in its
+        // taps and more independent chains hide the add latency.
+        let (e, o, simd) = (&self.even_taps[..], &self.odd_taps[..], self.simd);
         let output = &mut output[..required_out];
         match self.taps_per_phase {
             4 => self.seam.run(input, output, |l, out, c| {
-                polyphase_kernel::<4, 4>(e, o, l, out, c)
+                polyphase_kernel::<4, 4, 4>(simd, e, o, l, out, c)
             }),
             6 => self.seam.run(input, output, |l, out, c| {
-                polyphase_kernel::<6, 4>(e, o, l, out, c)
+                polyphase_kernel::<6, 4, 4>(simd, e, o, l, out, c)
             }),
             8 => self.seam.run(input, output, |l, out, c| {
-                polyphase_kernel::<8, 4>(e, o, l, out, c)
+                polyphase_kernel::<8, 4, 4>(simd, e, o, l, out, c)
             }),
             10 => self.seam.run(input, output, |l, out, c| {
-                polyphase_kernel::<10, 4>(e, o, l, out, c)
+                polyphase_kernel::<10, 4, 4>(simd, e, o, l, out, c)
             }),
             16 => self.seam.run(input, output, |l, out, c| {
-                polyphase_kernel::<16, 4>(e, o, l, out, c)
+                polyphase_kernel::<16, 4, 4>(simd, e, o, l, out, c)
             }),
             _ => self.seam.run(input, output, |l, out, c| {
-                polyphase_kernel::<0, 4>(e, o, l, out, c)
+                polyphase_kernel::<0, 4, 4>(simd, e, o, l, out, c)
             }),
         }
         Ok(())
@@ -702,10 +939,74 @@ fn decimation_scalar(
     }
 }
 
-/// Half-band decimation kernel: `2V` consecutive outputs per step, one output per SSE2 lane, each
-/// lane in the `decimation_scalar` order (bit-identical). `K = 0` means a runtime tap count.
+/// Vector body of the decimation kernel: `S::LANES * V` consecutive outputs per step, one output
+/// per lane in the `decimation_scalar` order (bit-identical); returns the outputs done.
+///
+/// # Safety
+/// CPU supports `S`; `taps.len() >= k`, `even.len() >= count + 2k - 1`, `odd.len() >= count + k`,
+/// `out.len() >= count`.
+#[cfg(target_arch = "x86_64")]
 #[inline(always)]
-fn decimation_kernel<const K: usize, const V: usize>(
+unsafe fn decimation_lanes<S: lanes::Lanes, const V: usize>(
+    taps: &[f64],
+    k: usize,
+    even: &[f64],
+    odd: &[f64],
+    out: &mut [f64],
+    count: usize,
+) -> usize {
+    let (ep, opp, outp) = (even.as_ptr(), odd.as_ptr(), out.as_mut_ptr());
+    let step = S::LANES * V;
+    let mut done = 0;
+    // SAFETY (bounds): for b = done + LANES * v with b + LANES <= count and i < k, the even loads
+    // touch even[b + k - 1 - i .. + LANES] and even[b + k + i .. + LANES], below count + 2k - 1;
+    // the centre load touches odd[b + k - 1 .. + LANES], below count + k; stores out[b .. + LANES].
+    unsafe {
+        let half = S::splat(0.5);
+        while done + step <= count {
+            let mut acc = [S::zero(); V];
+            for i in 0..k {
+                let tap = S::splat(*taps.get_unchecked(i));
+                for (v, a) in acc.iter_mut().enumerate() {
+                    let b = done + S::LANES * v;
+                    let pre = S::load(ep.add(b + k - 1 - i));
+                    let post = S::load(ep.add(b + k + i));
+                    *a = S::add(*a, S::mul(tap, S::add(pre, post)));
+                }
+            }
+            for (v, a) in acc.iter().enumerate() {
+                let b = done + S::LANES * v;
+                let centre = S::load(opp.add(b + k - 1));
+                S::store(outp.add(b), S::add(S::mul(half, centre), *a));
+            }
+            done += step;
+        }
+    }
+    done
+}
+
+/// AVX entry point of the decimation kernel (`K = 0`: runtime tap count).
+///
+/// # Safety
+/// CPU supports AVX; bounds as for `decimation_lanes`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+unsafe fn decimation_avx<const K: usize, const V: usize>(
+    taps: &[f64],
+    even: &[f64],
+    odd: &[f64],
+    out: &mut [f64],
+    count: usize,
+) -> usize {
+    let k = if K == 0 { taps.len() } else { K };
+    unsafe { decimation_lanes::<lanes::Avx, V>(taps, k, even, odd, out, count) }
+}
+
+/// Half-band decimation kernel: vector body at `level` (`VS` / `VA` vectors per step), then the
+/// scalar tail (bit-identical at every level). `K = 0` means a runtime tap count.
+#[inline(always)]
+fn decimation_kernel<const K: usize, const VS: usize, const VA: usize>(
+    level: SimdLevel,
     taps: &[f64],
     even: &[f64],
     odd: &[f64],
@@ -719,42 +1020,9 @@ fn decimation_kernel<const K: usize, const V: usize>(
             && odd.len() >= count + k
             && out.len() >= count
     );
-    #[allow(unused_mut)]
-    let mut done = 0;
-    #[cfg(target_arch = "x86_64")]
-    {
-        use std::arch::x86_64::{
-            _mm_add_pd, _mm_loadu_pd, _mm_mul_pd, _mm_set1_pd, _mm_setzero_pd, _mm_storeu_pd,
-        };
-        let ep = even.as_ptr();
-        let opp = odd.as_ptr();
-        let outp = out.as_mut_ptr();
-        // SAFETY: SSE2 is x86-64 baseline. For b = done + 2v with b + 2 <= count and i < k, the
-        // even loads touch even[b + k - 1 - i ..= b + k - i] and even[b + k + i ..= b + k + i + 1],
-        // below count + 2k - 1 <= even.len(); the centre load touches odd[b + k - 1 ..= b + k],
-        // below count + k <= odd.len(); stores touch out[b .. b + 2] within count <= out.len().
-        unsafe {
-            let half = _mm_set1_pd(0.5);
-            while done + 2 * V <= count {
-                let mut acc = [_mm_setzero_pd(); V];
-                for i in 0..k {
-                    let tap = _mm_set1_pd(*taps.get_unchecked(i));
-                    for (v, a) in acc.iter_mut().enumerate() {
-                        let b = done + 2 * v;
-                        let pre = _mm_loadu_pd(ep.add(b + k - 1 - i));
-                        let post = _mm_loadu_pd(ep.add(b + k + i));
-                        *a = _mm_add_pd(*a, _mm_mul_pd(tap, _mm_add_pd(pre, post)));
-                    }
-                }
-                for (v, a) in acc.iter().enumerate() {
-                    let b = done + 2 * v;
-                    let centre = _mm_loadu_pd(opp.add(b + k - 1));
-                    _mm_storeu_pd(outp.add(b), _mm_add_pd(_mm_mul_pd(half, centre), *a));
-                }
-                done += 2 * V;
-            }
-        }
-    }
+    let done = dispatch_lanes!(level,
+        sse2: decimation_lanes::<lanes::Sse2, VS>(taps, k, even, odd, out, count),
+        avx: decimation_avx::<K, VA>(taps, even, odd, out, count));
     decimation_scalar(taps, k, even, odd, out, done, count);
 }
 
@@ -779,6 +1047,8 @@ pub struct HalfBandDecimationStage {
     even: Vec<f64>,
     /// Odd-phase line, same layout.
     odd: Vec<f64>,
+    /// Vector instruction set of the kernel.
+    simd: SimdLevel,
 }
 
 impl HalfBandDecimationStage {
@@ -795,6 +1065,7 @@ impl HalfBandDecimationStage {
             num_odd_taps,
             even: vec![0.0; line_len],
             odd: vec![0.0; line_len],
+            simd: SimdLevel::detect(),
         }
     }
 
@@ -823,7 +1094,7 @@ impl HalfBandDecimationStage {
         }
 
         let hist = 2 * self.num_odd_taps - 1;
-        let taps = self.taps;
+        let (taps, simd) = (self.taps, self.simd);
         let mut done = 0;
         while done < out_len {
             let count = (out_len - done).min(DECIMATION_CHUNK);
@@ -838,14 +1109,16 @@ impl HalfBandDecimationStage {
 
             let (even, odd) = (&self.even[..hist + count], &self.odd[..hist + count]);
             let out = &mut output[done..done + count];
-            // Dispatch on K (design output), never on the stage position.
+            // Dispatch on K (design output), never on the stage position. Vectors per step
+            // `<K, SSE2, AVX>` as tuned for the interpolation kernels; small K is bound by the
+            // phase split above rather than the kernel, so its setting matters little.
             match self.num_odd_taps {
-                2 => decimation_kernel::<2, 4>(taps, even, odd, out, count),
-                3 => decimation_kernel::<3, 4>(taps, even, odd, out, count),
-                4 => decimation_kernel::<4, 2>(taps, even, odd, out, count),
-                5 => decimation_kernel::<5, 2>(taps, even, odd, out, count),
-                8 => decimation_kernel::<8, 2>(taps, even, odd, out, count),
-                _ => decimation_kernel::<0, 4>(taps, even, odd, out, count),
+                2 => decimation_kernel::<2, 4, 1>(simd, taps, even, odd, out, count),
+                3 => decimation_kernel::<3, 4, 4>(simd, taps, even, odd, out, count),
+                4 => decimation_kernel::<4, 2, 2>(simd, taps, even, odd, out, count),
+                5 => decimation_kernel::<5, 2, 2>(simd, taps, even, odd, out, count),
+                8 => decimation_kernel::<8, 2, 2>(simd, taps, even, odd, out, count),
+                _ => decimation_kernel::<0, 4, 4>(simd, taps, even, odd, out, count),
             }
 
             self.even.copy_within(count..count + hist, 0);
@@ -1645,9 +1918,12 @@ mod tests {
     #[test]
     fn test_halfband_stage_bit_exact_vs_circular_reference() {
         let input = test_signal(6000);
-        for stage in 0..HALFBAND_MAX_STAGES {
+        for (stage, level) in (0..HALFBAND_MAX_STAGES)
+            .flat_map(|s| SimdLevel::available().into_iter().map(move |l| (s, l)))
+        {
             let taps = get_halfband_odd_taps(stage);
             let mut actual_stage = HalfBandStage::new(taps);
+            actual_stage.simd = level;
             let mut reference = CircularHalfBand::new(taps);
             for tile in irregular_tiles(&input) {
                 // Oversized output: samples beyond 2 * len must stay untouched.
@@ -1655,7 +1931,11 @@ mod tests {
                 let mut expected = actual.clone();
                 actual_stage.process_tile(tile, &mut actual).unwrap();
                 reference.process(tile, &mut expected);
-                assert_bits_eq(&actual, &expected, &format!("half-band stage {stage}"));
+                assert_bits_eq(
+                    &actual,
+                    &expected,
+                    &format!("{level:?} half-band stage {stage}"),
+                );
             }
             assert!(matches!(
                 actual_stage.process_tile(&[1.0], &mut [0.0]),
@@ -1684,15 +1964,19 @@ mod tests {
                 }
             }
         }
-        for (name, taps) in prototypes {
+        for ((name, taps), level) in prototypes
+            .iter()
+            .flat_map(|p| SimdLevel::available().into_iter().map(move |l| (p, l)))
+        {
             let mut actual_stage = PolyphaseInterpolationStage::new(taps);
+            actual_stage.simd = level;
             let mut reference = CircularPolyphase::new(&actual_stage);
             for tile in irregular_tiles(&input) {
                 let mut actual = vec![-7.0; tile.len() * 2 + 3];
                 let mut expected = actual.clone();
                 actual_stage.process_tile(tile, &mut actual).unwrap();
                 reference.process(tile, &mut expected);
-                assert_bits_eq(&actual, &expected, &name);
+                assert_bits_eq(&actual, &expected, &format!("{level:?} {name}"));
             }
         }
     }
@@ -1743,9 +2027,12 @@ mod tests {
     #[test]
     fn test_decimation_stage_bit_exact_vs_circular_reference() {
         let input = test_signal(12000);
-        for stage in 0..HALFBAND_MAX_STAGES {
+        for (stage, level) in (0..HALFBAND_MAX_STAGES)
+            .flat_map(|s| SimdLevel::available().into_iter().map(move |l| (s, l)))
+        {
             let taps = get_halfband_odd_taps(stage);
             let mut actual_stage = HalfBandDecimationStage::new(taps);
+            actual_stage.simd = level;
             let mut reference = CircularDecimation::new(taps);
             // Odd tile lengths drop their last sample in both kernels; long tiles cross the
             // deinterleave chunk (512 outputs) boundary.
@@ -1759,52 +2046,79 @@ mod tests {
                     tile.len() / 2
                 );
                 reference.process(tile, &mut expected);
-                assert_bits_eq(&actual, &expected, &format!("decimation stage {stage}"));
+                assert_bits_eq(
+                    &actual,
+                    &expected,
+                    &format!("{level:?} decimation stage {stage}"),
+                );
             }
         }
     }
 
-    /// The scalar kernels are the non-x86 path and the vector tail; compare them with the
-    /// vector kernels on x86 so the fallback is compiled and checked everywhere.
+    /// The scalar kernels are the non-x86 path and the vector tail; compare every level's kernels
+    /// with them so the fallback is compiled and checked everywhere.
     #[test]
     fn test_vector_kernels_match_scalar_kernels() {
         let line = test_signal(400);
         let taps = test_signal(64);
-        for count in [0, 1, 2, 3, 7, 8, 9, 64, 101] {
-            let mut scalar = vec![0.0; 2 * count];
-            let mut vector = scalar.clone();
-            for k in [1, 2, 3, 4, 5, 8, 50] {
-                halfband_scalar(&taps[..k], k, &line, &mut scalar, 0, count);
-                halfband_kernel::<0, 1>(&taps[..k], &line, &mut vector, count);
-                assert_bits_eq(
-                    &vector,
-                    &scalar,
-                    &format!("half-band V=1 k={k} count={count}"),
-                );
-                halfband_kernel::<0, 4>(&taps[..k], &line, &mut vector, count);
-                assert_bits_eq(
-                    &vector,
-                    &scalar,
-                    &format!("half-band V=4 k={k} count={count}"),
-                );
-            }
-            for k in [1, 2, 3, 4, 5, 8, 50] {
-                let mut scalar_dec = vec![0.0; count];
-                let mut vector_dec = scalar_dec.clone();
-                let odd = &line[200..];
-                decimation_scalar(&taps[..k], k, &line, odd, &mut scalar_dec, 0, count);
-                decimation_kernel::<0, 4>(&taps[..k], &line, odd, &mut vector_dec, count);
-                assert_bits_eq(
-                    &vector_dec,
-                    &scalar_dec,
-                    &format!("decimation k={k} count={count}"),
-                );
-            }
-            for m in [1, 2, 4, 6, 16, 32] {
-                let (even, odd) = taps.split_at(32);
-                polyphase_scalar(&even[..m], &odd[..m], m, &line, &mut scalar, 0, count);
-                polyphase_kernel::<0, 4>(&even[..m], &odd[..m], &line, &mut vector, count);
-                assert_bits_eq(&vector, &scalar, &format!("polyphase m={m} count={count}"));
+        for level in SimdLevel::available() {
+            for count in [0, 1, 2, 3, 7, 8, 9, 15, 16, 17, 64, 101] {
+                let mut scalar = vec![0.0; 2 * count];
+                let mut vector = scalar.clone();
+                for k in [1, 2, 3, 4, 5, 8, 50] {
+                    let what = format!("{level:?} half-band k={k} count={count}");
+                    halfband_scalar(&taps[..k], k, &line, &mut scalar, 0, count);
+                    halfband_kernel::<0, 1, 1>(level, &taps[..k], &line, &mut vector, count);
+                    assert_bits_eq(&vector, &scalar, &what);
+                    halfband_kernel::<0, 4, 4>(level, &taps[..k], &line, &mut vector, count);
+                    assert_bits_eq(&vector, &scalar, &what);
+
+                    let mut scalar_dec = vec![0.0; count];
+                    let mut vector_dec = scalar_dec.clone();
+                    let odd = &line[200..];
+                    decimation_scalar(&taps[..k], k, &line, odd, &mut scalar_dec, 0, count);
+                    decimation_kernel::<0, 1, 1>(
+                        level,
+                        &taps[..k],
+                        &line,
+                        odd,
+                        &mut vector_dec,
+                        count,
+                    );
+                    assert_bits_eq(&vector_dec, &scalar_dec, &format!("{what} (decimation)"));
+                    decimation_kernel::<0, 4, 4>(
+                        level,
+                        &taps[..k],
+                        &line,
+                        odd,
+                        &mut vector_dec,
+                        count,
+                    );
+                    assert_bits_eq(&vector_dec, &scalar_dec, &format!("{what} (decimation)"));
+                }
+                for m in [1, 2, 4, 6, 16, 32] {
+                    let what = format!("{level:?} polyphase m={m} count={count}");
+                    let (even, odd) = taps.split_at(32);
+                    polyphase_scalar(&even[..m], &odd[..m], m, &line, &mut scalar, 0, count);
+                    polyphase_kernel::<0, 1, 1>(
+                        level,
+                        &even[..m],
+                        &odd[..m],
+                        &line,
+                        &mut vector,
+                        count,
+                    );
+                    assert_bits_eq(&vector, &scalar, &what);
+                    polyphase_kernel::<0, 4, 4>(
+                        level,
+                        &even[..m],
+                        &odd[..m],
+                        &line,
+                        &mut vector,
+                        count,
+                    );
+                    assert_bits_eq(&vector, &scalar, &what);
+                }
             }
         }
     }

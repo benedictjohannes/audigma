@@ -1,6 +1,6 @@
 # audigma — Modulator Measurements
 
-> **Generated:** `2026-11-10 03:06:47Z`  
+> **Generated:** `2026-11-10 03:39:44Z`  
 > **Evaluated on:** `AMD Ryzen AI 7 350 w/ Radeon 860M (x86_64)` running `CachyOS (Linux 7.3.1-1-cachyos)`  
 > **Rust compiler:** `rustc 1.98.0 (88d9e12ae 2026-08-18)`  
 > **Hardware FTZ/DAZ:** `Active (hardware-verified)`  
