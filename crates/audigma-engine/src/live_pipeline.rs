@@ -1167,12 +1167,22 @@ impl LivePipeline {
             )
         });
 
-        let mut dop_packer = match self.carrier {
+        // The DoP word comes from the opened device when it negotiated one (`auto`).
+        let carrier = self.carrier.for_output(output);
+        if let IdleCarrierFormat::DoP(fmt) = carrier {
+            tracing::info!(
+                target: "audigma::engine",
+                dop_format = ?fmt,
+                negotiated = output.dop_format().is_some(),
+                "DoP word resolved"
+            );
+        }
+        let mut dop_packer = match carrier {
             IdleCarrierFormat::DoP(fmt) => Some(DopPacker::new(fmt)),
             _ => None,
         };
 
-        let mut lifecycle = LifecycleController::new(self.carrier, 256, 256);
+        let mut lifecycle = LifecycleController::new(carrier, 256, 256);
         let _ = lifecycle.start();
 
         let cascade_tile_len = processor.output_frame_capacity() * mult;
@@ -1381,7 +1391,7 @@ impl LivePipeline {
                 if let Some(frames) = process_live_dsd_passthrough_tile(
                     input,
                     output,
-                    self.carrier,
+                    carrier,
                     &mut dop_packer,
                     &mut dsd_passthrough_l[..dsd_bytes_to_read],
                     &mut dsd_passthrough_r[..dsd_bytes_to_read],
@@ -1449,7 +1459,7 @@ impl LivePipeline {
                 // Emit continuous idle / silence frames to keep DAC clock locked and prevent ALSA XRuns.
                 idle_tiles_total = idle_tiles_total.saturating_add(1);
                 let idle_tile_frames = TILE_BASEBAND_FRAMES;
-                let idle_bytes = match self.carrier {
+                let idle_bytes = match carrier {
                     IdleCarrierFormat::NativeDsd => {
                         let dsd_u32_frames = (idle_tile_frames * mult) / 32;
                         dsd_u32_frames * STEREO_DSD_U32_FRAME_BYTES
@@ -1608,7 +1618,7 @@ impl LivePipeline {
                     // Pack and emit
                     let frames = loop_probe.timed_emit(output, |o| {
                         pack_and_write_stereo_dsd(
-                            self.carrier,
+                            carrier,
                             &mut dop_packer,
                             out_l,
                             out_r,
@@ -1645,7 +1655,7 @@ impl LivePipeline {
 
         // Emit silence/tail frames to guarantee zero clicks
         let tail_bytes = 1024
-            * match self.carrier {
+            * match carrier {
                 IdleCarrierFormat::NativeDsd => STEREO_DSD_U32_FRAME_BYTES,
                 IdleCarrierFormat::DoP(fmt) => fmt.bytes_per_stereo_frame(),
                 IdleCarrierFormat::Pcm => 4 * num_channels,

@@ -136,11 +136,6 @@ const UNLISTED: &[(&str, &[&str])] = &[
     ("resampler.apodization", &["19000"]),
     // Packed DSD words are not PCM sample formats a user picks here.
     ("input.sample_format", &["f64", "dsd_u32_be", "dsd_u32_le"]),
-    // DoP packs 24 data bits: only the 24 and 32 bit containers are offered.
-    (
-        "output.dop_sample_format",
-        &["s16le", "f32", "f64", "dsd_u32_be", "dsd_u32_le"],
-    ),
     ("target.sample_format", &["f64", "dsd_u32_be", "dsd_u32_le"]),
 ];
 
@@ -184,14 +179,13 @@ fn options_equal_the_values_the_schema_accepts() {
 /// Defaults whose resolution is not in `audigma-settings`: the consumer applies them. They have
 /// no probe here; each is covered where it is applied.
 const DEFAULT_APPLIED_ELSEWHERE: &[&str] = &[
-    "input.sample_format",      // convert/play stdin reader
-    "logging.format",           // audigma-log, at startup
-    "output.buffer_ms",         // run (PipeWire queue) and the ALSA output
-    "output.dop_sample_format", // DoP packers (offline pipeline, ALSA output)
-    "output.period_ms",         // ALSA output
-    "offline.tail_policy",      // offline pipeline
-    "offline.write_report",     // convert
-    "target.dither_tpdf_seed",  // PCM quantizer / modulator
+    "input.sample_format",     // convert/play stdin reader
+    "logging.format",          // audigma-log, at startup
+    "output.buffer_ms",        // run (PipeWire queue) and the ALSA output
+    "output.period_ms",        // ALSA output
+    "offline.tail_policy",     // offline pipeline
+    "offline.write_report",    // convert
+    "target.dither_tpdf_seed", // PCM quantizer / modulator
 ];
 
 /// The value consumers see for `path`, resolved from the parsed settings.
@@ -207,6 +201,7 @@ fn resolved(s: &Settings, path: &str) -> Option<Value> {
         "input.allow_dsd" => json!(input.allow_dsd()),
         "input.dsd.gain_db" => json!(input.dsd_gain_db()),
         "output.volume_control" => to(&output.volume_control()),
+        "output.dop_sample_format" => to(&output.dop_sample_format()),
         "output.device_wait_ms" => json!(output.device_wait_ms()),
         "output.device_wait_expiry" => to(&output.device_wait_expiry()),
         "output.keep_audio_sink_ms" => json!(output.keep_audio_sink_ms()),

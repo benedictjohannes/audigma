@@ -12,8 +12,9 @@
 //! 4. Emergency overload recovery: Instantly bypasses output to the verified DSD idle stream at the
 //!    modulator boundary, resets integrators to zero, and fades pre-SRC gain back in once safe.
 
+use crate::traits::AudioOutput;
 use audigma_dsp::DSD_IDLE_BYTE;
-use audigma_dsp::config::{SampleFormat, TargetRateSpec};
+use audigma_dsp::config::TargetRateSpec;
 use audigma_format::dop::{DopContainerFormat, DopPacker};
 use audigma_settings::{OutputTransport, Settings};
 use serde::{Deserialize, Serialize};
@@ -62,23 +63,28 @@ impl IdleCarrierFormat {
                     .unwrap_or(OutputTransport::Native);
                 match transport {
                     OutputTransport::Native => Self::NativeDsd,
-                    OutputTransport::Dop => {
-                        let fmt = settings
+                    // `auto` has no word until a device is opened; this is the word without one,
+                    // and `for_output` replaces it with what the device negotiated.
+                    OutputTransport::Dop => Self::DoP(
+                        settings
                             .output
                             .as_ref()
-                            .and_then(|o| o.dop_sample_format)
-                            .unwrap_or(SampleFormat::S32Le);
-                        let dop_fmt = match fmt {
-                            SampleFormat::S32Le => DopContainerFormat::S32Le,
-                            SampleFormat::S24Le => DopContainerFormat::S24Le,
-                            _ => DopContainerFormat::S24_3Le,
-                        };
-                        Self::DoP(dop_fmt)
-                    }
+                            .map(|o| o.dop_sample_format().without_device())
+                            .unwrap_or_default(),
+                    ),
                     OutputTransport::Pcm => Self::Pcm,
                 }
             }
             TargetRateSpec::Pcm { .. } => Self::Pcm,
+        }
+    }
+
+    /// The carrier to emit into `output`: a DoP carrier takes the word the output was opened
+    /// with (`AudioOutput::dop_format`), so packed bytes always match the device format.
+    pub fn for_output(self, output: &dyn AudioOutput) -> Self {
+        match (self, output.dop_format()) {
+            (Self::DoP(_), Some(negotiated)) => Self::DoP(negotiated),
+            (carrier, _) => carrier,
         }
     }
 }
@@ -473,6 +479,47 @@ impl LifecycleController {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sink that reports `dop` as its negotiated DoP word.
+    struct NegotiatedSink(Option<DopContainerFormat>);
+
+    impl std::io::Write for NegotiatedSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl AudioOutput for NegotiatedSink {
+        fn dop_format(&self) -> Option<DopContainerFormat> {
+            self.0
+        }
+    }
+
+    #[test]
+    fn test_carrier_takes_the_negotiated_dop_word() {
+        use DopContainerFormat as C;
+        let configured = IdleCarrierFormat::DoP(C::S32Le);
+        // The device's word wins; a sink without one keeps the configured word.
+        let mut device = NegotiatedSink(Some(C::S24_3Le));
+        assert_eq!(
+            configured.for_output(&device),
+            IdleCarrierFormat::DoP(C::S24_3Le)
+        );
+        // Still visible through a borrowed sink (how `play` hands the device to a pipeline).
+        let borrowed: Box<dyn AudioOutput + '_> = Box::new(&mut device);
+        assert_eq!(
+            configured.for_output(&*borrowed),
+            IdleCarrierFormat::DoP(C::S24_3Le)
+        );
+        assert_eq!(configured.for_output(&NegotiatedSink(None)), configured);
+        // Non-DoP carriers are never changed.
+        for carrier in [IdleCarrierFormat::NativeDsd, IdleCarrierFormat::Pcm] {
+            assert_eq!(carrier.for_output(&NegotiatedSink(Some(C::S24Le))), carrier);
+        }
+    }
 
     #[test]
     fn test_lifecycle_startup_fade_in() {

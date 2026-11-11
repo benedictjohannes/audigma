@@ -5,7 +5,7 @@ use audigma_dsp::{
     Apodization, DitherType, DsdMultiplier, DspConfiguration, FilterPhase, OverloadPolicy,
     PcmRateHz, RateFamily, SampleFormat, StreamSpec, TargetFormat, TargetRateSpec,
 };
-use audigma_format::DsfPadMode;
+use audigma_format::{DopContainerFormat, DsfPadMode};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -90,6 +90,66 @@ pub enum OutputTransport {
     Pcm,
     Native,
     Dop,
+}
+
+/// `[output] dop_sample_format` options (`Design.md §5.2`): the PCM word that carries DoP.
+///
+/// `Auto` is a device negotiation rule, not a byte layout: the ALSA output tries
+/// [`Self::candidates`] in order and reports the word it opened, which the DoP packer then
+/// uses. Without a device (offline, `-o -`) only [`Self::fixed`] applies.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DopSampleFormat {
+    #[default]
+    #[serde(rename = "auto")]
+    Auto,
+    #[serde(rename = "s32le")]
+    S32Le,
+    #[serde(rename = "s24le")]
+    S24Le,
+    #[serde(rename = "s24_3le")]
+    S24_3Le,
+}
+
+impl DopSampleFormat {
+    /// Order `auto` tries the DoP words in: the 24-bit words first, `s32le` last.
+    ///
+    /// DoP v1.1 is defined on 24-bit samples. A DAC that also offers `S32_LE` may treat it as
+    /// true 32-bit PCM and never look for markers there (JadeAudio JA11: DoP over `S24_3LE`
+    /// plays, over `S32_LE` it does not), so `s32le` is only the fallback for DACs that have
+    /// no 24-bit format (FiiO K17: DoP over `S32_LE` plays). MPD uses the same rule.
+    pub const AUTO_ORDER: [DopContainerFormat; 3] = [
+        DopContainerFormat::S24_3Le,
+        DopContainerFormat::S24Le,
+        DopContainerFormat::S32Le,
+    ];
+
+    /// The pinned DoP word, or `None` for `auto`.
+    pub const fn fixed(self) -> Option<DopContainerFormat> {
+        match self {
+            Self::Auto => None,
+            Self::S32Le => Some(DopContainerFormat::S32Le),
+            Self::S24Le => Some(DopContainerFormat::S24Le),
+            Self::S24_3Le => Some(DopContainerFormat::S24_3Le),
+        }
+    }
+
+    /// The DoP words to try, in order, when opening a device: all of [`Self::AUTO_ORDER`]
+    /// for `auto`, else only the pinned one (no fallback).
+    pub fn candidates(self) -> &'static [DopContainerFormat] {
+        match self {
+            Self::Auto => &Self::AUTO_ORDER,
+            Self::S32Le => &[DopContainerFormat::S32Le],
+            Self::S24Le => &[DopContainerFormat::S24Le],
+            Self::S24_3Le => &[DopContainerFormat::S24_3Le],
+        }
+    }
+
+    /// The DoP word to write when there is no device to negotiate with: the pinned word, or
+    /// `s32le` for `auto`.
+    pub fn without_device(self) -> DopContainerFormat {
+        self.fixed().unwrap_or_default()
+    }
 }
 
 /// Offline output container (`Design.md §5.2–§5.3`). Not a config key: `audigma convert`
@@ -430,7 +490,7 @@ pub struct OutputConfig {
     pub target_node: Option<String>,
     pub device: Option<String>,
     pub transport: Option<OutputTransport>,
-    pub dop_sample_format: Option<SampleFormat>,
+    pub dop_sample_format: Option<DopSampleFormat>,
     pub reserve_device: Option<bool>,
     pub buffer_ms: Option<u32>,
     pub period_ms: Option<u32>,
@@ -446,6 +506,11 @@ impl OutputConfig {
     pub fn reserve_device_enabled(&self) -> bool {
         self.reserve_device
             .unwrap_or(self.backend == Some(OutputBackend::Alsa))
+    }
+
+    /// Returns the requested DoP word (`auto` by default).
+    pub fn dop_sample_format(&self) -> DopSampleFormat {
+        self.dop_sample_format.unwrap_or_default()
     }
 
     /// Returns the active volume control strategy (`VolumeControlMode::HardwareSoftwareFallback` by default).
@@ -1071,7 +1136,7 @@ impl Settings {
                     target_node: None,
                     device: None,
                     transport: Some(OutputTransport::Dop),
-                    dop_sample_format: Some(SampleFormat::S24_3Le),
+                    dop_sample_format: Some(DopSampleFormat::S24_3Le),
                     reserve_device: None,
                     buffer_ms: None,
                     period_ms: None,
@@ -1964,6 +2029,59 @@ rate_family = "44100"
 dsd_rate = "dsd64"
 "#;
         assert!(Settings::from_toml_str(dsd_over_pw).is_err());
+    }
+
+    #[test]
+    fn test_dop_sample_format_accepts_only_dop_carriers() {
+        let with = |fmt: &str| {
+            format!(
+                "schema_version = 1\n[output]\ntransport = \"dop\"\ndop_sample_format = \"{fmt}\"\n\
+                 [target]\nformat = \"dsd\"\nrate_family = \"44100\"\ndsd_rate = \"dsd64\"\n"
+            )
+        };
+        for (fmt, want) in [
+            ("auto", DopSampleFormat::Auto),
+            ("s32le", DopSampleFormat::S32Le),
+            ("s24le", DopSampleFormat::S24Le),
+            ("s24_3le", DopSampleFormat::S24_3Le),
+        ] {
+            let s = Settings::from_toml_str(&with(fmt)).unwrap();
+            assert_eq!(s.output.unwrap().dop_sample_format(), want);
+        }
+        // DoP needs a 24-bit word: 16-bit, float and native DSD words cannot carry it.
+        for fmt in ["s16le", "f32", "f64", "dsd_u32_be", "dsd_u32_le"] {
+            assert!(
+                matches!(
+                    Settings::from_toml_str(&with(fmt)),
+                    Err(SettingsError::TomlParse(_))
+                ),
+                "{fmt} must be rejected"
+            );
+        }
+        let unset =
+            Settings::from_toml_str(&with("auto").replace("dop_sample_format = \"auto\"\n", ""))
+                .unwrap();
+        assert_eq!(
+            unset.output.unwrap().dop_sample_format(),
+            DopSampleFormat::Auto
+        );
+    }
+
+    #[test]
+    fn test_dop_sample_format_resolution() {
+        use DopContainerFormat as C;
+        // `auto` tries the 24-bit words first, `s32le` last; a pinned word allows no fallback.
+        assert_eq!(
+            DopSampleFormat::Auto.candidates(),
+            &[C::S24_3Le, C::S24Le, C::S32Le]
+        );
+        assert_eq!(DopSampleFormat::S24Le.candidates(), &[C::S24Le]);
+        assert_eq!(DopSampleFormat::S24_3Le.candidates(), &[C::S24_3Le]);
+        assert_eq!(DopSampleFormat::S32Le.candidates(), &[C::S32Le]);
+        // Without a device, `auto` writes `s32le`.
+        assert_eq!(DopSampleFormat::Auto.fixed(), None);
+        assert_eq!(DopSampleFormat::Auto.without_device(), C::S32Le);
+        assert_eq!(DopSampleFormat::S24_3Le.without_device(), C::S24_3Le);
     }
 
     #[test]

@@ -62,9 +62,10 @@ pub fn run_convert(args: ConvertArgs) -> Result<(), CliError> {
         let target = settings.target.as_ref();
         let transport = output.and_then(|o| o.transport);
         if transport == Some(audigma_settings::OutputTransport::Dop) {
-            if output.and_then(|o| o.dop_sample_format).is_none() {
+            // There is no device to negotiate `auto` with, so the word must be pinned.
+            if output.and_then(|o| o.dop_sample_format().fixed()).is_none() {
                 return Err(CliError::Config(
-                    "writing DoP to stdout (-o -) requires an explicit [output] dop_sample_format"
+                    "writing DoP to stdout (-o -) requires an explicit [output] dop_sample_format (s32le, s24le or s24_3le; not auto)"
                         .to_string(),
                 ));
             }

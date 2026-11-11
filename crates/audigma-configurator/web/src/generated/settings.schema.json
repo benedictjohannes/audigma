@@ -125,6 +125,15 @@
         "tpdf"
       ]
     },
+    "DopSampleFormat": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "s32le",
+        "s24le",
+        "s24_3le"
+      ]
+    },
     "DriftCorrection": {
       "type": "string",
       "enum": [
@@ -426,7 +435,7 @@
         "dop_sample_format": {
           "anyOf": [
             {
-              "$ref": "#/$defs/SampleFormat"
+              "$ref": "#/$defs/DopSampleFormat"
             },
             {
               "type": "null"

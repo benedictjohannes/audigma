@@ -95,29 +95,36 @@ summary = "Plain PCM; used for PCM targets."
 key = "dop_sample_format"
 summary = "PCM word layout carrying DoP."
 description = """
-This setting only applies with `transport = "dop"`. It is the PCM word format that carries the DSD bits and markers. Pick what your DAC accepts.
+This setting only applies with `transport = "dop"`. It is the PCM word format that carries the DSD bits and markers.
+
+`auto` opens the first word the DAC accepts, in the order `s24_3le`, `s24le`, `s32le`. DoP is defined on 24-bit samples, and some DACs only detect it there even when they also offer 32-bit, so `s32le` is the fallback for DACs with no 24-bit format. Pick a word only to force it: if the DAC does not accept it, the device fails to open. Without a device (`audigma convert`), `auto` writes `s32le`; writing DoP to stdout (`-o -`) needs a pinned word.
 
 Not related to `target.sample_format`, which sets PCM target output.
 """
-default = "s32le"
+default = "auto"
 show_if = { key = "output.transport", eq = "dop" }
 applies_to = ["run", "play", "convert"]
 assist = ["alsa-detect"]
 
 [[field.options]]
+key = "auto"
+label = "Auto"
+summary = "Use the first DoP word the DAC accepts."
+
+[[field.options]]
 key = "s32le"
 label = "32-bit"
-summary = "DoP in a 32-bit word."
+summary = "DoP in the top 24 bits of a 32-bit word (ALSA `S32_LE`)."
 
 [[field.options]]
 key = "s24le"
 label = "24-bit (32-bit container)"
-summary = "DoP in a 24-bit word held in 4 bytes."
+summary = "DoP in the low 24 bits of a 4-byte word (ALSA `S24_LE`)."
 
 [[field.options]]
 key = "s24_3le"
 label = "24-bit packed"
-summary = "DoP in a 24-bit word packed into 3 bytes."
+summary = "DoP in a 24-bit word packed into 3 bytes (ALSA `S24_3LE`)."
 
 [[field]]
 key = "reserve_device"

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use audigma_dsp::config::{SampleFormat, TargetRateSpec};
 use audigma_dsp::rates::PcmRateHz;
 use audigma_engine::traits::AudioInput;
-use audigma_engine::{IdleCarrierFormat, LifecycleController, OfflinePipeline, StreamSink};
+use audigma_engine::{IdleCarrierFormat, LifecycleController, OfflinePipeline};
 use audigma_io::alsa::{AlsaAudioOutput, AlsaOutputConfig};
 use audigma_io::file::FileAudioInput;
 use audigma_io::stdio::StdioAudioInput;
@@ -188,6 +188,9 @@ pub fn run_play(args: PlayArgs) -> Result<(), CliError> {
     // 5. Build ALSA Output Driver
     let alsa_config = AlsaOutputConfig::from_settings(&settings, &target_spec)
         .map_err(|e| CliError::Other(format!("failed to configure ALSA output: {e}")))?;
+    // Opened before the banner: DoP `auto` only knows its word once the device is open.
+    let mut alsa_output = AlsaAudioOutput::open(alsa_config)
+        .map_err(|e| CliError::Other(format!("ALSA open failed: {e}")))?;
 
     if !args.json {
         eprintln!("audigma: starting hardware playback");
@@ -197,10 +200,11 @@ pub fn run_play(args: PlayArgs) -> Result<(), CliError> {
             input_rate.get(),
             input.info().original_channels
         );
-        eprintln!("  Device:        {}", alsa_config.device);
+        eprintln!("  Device:        {}", alsa_output.device());
         eprintln!(
             "  ALSA Format:   {} @ {} frames/s",
-            alsa_config.alsa_format, alsa_config.frame_rate_hz
+            alsa_output.alsa_format(),
+            alsa_output.frame_rate_hz()
         );
         match target_spec {
             TargetRateSpec::Dsd { bit_rate } => {
@@ -237,11 +241,9 @@ pub fn run_play(args: PlayArgs) -> Result<(), CliError> {
         );
     }
 
-    let mut alsa_output = AlsaAudioOutput::open(alsa_config)
-        .map_err(|e| CliError::Other(format!("ALSA open failed: {e}")))?;
-
-    // 6. Click-free Priming
-    let carrier = IdleCarrierFormat::from_settings(&settings, &target_spec);
+    // 6. Click-free Priming (in the DoP word the device was opened with)
+    let carrier =
+        IdleCarrierFormat::from_settings(&settings, &target_spec).for_output(&alsa_output);
 
     let mut lifecycle = LifecycleController::new(carrier, 256, 256);
     let prime_frames = (alsa_output.period_frames() * 2) as usize;
@@ -251,7 +253,8 @@ pub fn run_play(args: PlayArgs) -> Result<(), CliError> {
     let _ = alsa_output.write_all(&prime_buf);
 
     // 7. Stream audio through pipeline
-    let report = pipeline.run(&mut *input, Box::new(StreamSink(&mut alsa_output)))?;
+    // Passed as itself, not wrapped, so the pipeline's DoP packer sees the negotiated word.
+    let report = pipeline.run(&mut *input, Box::new(&mut alsa_output))?;
 
     // 8. Drain hardware
     alsa_output

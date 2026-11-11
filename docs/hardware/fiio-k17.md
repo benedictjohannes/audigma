@@ -21,7 +21,7 @@
 - **Multi-Bit PCM:**
   - **Formats:** `S16_LE`, `S32_LE`
   - **Sample Rates:** `44.1k`, `48k`, `88.2k`, `96k`, `176.4k`, `192k`, `352.8k`, `384k`, `705.6k`, `768k Hz`
-  - **DoP Support:** Supports DoP64 (`176.4 kHz`), DoP128 (`352.8 kHz`), and DoP256 (`705.6 kHz`) encapsulated in `S32_LE` (`s32le` MSB-justified `[0x00, LO, HI, MM]`).
+  - **DoP Support:** Supports DoP64 (`176.4 kHz`), DoP128 (`352.8 kHz`), and DoP256 (`705.6 kHz`) encapsulated in `S32_LE` (`s32le` MSB-justified `[0x00, LO, HI, MM]`). Verified 2026-11-11 (`transport = "dop"`, 44.1k and 96k sources). With no 24-bit format, `dop_sample_format = "auto"` falls back to `S32_LE` here.
 
 ## 3. Operational Notes & Invariants
 - Often actively used by `mpd` or PipeWire/WirePlumber on the host desktop; never assume exclusive ALSA availability without consulting the user first (see `AGENTS.md`).

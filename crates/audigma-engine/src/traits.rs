@@ -3,6 +3,7 @@
 //! Pure Rust abstractions with zero OS or C-FFI dependencies, enabling instant
 //! unit and integration testing with mock streams and in-memory buffers.
 
+use audigma_format::dop::DopContainerFormat;
 use audigma_format::{AudioDecoder, AudioStreamInfo, FormatError};
 use std::io::{Cursor, Seek, SeekFrom, Write};
 use thiserror::Error;
@@ -243,12 +244,45 @@ pub trait AudioOutput: Write + Send {
         None
     }
 
+    /// The DoP word this sink was opened with, when it negotiated one with a device
+    /// (`output.dop_sample_format = "auto"`, `Design.md §5.2`).
+    ///
+    /// DoP packers must write this word when it is `Some`: it is what the device was opened
+    /// for. `None` (files, pipes, non-DoP sinks) leaves the configured word in charge.
+    fn dop_format(&self) -> Option<DopContainerFormat> {
+        None
+    }
+
     /// Seeks to an offset in this sink. Fails with `ErrorKind::Unsupported` if not seekable.
     fn seek_sink(&mut self, _pos: SeekFrom) -> std::io::Result<u64> {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "seeking is not supported on this output sink",
         ))
+    }
+}
+
+// A borrowed sink is a sink: lets a caller hand `&mut device` to a pipeline (which boxes its
+// output) without hiding what the device reports, such as its negotiated DoP word.
+impl<T: AudioOutput + ?Sized> AudioOutput for &mut T {
+    fn can_seek(&self) -> bool {
+        (**self).can_seek()
+    }
+
+    fn xrun_count(&self) -> u64 {
+        (**self).xrun_count()
+    }
+
+    fn buffered_us(&self) -> Option<u64> {
+        (**self).buffered_us()
+    }
+
+    fn dop_format(&self) -> Option<DopContainerFormat> {
+        (**self).dop_format()
+    }
+
+    fn seek_sink(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        (**self).seek_sink(pos)
     }
 }
 

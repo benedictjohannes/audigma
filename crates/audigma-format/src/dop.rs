@@ -4,13 +4,13 @@
 //! per channel, prefixed by an 8-bit marker alternating `0x05` and `0xFA` on consecutive frames
 //! (synchronized across stereo channels).
 //!
-//! Three ALSA container alignments are supported:
-//! 1. `s32le` (32-bit container, MSB-justified `<< 8`): `0xMM_HI_LO_00`, written LE as `[0x00, LO, HI, MM]`.
-//! 2. `s24le` (32-bit container, LSB-justified in 32-bit): `0x00_MM_HI_LO`, written LE as `[LO, HI, MM, 0x00]`.
-//! 3. `s24_3le` (Packed 24-bit container, 3 bytes/sample): written LE as `[LO, HI, MM]`.
+//! Three ALSA container alignments are supported, each opened as its own ALSA format:
+//! 1. `s32le` (ALSA `S32_LE`, 32-bit container, MSB-justified `<< 8`): `0xMM_HI_LO_00`, written LE as `[0x00, LO, HI, MM]`.
+//! 2. `s24le` (ALSA `S24_LE`, 32-bit container, LSB-justified): `0x00_MM_HI_LO`, written LE as `[LO, HI, MM, 0x00]`.
+//! 3. `s24_3le` (ALSA `S24_3LE`, packed 24-bit container, 3 bytes/sample): written LE as `[LO, HI, MM]`.
 
 use crate::FormatError;
-use audigma_dsp::{DSD_IDLE_BYTE, SampleFormat};
+use audigma_dsp::DSD_IDLE_BYTE;
 use serde::{Deserialize, Serialize};
 
 /// First DoP v1.1 marker byte (`0x05`).
@@ -23,30 +23,25 @@ pub const DOP_MARKER_ODD: u8 = 0xFA;
 pub const DSD_BYTES_PER_DOP_FRAME: usize = 2;
 
 /// Supported ALSA container alignments for DoP v1.1 (`Design.md §5.2`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// This is also the `output.dop_sample_format` setting: only these three PCM words can carry
+/// the 24-bit DoP word, so any other sample format is rejected when the settings are parsed.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DopContainerFormat {
-    /// 32-bit little-endian container, MSB-justified (`0xMM_HI_LO_00` -> `[0x00, LO, HI, MM]`).
+    /// ALSA `S32_LE`: 32-bit little-endian container, MSB-justified (`0xMM_HI_LO_00` -> `[0x00, LO, HI, MM]`).
+    #[default]
     #[serde(rename = "s32le")]
     S32Le,
-    /// 32-bit little-endian container, LSB-justified in 24 bits (`0x00_MM_HI_LO` -> `[LO, HI, MM, 0x00]`).
+    /// ALSA `S24_LE`: 32-bit little-endian container, LSB-justified in 24 bits (`0x00_MM_HI_LO` -> `[LO, HI, MM, 0x00]`).
     #[serde(rename = "s24le")]
     S24Le,
-    /// Packed 24-bit little-endian container (`3 bytes/sample` -> `[LO, HI, MM]`).
+    /// ALSA `S24_3LE`: packed 24-bit little-endian container (`3 bytes/sample` -> `[LO, HI, MM]`).
     #[serde(rename = "s24_3le")]
     S24_3Le,
 }
 
 impl DopContainerFormat {
-    /// Converts a generic `SampleFormat` into a `DopContainerFormat` if it is a valid DoP carrier.
-    pub const fn from_sample_format(fmt: SampleFormat) -> Option<Self> {
-        match fmt {
-            SampleFormat::S32Le => Some(Self::S32Le),
-            SampleFormat::S24Le => Some(Self::S24Le),
-            SampleFormat::S24_3Le => Some(Self::S24_3Le),
-            _ => None,
-        }
-    }
-
     /// Returns the number of bytes per single-channel sample (`4` for `s32le`/`s24le`, `3` for `s24_3le`).
     #[inline]
     pub const fn bytes_per_sample(self) -> usize {

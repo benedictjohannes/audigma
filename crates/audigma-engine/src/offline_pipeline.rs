@@ -22,7 +22,7 @@ use audigma_dsp::PcmQuantizer;
 use audigma_dsp::config::{DspConfiguration, SampleFormat, TargetFormat, TargetRateSpec};
 use audigma_dsp::ftz::ScopedFtzDaz;
 use audigma_dsp::rates::PcmRateHz;
-use audigma_format::dop::{DopContainerFormat, DopPacker};
+use audigma_format::dop::DopPacker;
 use audigma_format::dsd_u32::{STEREO_DSD_U32_FRAME_BYTES, pack_stereo_dsd_u32_be};
 use audigma_format::dsf::{DsfBitOrder, DsfPadMode};
 use audigma_format::dsf_writer::DsfFileWriter;
@@ -187,17 +187,15 @@ impl<'a> ContainerWriter<'a> {
                         bytes_written: 0,
                     }),
                     OutputTransport::Dop => {
-                        let sample_format = settings
-                            .output
-                            .as_ref()
-                            .and_then(|o| o.dop_sample_format)
-                            .unwrap_or(SampleFormat::S32Le);
-                        let dop_fmt = match sample_format {
-                            SampleFormat::S32Le => DopContainerFormat::S32Le,
-                            SampleFormat::S24Le => DopContainerFormat::S24Le,
-                            SampleFormat::S24_3Le => DopContainerFormat::S24_3Le,
-                            _ => DopContainerFormat::S32Le,
-                        };
+                        // A device sink (`play`) reports the word it was opened with; a file or
+                        // pipe has none, so the configured word (`auto` = `s32le`) applies.
+                        let dop_fmt = output.dop_format().unwrap_or_else(|| {
+                            settings
+                                .output
+                                .as_ref()
+                                .map(|o| o.dop_sample_format().without_device())
+                                .unwrap_or_default()
+                        });
                         Ok(Self::RawDsdDop {
                             output,
                             packer: DopPacker::new(dop_fmt),

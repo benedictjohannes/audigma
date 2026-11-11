@@ -2,7 +2,8 @@
 //!
 //! Provides direct exclusive ALSA hardware egress supporting:
 //! - Native DSD (`DSD_U32_BE` / `DSD_U32_LE`)
-//! - DoP (`S32_LE`, `S24_LE`, `S24_3LE`)
+//! - DoP (`s32le` -> `S32_LE`, `s24le` -> `S24_LE`, `s24_3le` -> `S24_3LE`; `auto` opens the
+//!   first of these the device accepts and reports it via `AudioOutput::dop_format`)
 //! - High-Rate PCM (`S16_LE`, `S24_3LE`, `S32_LE`, `FLOAT_LE`)
 //!
 //! Features buffer and period configuration, automatic XRun recovery,
@@ -15,6 +16,7 @@ use alsa::{Direction, ValueOr};
 
 use audigma_dsp::config::SampleFormat;
 use audigma_engine::traits::{AudioOutput, EngineError};
+use audigma_format::dop::DopContainerFormat;
 use std::io::{ErrorKind, Result as IoResult, Write};
 use thiserror::Error;
 
@@ -63,6 +65,48 @@ impl From<AlsaOutputError> for EngineError {
     }
 }
 
+/// The ALSA sample format to open the device with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlsaFormatRequest {
+    /// One ALSA format string, e.g. "DSD_U32_BE", "S32_LE", "S24_3LE", "S16_LE".
+    Exact(String),
+    /// DoP: the words to try, in order; the first the device accepts for the channel count
+    /// and frame rate is opened. A single entry is a pinned word with no fallback.
+    Dop(Vec<DopContainerFormat>),
+}
+
+impl AlsaFormatRequest {
+    /// Human-readable request, e.g. `S32_LE` or `DoP [S24_3LE, S24_LE, S32_LE]`.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Exact(name) => name.clone(),
+            Self::Dop(words) => {
+                let names: Vec<&str> = words.iter().map(|w| dop_alsa_format(*w)).collect();
+                format!("DoP [{}]", names.join(", "))
+            }
+        }
+    }
+}
+
+/// The ALSA format whose bit placement matches a DoP word layout (`Design.md §5.2`):
+/// `s24le` is LSB-justified in 32 bits, which is ALSA `S24_LE`, not `S32_LE`.
+pub const fn dop_alsa_format(word: DopContainerFormat) -> &'static str {
+    match word {
+        DopContainerFormat::S32Le => "S32_LE",
+        DopContainerFormat::S24Le => "S24_LE",
+        DopContainerFormat::S24_3Le => "S24_3LE",
+    }
+}
+
+/// The first DoP word in `candidates` the device `accepts`, in order.
+#[cfg_attr(not(feature = "alsa"), allow(dead_code))]
+fn first_accepted_dop_word(
+    candidates: &[DopContainerFormat],
+    mut accepts: impl FnMut(DopContainerFormat) -> bool,
+) -> Option<DopContainerFormat> {
+    candidates.iter().copied().find(|&word| accepts(word))
+}
+
 /// Parameters for configuring an ALSA output stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlsaOutputConfig {
@@ -72,8 +116,8 @@ pub struct AlsaOutputConfig {
     pub channels: u32,
     /// ALSA hardware transport frame rate in Hz.
     pub frame_rate_hz: u32,
-    /// ALSA format string (e.g. "DSD_U32_BE", "S32_LE", "S24_3LE", "S16_LE").
-    pub alsa_format: String,
+    /// Sample format to open; DoP may list several words to negotiate.
+    pub format: AlsaFormatRequest,
     /// Target buffer size in milliseconds (e.g. 40 ms).
     pub buffer_ms: u32,
     /// Target period size in milliseconds (e.g. 5 ms).
@@ -86,7 +130,7 @@ impl Default for AlsaOutputConfig {
             device: "default".to_string(),
             channels: 2,
             frame_rate_hz: 44100,
-            alsa_format: "S16_LE".to_string(),
+            format: AlsaFormatRequest::Exact("S16_LE".to_string()),
             buffer_ms: 40,
             period_ms: 5,
         }
@@ -134,31 +178,26 @@ impl AlsaOutputConfig {
                             device,
                             channels,
                             frame_rate_hz,
-                            alsa_format: "DSD_U32_BE".to_string(),
+                            format: AlsaFormatRequest::Exact("DSD_U32_BE".to_string()),
                             buffer_ms,
                             period_ms,
                         })
                     }
                     audigma_settings::OutputTransport::Dop => {
                         let frame_rate_hz = bit_rate.to_dop_frame_rate().get();
-                        let sample_format = settings
+                        let candidates = settings
                             .output
                             .as_ref()
-                            .and_then(|o| o.dop_sample_format)
-                            .unwrap_or(SampleFormat::S32Le);
-
-                        let alsa_format = match sample_format {
-                            SampleFormat::S32Le | SampleFormat::S24Le => "S32_LE".to_string(),
-                            SampleFormat::S24_3Le => "S24_3LE".to_string(),
-                            SampleFormat::S16Le => "S16_LE".to_string(),
-                            other => return Err(AlsaOutputError::UnsupportedFormat(other)),
-                        };
+                            .map(|o| o.dop_sample_format())
+                            .unwrap_or_default()
+                            .candidates()
+                            .to_vec();
 
                         Ok(Self {
                             device,
                             channels,
                             frame_rate_hz,
-                            alsa_format,
+                            format: AlsaFormatRequest::Dop(candidates),
                             buffer_ms,
                             period_ms,
                         })
@@ -187,7 +226,7 @@ impl AlsaOutputConfig {
                     device,
                     channels,
                     frame_rate_hz,
-                    alsa_format,
+                    format: AlsaFormatRequest::Exact(alsa_format),
                     buffer_ms,
                     period_ms,
                 })
@@ -219,6 +258,10 @@ pub struct AlsaAudioOutput {
     #[cfg(feature = "alsa")]
     pcm: PCM,
     config: AlsaOutputConfig,
+    /// ALSA format the device was opened with.
+    alsa_format: String,
+    /// DoP word the device was opened with (`None` for PCM and native DSD).
+    dop_format: Option<DopContainerFormat>,
     frame_bytes: usize,
     residue: Vec<u8>,
     frames_written: u64,
@@ -232,10 +275,9 @@ impl AlsaAudioOutput {
     /// Opens and configures an ALSA playback device according to the given configuration.
     #[cfg(feature = "alsa")]
     pub fn open(config: AlsaOutputConfig) -> Result<Self, AlsaOutputError> {
-        let (format, bytes_per_sample) = parse_alsa_format(&config.alsa_format)?;
-        let frame_bytes = bytes_per_sample * (config.channels as usize);
-        if frame_bytes == 0 {
-            return Err(AlsaOutputError::Alsa("invalid frame byte size 0".into()));
+        // Fail on a bad format string before touching the device.
+        if let AlsaFormatRequest::Exact(name) = &config.format {
+            parse_alsa_format(name)?;
         }
 
         let pcm = PCM::new(&config.device, Direction::Playback, false).map_err(|e| {
@@ -244,6 +286,21 @@ impl AlsaAudioOutput {
                 config.device
             ))
         })?;
+
+        // Negotiate on the handle being opened, so the word cannot change between the
+        // check and the open (`Design.md §5.2`).
+        let (alsa_format, dop_format) = match &config.format {
+            AlsaFormatRequest::Exact(name) => (name.clone(), None),
+            AlsaFormatRequest::Dop(candidates) => {
+                let word = Self::negotiate_dop_word(&pcm, &config, candidates)?;
+                (dop_alsa_format(word).to_string(), Some(word))
+            }
+        };
+        let (format, bytes_per_sample) = parse_alsa_format(&alsa_format)?;
+        let frame_bytes = bytes_per_sample * (config.channels as usize);
+        if frame_bytes == 0 {
+            return Err(AlsaOutputError::Alsa("invalid frame byte size 0".into()));
+        }
 
         let hwp = HwParams::any(&pcm).map_err(|e| {
             AlsaOutputError::HwParamsFailed(format!("failed to query hw_params: {e}"))
@@ -255,8 +312,7 @@ impl AlsaAudioOutput {
 
         hwp.set_format(format).map_err(|e| {
             AlsaOutputError::HwParamsFailed(format!(
-                "device does not support format '{}': {e}",
-                config.alsa_format
+                "device does not support format '{alsa_format}': {e}"
             ))
         })?;
 
@@ -304,6 +360,8 @@ impl AlsaAudioOutput {
         Ok(Self {
             pcm,
             config,
+            alsa_format,
+            dop_format,
             frame_bytes,
             residue: Vec::with_capacity(frame_bytes),
             frames_written: 0,
@@ -312,6 +370,51 @@ impl AlsaAudioOutput {
             period_frames,
             buffer_frames,
         })
+    }
+
+    /// Picks the DoP word to open: the first candidate the device accepts with the configured
+    /// channel count at exactly the DoP frame rate. A single candidate (a pinned
+    /// `dop_sample_format`) is returned as is, so the open reports its own precise error.
+    #[cfg(feature = "alsa")]
+    fn negotiate_dop_word(
+        pcm: &PCM,
+        config: &AlsaOutputConfig,
+        candidates: &[DopContainerFormat],
+    ) -> Result<DopContainerFormat, AlsaOutputError> {
+        if let [only] = candidates {
+            return Ok(*only);
+        }
+        let picked = first_accepted_dop_word(candidates, |word| {
+            let Ok((format, _)) = parse_alsa_format(dop_alsa_format(word)) else {
+                return false;
+            };
+            // A fresh configuration space per word: a refused word must not narrow the next.
+            let Ok(hwp) = HwParams::any(pcm) else {
+                return false;
+            };
+            hwp.set_access(Access::RWInterleaved).is_ok()
+                && hwp.set_format(format).is_ok()
+                && hwp.set_channels(config.channels).is_ok()
+                && hwp.test_rate(config.frame_rate_hz).is_ok()
+        });
+        match picked {
+            Some(word) => {
+                tracing::info!(
+                    target: "audigma::alsa",
+                    device = %config.device,
+                    dop_format = ?word,
+                    alsa_format = dop_alsa_format(word),
+                    "DoP word negotiated"
+                );
+                Ok(word)
+            }
+            None => Err(AlsaOutputError::HwParamsFailed(format!(
+                "device accepts none of {} for {} channels at {} Hz",
+                config.format.describe(),
+                config.channels,
+                config.frame_rate_hz
+            ))),
+        }
     }
 
     #[cfg(not(feature = "alsa"))]
@@ -324,9 +427,9 @@ impl AlsaAudioOutput {
         &self.config.device
     }
 
-    /// Returns the configured ALSA format string.
+    /// Returns the ALSA format the device was opened with (the negotiated one for DoP `auto`).
     pub fn alsa_format(&self) -> &str {
-        &self.config.alsa_format
+        &self.alsa_format
     }
 
     /// Returns the hardware frame rate in Hz.
@@ -541,6 +644,10 @@ impl AudioOutput for AlsaAudioOutput {
         false
     }
 
+    fn dop_format(&self) -> Option<DopContainerFormat> {
+        self.dop_format
+    }
+
     fn xrun_count(&self) -> u64 {
         self.xrun_count
     }
@@ -569,7 +676,9 @@ mod tests {
     use super::*;
     use audigma_dsp::config::{SampleFormat, TargetRateSpec};
     use audigma_dsp::rates::{DsdBitRateHz, PcmRateHz};
-    use audigma_settings::{OutputBackend, OutputConfig, OutputTransport, Settings};
+    use audigma_settings::{
+        DopSampleFormat, OutputBackend, OutputConfig, OutputTransport, Settings,
+    };
 
     #[test]
     #[cfg(feature = "alsa")]
@@ -621,40 +730,115 @@ mod tests {
         assert_eq!(cfg.channels, 2);
         // DSD256 at 11,289,600 Hz / 32 = 352,800 frames/s
         assert_eq!(cfg.frame_rate_hz, 352_800);
-        assert_eq!(cfg.alsa_format, "DSD_U32_BE");
+        assert_eq!(cfg.format, AlsaFormatRequest::Exact("DSD_U32_BE".into()));
         assert_eq!(cfg.buffer_ms, 50);
         assert_eq!(cfg.period_ms, 10);
     }
 
     #[test]
     fn test_alsa_output_config_dop() {
-        let mut settings = Settings::default_offline(audigma_settings::OutputContainer::Raw);
-        settings.output = Some(OutputConfig {
-            backend: Some(OutputBackend::Alsa),
-            target_node: None,
-            device: Some("hw:CARD=JA11,DEV=0".to_string()),
-            transport: Some(OutputTransport::Dop),
-            dop_sample_format: Some(SampleFormat::S24_3Le),
-            volume_control: None,
-            device_wait_ms: None,
-            device_wait_expiry: None,
-            keep_audio_sink_ms: None,
-            mixer_control: None,
-            reserve_device: Some(true),
-            buffer_ms: Some(40),
-            period_ms: Some(5),
-        });
+        use DopContainerFormat as C;
+        // `auto` (and unset) lists every DoP word to negotiate; a pinned word lists only itself.
+        for (requested, candidates) in [
+            (None, vec![C::S24_3Le, C::S24Le, C::S32Le]),
+            (
+                Some(DopSampleFormat::Auto),
+                vec![C::S24_3Le, C::S24Le, C::S32Le],
+            ),
+            (Some(DopSampleFormat::S32Le), vec![C::S32Le]),
+            (Some(DopSampleFormat::S24Le), vec![C::S24Le]),
+            (Some(DopSampleFormat::S24_3Le), vec![C::S24_3Le]),
+        ] {
+            let mut settings = Settings::default_offline(audigma_settings::OutputContainer::Raw);
+            settings.output = Some(OutputConfig {
+                backend: Some(OutputBackend::Alsa),
+                target_node: None,
+                device: Some("hw:CARD=JA11,DEV=0".to_string()),
+                transport: Some(OutputTransport::Dop),
+                dop_sample_format: requested,
+                volume_control: None,
+                device_wait_ms: None,
+                device_wait_expiry: None,
+                keep_audio_sink_ms: None,
+                mixer_control: None,
+                reserve_device: Some(true),
+                buffer_ms: Some(40),
+                period_ms: Some(5),
+            });
 
-        let target_spec = TargetRateSpec::Dsd {
-            bit_rate: DsdBitRateHz::DSD128,
+            let target_spec = TargetRateSpec::Dsd {
+                bit_rate: DsdBitRateHz::DSD128,
+            };
+
+            let cfg = AlsaOutputConfig::from_settings(&settings, &target_spec).unwrap();
+            assert_eq!(cfg.device, "hw:CARD=JA11,DEV=0");
+            assert_eq!(cfg.channels, 2);
+            // DSD128 at 5,644,800 Hz / 16 = 352,800 frames/s
+            assert_eq!(cfg.frame_rate_hz, 352_800);
+            assert_eq!(
+                cfg.format,
+                AlsaFormatRequest::Dop(candidates),
+                "{requested:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dop_word_alsa_formats() {
+        // Each DoP word opens the ALSA format whose bit placement it matches, so the marker
+        // lands in the DAC's top 24 bits (`Design.md §5.2`).
+        assert_eq!(dop_alsa_format(DopContainerFormat::S32Le), "S32_LE");
+        assert_eq!(dop_alsa_format(DopContainerFormat::S24Le), "S24_LE");
+        assert_eq!(dop_alsa_format(DopContainerFormat::S24_3Le), "S24_3LE");
+    }
+
+    #[test]
+    fn test_dop_word_negotiation_order() {
+        use DopContainerFormat as C;
+        let auto = DopSampleFormat::Auto.candidates();
+        let device = |supported: &'static [&'static str]| {
+            move |w: C| supported.contains(&dop_alsa_format(w))
         };
+        // JadeAudio JA11: packed 24 and 32-bit PCM. Its DoP detector works on the 24-bit
+        // altset only, so `S24_3LE` must win.
+        assert_eq!(
+            first_accepted_dop_word(auto, device(&["S16_LE", "S24_3LE", "S32_LE"])),
+            Some(C::S24_3Le)
+        );
+        // FiiO K17: no 24-bit format, so the `S32_LE` fallback.
+        assert_eq!(
+            first_accepted_dop_word(auto, device(&["S16_LE", "S32_LE"])),
+            Some(C::S32Le)
+        );
+        // A 24-bit word beats `S32_LE` whichever 24-bit form the card has.
+        assert_eq!(
+            first_accepted_dop_word(auto, device(&["S24_LE", "S32_LE"])),
+            Some(C::S24Le)
+        );
+        // I2S-style card exposing only `S24_LE`.
+        assert_eq!(
+            first_accepted_dop_word(auto, device(&["S16_LE", "S24_LE"])),
+            Some(C::S24Le)
+        );
+        // No 24-bit carrier at all.
+        assert_eq!(first_accepted_dop_word(auto, device(&["S16_LE"])), None);
+        // A pinned word never falls back.
+        assert_eq!(
+            first_accepted_dop_word(DopSampleFormat::S24Le.candidates(), device(&["S32_LE"])),
+            None
+        );
+    }
 
-        let cfg = AlsaOutputConfig::from_settings(&settings, &target_spec).unwrap();
-        assert_eq!(cfg.device, "hw:CARD=JA11,DEV=0");
-        assert_eq!(cfg.channels, 2);
-        // DSD128 at 5,644,800 Hz / 16 = 352,800 frames/s
-        assert_eq!(cfg.frame_rate_hz, 352_800);
-        assert_eq!(cfg.alsa_format, "S24_3LE");
+    #[test]
+    fn test_format_request_describe() {
+        assert_eq!(
+            AlsaFormatRequest::Exact("S32_LE".into()).describe(),
+            "S32_LE"
+        );
+        assert_eq!(
+            AlsaFormatRequest::Dop(DopSampleFormat::Auto.candidates().to_vec()).describe(),
+            "DoP [S24_3LE, S24_LE, S32_LE]"
+        );
     }
 
     #[test]
@@ -665,7 +849,7 @@ mod tests {
             target_node: None,
             device: Some("hw:0,0".to_string()),
             transport: Some(OutputTransport::Pcm),
-            dop_sample_format: Some(SampleFormat::S32Le),
+            dop_sample_format: Some(DopSampleFormat::S32Le),
             volume_control: None,
             device_wait_ms: None,
             device_wait_expiry: None,
@@ -685,7 +869,7 @@ mod tests {
         assert_eq!(cfg.device, "hw:0,0");
         assert_eq!(cfg.channels, 2);
         assert_eq!(cfg.frame_rate_hz, 768_000);
-        assert_eq!(cfg.alsa_format, "S32_LE");
+        assert_eq!(cfg.format, AlsaFormatRequest::Exact("S32_LE".into()));
         assert_eq!(cfg.buffer_ms, 40);
         assert_eq!(cfg.period_ms, 5);
     }
