@@ -245,13 +245,37 @@ description = """
 How long the daemon keeps waiting when the DAC is absent at start or disappears (power-cycle, unplug). The process never crashes on device loss.
 
 - `-1`: wait forever; playback resumes when the DAC returns.
-- `0`: exit immediately (fail fast).
-- a positive number: exit after that many milliseconds.
+- `0`: give up immediately (fail fast).
+- a positive number: give up after that many milliseconds.
+
+What giving up means is set by `device_wait_expiry`.
 """
 default = -1
 applies_to = ["run"]
 recommended.interactive-desktop = { value = -1, why = "always ready: the DAC returns and playback resumes." }
 recommended.headless-appliance = { value = -1, why = "the daemon self-heals when the DAC returns." }
+
+[[field]]
+key = "device_wait_expiry"
+summary = "What the daemon does when the device wait runs out."
+description = """
+Applies when `device_wait_ms` is `0` (device absent at start, or at a resume) or a positive number that has elapsed.
+"""
+default = "exit"
+applies_to = ["run"]
+recommended.interactive-desktop = { value = "pause", why = "the daemon and tray stay up; resume once the DAC is back." }
+
+[[field.options]]
+key = "exit"
+label = "Exit"
+summary = "Stop the process with an error."
+description = "The process exits with an error. A supervisor such as systemd can restart it."
+
+[[field.options]]
+key = "pause"
+label = "Pause"
+summary = "Release everything and wait for `audigma resume`."
+description = "Tears the pipeline down and keeps the process, control socket and tray alive in the paused state. Run `audigma resume` (or use the tray) once the DAC is back. A device missing at start also starts the daemon paused."
 
 [[field]]
 key = "keep_audio_sink_ms"
@@ -263,7 +287,7 @@ While the DAC is gone, audigma keeps its PipeWire sink and silently drains audio
 - `0`: remove it at once.
 - a positive number: remove it after that many milliseconds.
 
-Values longer than a positive `device_wait_ms` trigger a warning, because the daemon exits first.
+Values longer than a positive `device_wait_ms` trigger a warning, because the daemon exits (or pauses) first.
 """
 default = 5000
 applies_to = ["run"]

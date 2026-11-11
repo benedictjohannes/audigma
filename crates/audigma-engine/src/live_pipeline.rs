@@ -83,6 +83,8 @@ pub enum DaemonState {
     Reconfiguring,
     Recovering,
     DeviceLost,
+    /// Pipeline torn down and device released; the process, control socket and lock stay up.
+    Paused,
 }
 
 impl DaemonState {
@@ -99,6 +101,7 @@ impl DaemonState {
             Self::Reconfiguring => "Reconfiguring",
             Self::Recovering => "Recovering",
             Self::DeviceLost => "DeviceLost",
+            Self::Paused => "Paused",
         }
     }
 
@@ -113,6 +116,7 @@ impl DaemonState {
             6 => Self::Reconfiguring,
             7 => Self::Recovering,
             8 => Self::DeviceLost,
+            9 => Self::Paused,
             _ => Self::Stopped,
         }
     }
@@ -212,6 +216,8 @@ impl std::fmt::Display for DaemonOutputFormat {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DaemonTelemetry {
     pub state: DaemonState,
+    /// Set while `state` is `Paused`.
+    pub pause_reason: Option<PauseReason>,
     pub input_rate_hz: u32,
     pub output_format: DaemonOutputFormat,
     pub output_rate_hz: u32,
@@ -282,7 +288,7 @@ struct TelemetryState {
     input_rate_hz: AtomicU32,
     output_format: AtomicU8,
     output_rate_hz: AtomicU32,
-    filter: String,
+    filter: Mutex<String>,
     preamp_db: AtomicU64,
     volume_db: AtomicU64,
     volume_percent: AtomicU64,
@@ -312,6 +318,42 @@ struct TelemetryState {
     late_dsp_tiles: AtomicU64,
 }
 
+/// Why the daemon is (or is about to be) paused.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum PauseReason {
+    /// A client or the tray asked for it.
+    Requested = 1,
+    /// `[output] device_wait_expiry = "pause"` and the device wait ran out.
+    DeviceWaitExpired = 2,
+}
+
+impl PauseReason {
+    fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            1 => Some(Self::Requested),
+            2 => Some(Self::DeviceWaitExpired),
+            _ => None,
+        }
+    }
+}
+
+/// Pause/resume request flags shared between control clients and the supervisor.
+#[derive(Default)]
+struct PauseResume {
+    pause_requested: AtomicBool,
+    pause_reason: AtomicU8,
+    resume_requested: AtomicBool,
+    resume_error: Mutex<Option<String>>,
+}
+
+fn lock_unpoisoned<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// How often a blocked pause/resume request polls for the supervisor's answer.
+const PAUSE_RESUME_POLL: Duration = Duration::from_millis(10);
+
 /// Shared control and telemetry state handle for the live daemon.
 #[derive(Clone)]
 pub struct DaemonControlHandle {
@@ -322,6 +364,7 @@ pub struct DaemonControlHandle {
     volume_mode: Arc<AtomicU8>,
     is_muted: Arc<AtomicBool>,
     telemetry: Arc<TelemetryState>,
+    lifecycle: Arc<PauseResume>,
     daemon_start: Instant,
 }
 
@@ -338,7 +381,7 @@ impl DaemonControlHandle {
             input_rate_hz: AtomicU32::new(input_rate),
             output_format: AtomicU8::new(output_format as u8),
             output_rate_hz: AtomicU32::new(output_rate),
-            filter: filter.to_string(),
+            filter: Mutex::new(filter.to_string()),
             preamp_db: AtomicU64::new(preamp_db.to_bits()),
             volume_db: AtomicU64::new(0.0f64.to_bits()),
             volume_percent: AtomicU64::new(100.0f64.to_bits()),
@@ -375,6 +418,7 @@ impl DaemonControlHandle {
             volume_mode: Arc::new(AtomicU8::new(DaemonVolumeMode::Software as u8)),
             is_muted: Arc::new(AtomicBool::new(false)),
             telemetry: Arc::new(telemetry),
+            lifecycle: Arc::new(PauseResume::default()),
             daemon_start: Instant::now(),
         }
     }
@@ -387,6 +431,144 @@ impl DaemonControlHandle {
     #[inline]
     pub fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
+    }
+
+    /// True while the audio pipeline should keep running: not stopping and not pausing.
+    /// Pipeline loops use this; the control server and supervisor use [`Self::is_running`].
+    #[inline]
+    pub fn is_active(&self) -> bool {
+        self.is_running() && !self.lifecycle.pause_requested.load(Ordering::SeqCst)
+    }
+
+    #[inline]
+    pub fn pause_requested(&self) -> bool {
+        self.lifecycle.pause_requested.load(Ordering::SeqCst)
+    }
+
+    /// Flags a pause without waiting. The first reason wins while a pause is pending.
+    pub fn request_pause(&self, reason: PauseReason) {
+        if !self.lifecycle.pause_requested.swap(true, Ordering::SeqCst) {
+            self.lifecycle
+                .pause_reason
+                .store(reason as u8, Ordering::SeqCst);
+        }
+    }
+
+    /// Why the daemon is paused (or about to be); `None` while running.
+    pub fn pause_reason(&self) -> Option<PauseReason> {
+        PauseReason::from_u8(self.lifecycle.pause_reason.load(Ordering::SeqCst))
+    }
+
+    /// Asks the supervisor to tear the pipeline down and wait; returns once the device is
+    /// released (state `Paused`). A no-op when already paused.
+    pub fn pause_and_wait(&self, timeout: Duration) -> Result<(), String> {
+        if self.state() == DaemonState::Paused {
+            return Ok(());
+        }
+        if !self.is_running() {
+            return Err("daemon is stopping".to_string());
+        }
+        self.request_pause(PauseReason::Requested);
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.state() == DaemonState::Paused {
+                return Ok(());
+            }
+            if !self.is_running() {
+                return Err("daemon is stopping".to_string());
+            }
+            if Instant::now() >= deadline {
+                return Err("timed out waiting for the pipeline to pause".to_string());
+            }
+            std::thread::sleep(PAUSE_RESUME_POLL);
+        }
+    }
+
+    /// Asks a paused supervisor to rebuild the pipeline; returns once it has accepted the
+    /// (re-read) configuration, or with its error (the daemon then stays paused). A no-op when
+    /// not paused.
+    pub fn resume_and_wait(&self, timeout: Duration) -> Result<(), String> {
+        if self.state() != DaemonState::Paused {
+            return if self.pause_requested() {
+                Err("pause in progress; retry once the daemon is paused".to_string())
+            } else {
+                Ok(())
+            };
+        }
+        lock_unpoisoned(&self.lifecycle.resume_error).take();
+        self.lifecycle
+            .resume_requested
+            .store(true, Ordering::SeqCst);
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(err) = lock_unpoisoned(&self.lifecycle.resume_error).take() {
+                return Err(err);
+            }
+            if self.state() != DaemonState::Paused {
+                return Ok(());
+            }
+            if !self.is_running() {
+                return Err("daemon is stopping".to_string());
+            }
+            if Instant::now() >= deadline {
+                self.lifecycle
+                    .resume_requested
+                    .store(false, Ordering::SeqCst);
+                return Err("timed out waiting for the pipeline to resume".to_string());
+            }
+            std::thread::sleep(PAUSE_RESUME_POLL);
+        }
+    }
+
+    /// Supervisor side of a pause: marks the daemon `Paused`, then parks until a resume request
+    /// is accepted (`true`) or the daemon is stopped (`false`). `reload` re-reads the
+    /// configuration for each resume request; its error is handed to the requester and the
+    /// daemon stays paused.
+    pub fn park_until_resume(
+        &self,
+        poll: Duration,
+        mut reload: impl FnMut() -> Result<(), String>,
+    ) -> bool {
+        // A resume that arrived before the pause completed referred to an earlier pause.
+        self.lifecycle
+            .resume_requested
+            .store(false, Ordering::SeqCst);
+        self.set_state(DaemonState::Paused);
+        self.lifecycle
+            .pause_requested
+            .store(false, Ordering::SeqCst);
+        while self.is_running() {
+            if self
+                .lifecycle
+                .resume_requested
+                .swap(false, Ordering::SeqCst)
+            {
+                match reload() {
+                    Ok(()) => {
+                        self.lifecycle.pause_reason.store(0, Ordering::SeqCst);
+                        self.set_state(DaemonState::Preparing);
+                        return true;
+                    }
+                    Err(e) => *lock_unpoisoned(&self.lifecycle.resume_error) = Some(e),
+                }
+            }
+            std::thread::sleep(poll);
+        }
+        false
+    }
+
+    /// Replaces the configuration-derived telemetry after a resume re-read the config.
+    pub fn reconfigure(
+        &self,
+        input_rate_hz: u32,
+        output_format: DaemonOutputFormat,
+        output_rate_hz: u32,
+        filter: &str,
+        preamp_db: f64,
+    ) {
+        self.set_stream_config(input_rate_hz, output_format, output_rate_hz);
+        *lock_unpoisoned(&self.telemetry.filter) = filter.to_string();
+        store_f64(&self.telemetry.preamp_db, preamp_db);
     }
 
     #[inline]
@@ -484,12 +666,15 @@ impl DaemonControlHandle {
 
         DaemonTelemetry {
             state: self.state(),
+            pause_reason: self
+                .pause_reason()
+                .filter(|_| self.state() == DaemonState::Paused),
             input_rate_hz: self.telemetry.input_rate_hz.load(Ordering::Relaxed),
             output_format: DaemonOutputFormat::from_u8(
                 self.telemetry.output_format.load(Ordering::Relaxed),
             ),
             output_rate_hz: self.telemetry.output_rate_hz.load(Ordering::Relaxed),
-            filter: self.telemetry.filter.clone(),
+            filter: lock_unpoisoned(&self.telemetry.filter).clone(),
             volume_db: load_f64(&self.telemetry.volume_db),
             volume_percent: load_f64(&self.telemetry.volume_percent),
             volume_mode: self.get_volume_mode(),
@@ -1071,7 +1256,7 @@ impl LivePipeline {
         let mut last_hw_vol: Option<f64> = None;
         let mut last_hw_mute: Option<bool> = None;
 
-        while control.is_running() {
+        while control.is_active() {
             // Check for dynamic rate changes
             if pending_rate_switch.is_none() {
                 if let Some(new_rate) = input.check_rate_change() {
@@ -1316,7 +1501,7 @@ impl LivePipeline {
                         channels: self.plan.stream_spec.channels,
                     });
                 }
-                if !control.is_running() {
+                if !control.is_active() {
                     return Ok(StreamExitReason::Stopped);
                 }
             }

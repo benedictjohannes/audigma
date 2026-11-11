@@ -1,4 +1,4 @@
-//! Handlers for daemon control and IPC subcommands (`stop`, `status`, `set`).
+//! Handlers for daemon control and IPC subcommands (`stop`, `pause`, `resume`, `status`, `set`).
 
 use clap::{Args, Subcommand};
 use serde_json::json;
@@ -10,6 +10,18 @@ use crate::volume::{VolumeArg, parse_volume_arg, validate_volume_db};
 
 #[derive(Args, Debug)]
 pub struct StopArgs {
+    #[command(flatten)]
+    pub instance: InstanceArgs,
+}
+
+#[derive(Args, Debug)]
+pub struct PauseArgs {
+    #[command(flatten)]
+    pub instance: InstanceArgs,
+}
+
+#[derive(Args, Debug)]
+pub struct ResumeArgs {
     #[command(flatten)]
     pub instance: InstanceArgs,
 }
@@ -65,6 +77,21 @@ fn resolve_target(explicit: Option<&str>) -> Result<Instance, CliError> {
 }
 
 fn print_telemetry(telem: &audigma_engine::DaemonTelemetry) {
+    if telem.state == audigma_engine::DaemonState::Paused {
+        let why = match telem.pause_reason {
+            Some(audigma_engine::PauseReason::DeviceWaitExpired) => " (device not found)",
+            _ => "",
+        };
+        println!("  State:               {}{why}", telem.state);
+        // No pipeline exists while paused; only process-level facts are meaningful.
+        println!("  Uptime:              {}s", telem.daemon_uptime_secs);
+        let mute_str = if telem.is_muted { " [MUTED]" } else { "" };
+        println!(
+            "  Volume:              {:.1} dB ({:.0}%){mute_str}",
+            telem.volume_db, telem.volume_percent
+        );
+        return;
+    }
     println!("  State:               {}", telem.state);
     if let Some(ref target) = telem.device_target {
         println!("  Device Target:       {}", target);
@@ -127,6 +154,39 @@ fn print_telemetry(telem: &audigma_engine::DaemonTelemetry) {
     if telem.rate_switch_count > 0 {
         println!("  Rate Switches:       {}", telem.rate_switch_count);
     }
+}
+
+/// Sends a request that must reach a running daemon (`pause`/`resume`); `verb` names it in output.
+fn send_lifecycle(instance: Option<&str>, request: IpcRequest, done: &str) -> Result<(), CliError> {
+    let target = resolve_target(instance)?;
+    match ControlClient::send(&target, request) {
+        Ok(IpcResponse::Ok) => {
+            eprintln!("audigma: instance '{}' {done}.", target.name());
+            Ok(())
+        }
+        Ok(IpcResponse::Error(msg)) => Err(CliError::Daemon(msg)),
+        Ok(_) => Ok(()),
+        Err(IpcError::DaemonNotRunning(name)) => Err(CliError::Daemon(format!(
+            "instance '{name}' is not running"
+        ))),
+        Err(e) => Err(CliError::Ipc(e)),
+    }
+}
+
+pub fn run_pause(args: PauseArgs) -> Result<(), CliError> {
+    send_lifecycle(
+        args.instance.instance.as_deref(),
+        IpcRequest::Pause,
+        "paused",
+    )
+}
+
+pub fn run_resume(args: ResumeArgs) -> Result<(), CliError> {
+    send_lifecycle(
+        args.instance.instance.as_deref(),
+        IpcRequest::Resume,
+        "resumed",
+    )
 }
 
 pub fn run_stop(args: StopArgs) -> Result<(), CliError> {

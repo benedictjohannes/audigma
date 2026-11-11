@@ -2,6 +2,8 @@
 
 pub const DAEMON_START: &str = "daemon_start";
 pub const DAEMON_STOP: &str = "daemon_stop";
+pub const DAEMON_PAUSE: &str = "daemon_pause";
+pub const DAEMON_RESUME: &str = "daemon_resume";
 pub const DEVICE_LOCK: &str = "device_lock";
 pub const RT_PRIORITY: &str = "rt_priority";
 pub const CONTROL_SOCKET_BOUND: &str = "control_socket_bound";

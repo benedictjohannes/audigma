@@ -21,6 +21,8 @@ use audigma_io::alsa::{
 use audigma_io::dbus::DeviceReservation;
 #[cfg(feature = "pipewire")]
 use audigma_io::pipewire::{PipeWirePcmOutput, PipeWireVirtualSink};
+use audigma_engine::PauseReason;
+use audigma_settings::DeviceWaitExpiry;
 use audigma_settings::{InputBackend, OutputBackend, Settings};
 use clap::Args;
 
@@ -50,27 +52,19 @@ pub struct RunArgs {
     pub instance: super::InstanceArgs,
 }
 
-pub fn run_run(args: RunArgs) -> Result<(), CliError> {
-    let instance = match args.instance.instance.clone() {
-        Some(name) => Instance::new(name)?,
-        None => Instance::default_instance(),
-    };
-    let daemon_start_time = Instant::now();
-    let config_path = resolve_config_path(args.config.as_deref());
+/// Loads, validates and instance-names the configuration (`run` start and every `resume`).
+fn load_settings(config_path: &std::path::Path, instance: &Instance) -> Result<Settings, CliError> {
     if !config_path.exists() {
-        return Err(CliError::ConfigNotFound { path: config_path });
+        return Err(CliError::ConfigNotFound {
+            path: config_path.to_path_buf(),
+        });
     }
-
-    let content = std::fs::read_to_string(&config_path)?;
+    let content = std::fs::read_to_string(config_path)?;
     let mut settings = Settings::from_toml_str(&content)?;
     settings.validate()?;
     for warning in settings.warnings() {
         tracing::warn!(event = "config_warning", "{warning}");
     }
-
-    // Take the single-instance lock before touching any device or PipeWire node, so a duplicate
-    // instance fails fast without disturbing the running one.
-    let instance_lock = instance.acquire_lock()?;
 
     // An explicit input node name wins; otherwise derive one from the instance so that
     // concurrent instances never create identically named virtual sinks.
@@ -82,7 +76,179 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
     {
         input.node_name = Some(format!("audigma_sink_{}", instance.name()));
     }
+    Ok(settings)
+}
 
+/// Daemon-level telemetry values derived from a configuration.
+struct StreamSummary {
+    input_rate_hz: u32,
+    output_format: DaemonOutputFormat,
+    output_rate_hz: u32,
+    filter: String,
+    preamp_db: f64,
+}
+
+fn summarize(settings: &Settings) -> Result<StreamSummary, CliError> {
+    let in_cfg = settings
+        .input
+        .as_ref()
+        .ok_or_else(|| CliError::Config("missing [input] section in config".to_string()))?;
+    if settings.output.is_none() {
+        return Err(CliError::Config(
+            "missing [output] section in config".to_string(),
+        ));
+    }
+    let input_rate = in_cfg.rate_hz.unwrap_or(PcmRateHz::PCM_48000);
+    let plan = settings.explain_for_input_rate(input_rate)?;
+    let (output_format, output_rate_hz) = match plan.stream_spec.target {
+        TargetRateSpec::Dsd { bit_rate } => (DaemonOutputFormat::Dsd, bit_rate.get()),
+        TargetRateSpec::Pcm { rate, .. } => (DaemonOutputFormat::Pcm, rate.get()),
+    };
+    Ok(StreamSummary {
+        input_rate_hz: input_rate.get(),
+        output_format,
+        output_rate_hz,
+        filter: plan.dsp_config.filter_description(),
+        preamp_db: plan.dsp_config.preamp_db,
+    })
+}
+
+pub fn run_run(args: RunArgs) -> Result<(), CliError> {
+    let instance = match args.instance.instance.clone() {
+        Some(name) => Instance::new(name)?,
+        None => Instance::default_instance(),
+    };
+    let daemon_start_time = Instant::now();
+    let config_path = resolve_config_path(args.config.as_deref());
+    let mut settings = load_settings(&config_path, &instance)?;
+
+    // Take the single-instance lock before touching any device or PipeWire node, so a duplicate
+    // instance fails fast without disturbing the running one.
+    let instance_lock = instance.acquire_lock()?;
+
+    let summary = summarize(&settings)?;
+    let channels = settings
+        .input
+        .as_ref()
+        .and_then(|i| i.channels)
+        .unwrap_or(2);
+
+    // Resolve placement once, before any thread is spawned or affinity narrowed, then restrict
+    // the supervisor to the housekeeping set so helper threads inherit it. Placement is fixed
+    // for the process lifetime: a `[runtime]` change needs a restart, not a resume.
+    let placement = crate::runtime::resolve(&settings, usize::from(channels), false)?;
+    crate::runtime::apply_housekeeping(&placement);
+
+    let control = DaemonControlHandle::new(
+        summary.input_rate_hz,
+        summary.output_format,
+        summary.output_rate_hz,
+        &summary.filter,
+        summary.preamp_db,
+    );
+
+    // Install SIGINT / SIGTERM handler to stop daemon cleanly (§9, §13.12)
+    DAEMON_RUNNING_PTR.store(Arc::as_ptr(&control.running) as *mut _, Ordering::SeqCst);
+    unsafe {
+        libc::signal(
+            libc::SIGINT,
+            sigint_sigterm_handler as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGTERM,
+            sigint_sigterm_handler as *const () as libc::sighandler_t,
+        );
+    }
+
+    // Start Unix Control Socket. It outlives every pipeline session so `resume`/`stop` stay
+    // reachable while paused.
+    let _server = ControlServer::start(instance.clone(), instance_lock, control.clone())
+        .map_err(CliError::Ipc)?;
+    tracing::info!(
+        target: "audigma::ipc",
+        event = audigma_log::CONTROL_SOCKET_BOUND,
+        instance = instance.name(),
+        endpoint = %instance.display_endpoint(),
+        "control socket bound"
+    );
+
+    // Supervisor loop: one pipeline session per iteration; a pause parks here until resume.
+    let session_result: Result<(), CliError> = loop {
+        let result = run_session(&settings, &placement, &control, &instance, &config_path);
+        if result.is_err() || !control.is_running() || !control.pause_requested() {
+            break result;
+        }
+
+        tracing::info!(
+            target: "audigma::daemon",
+            event = audigma_log::DAEMON_PAUSE,
+            instance = instance.name(),
+            "pipeline released; daemon paused"
+        );
+        let mut reloaded: Option<Settings> = None;
+        let resumed = control.park_until_resume(Duration::from_millis(100), || {
+            let new = load_settings(&config_path, &instance).map_err(|e| e.to_string())?;
+            let new_summary = summarize(&new).map_err(|e| e.to_string())?;
+            if new.runtime != settings.runtime {
+                tracing::warn!(
+                    target: "audigma::daemon",
+                    event = "config_warning",
+                    "[runtime] changed while paused; threading and placement apply only after a restart"
+                );
+            }
+            control.reconfigure(
+                new_summary.input_rate_hz,
+                new_summary.output_format,
+                new_summary.output_rate_hz,
+                &new_summary.filter,
+                new_summary.preamp_db,
+            );
+            reloaded = Some(new);
+            Ok(())
+        });
+        if !resumed {
+            break Ok(());
+        }
+        if let Some(new) = reloaded {
+            settings = new;
+        }
+        tracing::info!(
+            target: "audigma::daemon",
+            event = audigma_log::DAEMON_RESUME,
+            instance = instance.name(),
+            "resuming pipeline"
+        );
+    };
+
+    // Unregister signal handler
+    DAEMON_RUNNING_PTR.store(std::ptr::null_mut(), Ordering::SeqCst);
+    unsafe {
+        libc::signal(libc::SIGINT, libc::SIG_DFL);
+        libc::signal(libc::SIGTERM, libc::SIG_DFL);
+    }
+
+    session_result?;
+
+    tracing::info!(
+        target: "audigma::daemon",
+        event = audigma_log::DAEMON_STOP,
+        reason = "clean",
+        uptime_s = daemon_start_time.elapsed().as_secs(),
+        "daemon stopped cleanly"
+    );
+
+    Ok(())
+}
+
+/// Runs one pipeline session (devices, PipeWire sink, DSP workers, feed loop) until the daemon
+/// is stopped or paused, then releases all of it.
+fn run_session(
+    settings: &Settings,
+    placement: &audigma_engine::Placement,
+    control: &DaemonControlHandle,
+    instance: &Instance,
+    config_path: &std::path::Path,
+) -> Result<(), CliError> {
     let in_cfg = settings
         .input
         .as_ref()
@@ -95,11 +261,7 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
     let input_rate = in_cfg.rate_hz.unwrap_or(PcmRateHz::PCM_48000);
     let channels = in_cfg.channels.unwrap_or(2);
 
-    // Resolve placement before any thread is spawned or affinity narrowed, then restrict the
-    // supervisor to the housekeeping set so helper threads inherit it.
-    let placement = crate::runtime::resolve(&settings, usize::from(channels), false)?;
-    crate::runtime::apply_housekeeping(&placement);
-    let worker_setup = crate::runtime::worker_setup(&placement);
+    let worker_setup = crate::runtime::worker_setup(placement);
     #[cfg(feature = "pipewire")]
     let pw_placement = placement.pipewire();
 
@@ -158,7 +320,7 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
         match out_cfg.backend {
             Some(OutputBackend::Alsa) => {
                 let alsa_config =
-                    AlsaOutputConfig::from_settings(&settings, target).map_err(|e| {
+                    AlsaOutputConfig::from_settings(settings, target).map_err(|e| {
                         EngineError::DeviceUnavailable {
                             device: settings
                                 .output
@@ -223,42 +385,6 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
         }
     };
 
-    let (out_fmt, out_rate_hz) = match target_spec {
-        TargetRateSpec::Dsd { bit_rate } => (DaemonOutputFormat::Dsd, bit_rate.get()),
-        TargetRateSpec::Pcm { rate, .. } => (DaemonOutputFormat::Pcm, rate.get()),
-    };
-
-    let control = DaemonControlHandle::new(
-        input_rate.get(),
-        out_fmt,
-        out_rate_hz,
-        &plan.dsp_config.filter_description(),
-        plan.dsp_config.preamp_db,
-    );
-
-    // Install SIGINT / SIGTERM handler to stop daemon cleanly (§9, §13.12)
-    DAEMON_RUNNING_PTR.store(Arc::as_ptr(&control.running) as *mut _, Ordering::SeqCst);
-    unsafe {
-        libc::signal(
-            libc::SIGINT,
-            sigint_sigterm_handler as *const () as libc::sighandler_t,
-        );
-        libc::signal(
-            libc::SIGTERM,
-            sigint_sigterm_handler as *const () as libc::sighandler_t,
-        );
-    }
-
-    // Start Unix Control Socket
-    let _server = ControlServer::start(instance.clone(), instance_lock, control.clone())
-        .map_err(CliError::Ipc)?;
-    tracing::info!(
-        target: "audigma::ipc",
-        event = audigma_log::CONTROL_SOCKET_BOUND,
-        instance = instance.name(),
-        endpoint = %instance.display_endpoint(),
-        "control socket bound"
-    );
 
     // Set up and spawn audigma-rt-log drainer thread (§8.4)
     let mut rt_drainer = audigma_log::RtLogDrainer::new();
@@ -284,7 +410,7 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
             .spawn_scoped(scope, || -> Result<(), CliError> {
                 // Loop placement: housekeeping affinity (or `loop_cpu`) + RT `p`
                 // (RESET_ON_FORK: children start SCHED_OTHER)
-                let loop_fatal = crate::runtime::rt_failure_is_fatal(&placement, &placement.loop_);
+                let loop_fatal = crate::runtime::rt_failure_is_fatal(placement, &placement.loop_);
                 let loop_rt = crate::runtime::apply_logged(
                     "audigma-loop",
                     None,
@@ -352,6 +478,7 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
                     let custom_mixer_control = out_cfg.mixer_control();
                     let vol_control_mode = out_cfg.volume_control();
                     let device_wait_ms = out_cfg.device_wait_ms();
+                    let expiry = out_cfg.device_wait_expiry();
                     let keep_audio_sink_ms = out_cfg.keep_audio_sink_ms();
 
                     let mut hw_mixer: Option<AlsaHardwareMixer> = if out_cfg.backend == Some(OutputBackend::Alsa) {
@@ -414,11 +541,21 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
                 let mut drain_bufs: Vec<Vec<f64>> = vec![vec![0.0; 256]; channels as usize];
 
                     // Resilient daemon loop
-                    while control.is_running() {
+                    while control.is_active() {
                         // Step 1: Ensure output device is connected and opened
                         if current_output.is_none() {
                             if out_cfg.backend == Some(OutputBackend::Alsa) && !is_alsa_device_present(&target_device) {
                                 if device_wait_ms == 0 {
+                                    if expiry == DeviceWaitExpiry::Pause {
+                                        tracing::warn!(
+                                            target: "audigma::daemon",
+                                            event = "device_wait_timeout",
+                                            device = %target_device,
+                                            "output device absent and device_wait_ms = 0; pausing"
+                                        );
+                                        control.request_pause(PauseReason::DeviceWaitExpired);
+                                        break;
+                                    }
                                     return Err(EngineError::DeviceDisconnected(format!(
                                         "target ALSA device '{target_device}' is not present at startup"
                                     ))
@@ -442,7 +579,7 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
                                 let mut sink_dropped = false;
                                 let mut last_log_secs = 0u64;
 
-                                while control.is_running() {
+                                while control.is_active() {
                                     let elapsed_ms = wait_start.elapsed().as_millis() as u64;
                                     let elapsed_secs = elapsed_ms / 1000;
                                     control.set_disconnect_info(Some(target_device.clone()), Some(elapsed_ms));
@@ -462,6 +599,18 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
 
                                     // Check device_wait_ms timeout
                                     if device_wait_ms > 0 && elapsed_ms >= device_wait_ms as u64 {
+                                        if expiry == DeviceWaitExpiry::Pause {
+                                            tracing::warn!(
+                                                target: "audigma::daemon",
+                                                event = "device_wait_timeout",
+                                                device = %target_device,
+                                                elapsed_ms,
+                                                timeout_ms = device_wait_ms,
+                                                "device_wait_ms timeout reached; pausing"
+                                            );
+                                            control.request_pause(PauseReason::DeviceWaitExpired);
+                                            break;
+                                        }
                                         tracing::error!(
                                             target: "audigma::daemon",
                                             event = "device_wait_timeout",
@@ -514,7 +663,7 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
                                     }
                                 }
 
-                                if !control.is_running() {
+                                if !control.is_active() {
                                     break;
                                 }
 
@@ -748,22 +897,5 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
         }
     });
 
-    // Unregister signal handler
-    DAEMON_RUNNING_PTR.store(std::ptr::null_mut(), Ordering::SeqCst);
-    unsafe {
-        libc::signal(libc::SIGINT, libc::SIG_DFL);
-        libc::signal(libc::SIGTERM, libc::SIG_DFL);
-    }
-
-    loop_result?;
-
-    tracing::info!(
-        target: "audigma::daemon",
-        event = audigma_log::DAEMON_STOP,
-        reason = "clean",
-        uptime_s = daemon_start_time.elapsed().as_secs(),
-        "daemon stopped cleanly"
-    );
-
-    Ok(())
+    loop_result
 }

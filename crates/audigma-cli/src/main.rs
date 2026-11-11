@@ -10,7 +10,7 @@ pub mod volume;
 use clap::Parser;
 use commands::{
     Cli, Commands, resolve_config_path, run_benchmark, run_config, run_convert, run_play,
-    run_probe, run_run, run_set, run_status, run_stop,
+    run_pause, run_probe, run_resume, run_run, run_set, run_status, run_stop,
 };
 use std::process::ExitCode;
 
@@ -87,6 +87,8 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Commands::Run(args) => run_run(args),
         Commands::Stop(args) => run_stop(args),
+        Commands::Pause(args) => run_pause(args),
+        Commands::Resume(args) => run_resume(args),
         Commands::Status(args) => run_status(args),
         Commands::Set(args) => run_set(args),
         Commands::Play(args) => run_play(args),

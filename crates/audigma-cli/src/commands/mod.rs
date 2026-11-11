@@ -13,7 +13,10 @@ use std::path::{Path, PathBuf};
 
 pub use benchmark::{BenchmarkArgs, run_benchmark};
 pub use config::{ConfigArgs, ConfigCommands, run_config};
-pub use control::{SetArgs, SetCommands, StatusArgs, StopArgs, run_set, run_status, run_stop};
+pub use control::{
+    PauseArgs, ResumeArgs, SetArgs, SetCommands, StatusArgs, StopArgs, run_pause, run_resume,
+    run_set, run_status, run_stop,
+};
 pub use convert::{ConvertArgs, run_convert};
 pub use play::{PlayArgs, run_play};
 pub use probe::{ProbeArgs, print_alsa_probe_report, run_probe};
@@ -59,6 +62,12 @@ pub enum Commands {
 
     /// Request orderly shutdown of a running audigma daemon
     Stop(StopArgs),
+
+    /// Release the output device and idle the daemon (undo with `resume`)
+    Pause(PauseArgs),
+
+    /// Rebuild the pipeline of a paused daemon from its re-read configuration
+    Resume(ResumeArgs),
 
     /// Query live daemon runtime status and telemetry
     Status(StatusArgs),

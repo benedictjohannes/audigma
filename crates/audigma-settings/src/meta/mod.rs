@@ -656,6 +656,7 @@ period_ms = 5
 volume_control = "software"
 mixer_control = "PCM"
 device_wait_ms = -1
+device_wait_expiry = "exit"
 keep_audio_sink_ms = 5000
 
 [target]
@@ -823,6 +824,7 @@ rt_report_interval_ms = 10000
         assert_eq!(d("output.period_ms"), Some(json!(5)));
         assert_eq!(d("output.device_wait_ms"), Some(json!(-1)));
         assert_eq!(d("output.keep_audio_sink_ms"), Some(json!(5000)));
+        assert_eq!(d("output.device_wait_expiry"), Some(json!("exit")));
         assert_eq!(
             d("output.volume_control"),
             Some(json!("hardware-software-fallback"))

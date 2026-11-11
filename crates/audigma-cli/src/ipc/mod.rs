@@ -27,14 +27,27 @@ pub use platform::InstanceLock;
 /// Instance name used when none is given.
 pub const DEFAULT_INSTANCE: &str = "default";
 
+/// How long a `pause`/`resume` request blocks for the supervisor before reporting a timeout.
+const PAUSE_RESUME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// IPC request commands sent over the Unix control socket.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "command", content = "payload")]
 pub enum IpcRequest {
     GetStatus,
-    SetVolume { volume_db: f64 },
-    SetVolumePercent { percent: f64 },
-    SetMute { muted: bool },
+    SetVolume {
+        volume_db: f64,
+    },
+    SetVolumePercent {
+        percent: f64,
+    },
+    SetMute {
+        muted: bool,
+    },
+    /// Tear the pipeline down and release the device; the daemon stays up.
+    Pause,
+    /// Rebuild the pipeline from the (re-read) configuration.
+    Resume,
     Stop,
 }
 
@@ -234,6 +247,14 @@ fn handle_client(reader: impl Read, mut writer: impl Write, control: &DaemonCont
                 control.set_muted(muted);
                 IpcResponse::Ok
             }
+            Ok(IpcRequest::Pause) => match control.pause_and_wait(PAUSE_RESUME_TIMEOUT) {
+                Ok(()) => IpcResponse::Ok,
+                Err(e) => IpcResponse::Error(e),
+            },
+            Ok(IpcRequest::Resume) => match control.resume_and_wait(PAUSE_RESUME_TIMEOUT) {
+                Ok(()) => IpcResponse::Ok,
+                Err(e) => IpcResponse::Error(e),
+            },
             Ok(IpcRequest::Stop) => {
                 control.stop();
                 IpcResponse::Ok

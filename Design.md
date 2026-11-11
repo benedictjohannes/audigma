@@ -46,7 +46,7 @@ In `audigma`, architectural decisions are enforced directly by the Rust type sys
    - **Scarlet Book Decimation Reference Normalization (`[input.dsd] gain_db`):** The Scarlet Book SACD specification defines $0\text{ dB}$ SACD reference level at $50\%$ modulation depth (amplitude $0.50$ relative to $\pm 1.0$), which DAC chips internally calibrate with $+6\text{ dB}$ gain so $0\text{ dB}$ SACD produces nominal line level ($2.0\text{ V}_{\text{rms}}$), matching $0\text{ dBFS}$ PCM. Unpacking DSD bits $\pm 1.0$ through a unity-gain half-band decimation cascade yields intermediate PCM at $-6.02\text{ dBFS}$. To align DSD input levels with PCM and direct DAC playback, Audigma applies a default $+6.0\text{ dB}$ ($2.0\times$) normalization gain post-decimation, user-configurable via `[input.dsd] gain_db` (default `6.0`). Modulator profile headroom ($-3.5\text{ dB}$ to $-6.0\text{ dB}$) and overload protection ensure stable remodulation headroom.
 
 7. **Decoupled OS Process & PipeWire Graph Lifecycles (`audigma-engine` / `audigma-io`):**
-   - USB DAC disconnects, power-cycles, or undocking must never cause the `audigma` daemon process to crash or exit abruptly (unless explicitly configured to fail fast with `device_wait_ms = 0`).
+   - USB DAC disconnects, power-cycles, or undocking must never cause the `audigma` daemon process to crash or exit abruptly (unless explicitly configured to fail fast with `device_wait_ms = 0`, and then only with `device_wait_expiry = "exit"`).
    - The engine decouples the **Process Lifecycle** (`[output] device_wait_ms`, default `-1` = wait indefinitely for device) from the **PipeWire Graph Lifecycle** (`[output] keep_audio_sink_ms`, default `5000` ms grace period).
    - **Error-Driven Loss Detection & Inotify Arrival Detection:** Device loss is detected by the output write path: an ALSA `ENODEV` / `EBADFD` / `EIO` returned from a write immediately triggers transition to `WaitingForDevice`. Re-appearance is detected by a Linux `inotify` watch on `/dev/snd` (`IN_CREATE`), which the daemon loop polls in short (200 ms) slices while waiting. Wake-up on arrival is event-driven (no directory scanning, no busy-spin); the slices only bound how often the shutdown flag is checked.
    - **Silent Bit-Bucket Pacing:** While in `WaitingForDevice` within the `keep_audio_sink_ms` window, `PipeWireVirtualSink` continues draining incoming frames into a silent bit-bucket at nominal stream clock, preventing PipeWire application stalls while the DAC settles or reconnects.
@@ -345,6 +345,7 @@ target_node = "alsa_output.usb-FiiO_K17-00.analog-stereo"
 transport = "pcm"
 volume_control = "hardware-software-fallback"
 device_wait_ms = -1
+device_wait_expiry = "exit"      # "exit" | "pause"
 keep_audio_sink_ms = 5000
 
 [target]
@@ -383,6 +384,7 @@ transport = "native"
 reserve_device = true
 volume_control = "hardware-software-fallback"
 device_wait_ms = -1
+device_wait_expiry = "exit"      # "exit" | "pause"
 keep_audio_sink_ms = 5000
 buffer_ms = 40
 period_ms = 5
@@ -479,6 +481,8 @@ audigma configure [--tui|--web] [--out PATH]
 audigma config check [-c CONFIG]
 audigma config explain [-c CONFIG] [--input-rate HZ] [--json]
 audigma status [--watch] [--json]
+audigma pause
+audigma resume
 audigma set volume DB
 audigma reload
 audigma doctor [--fix] [--json]
@@ -486,6 +490,7 @@ audigma doctor [--fix] [--json]
 
 - **`audigma play`:** Direct file/stream playback to an exclusive ALSA hardware endpoint. Supports immediate ergonomic overrides (`-d device`, `-v volume` in dB or percentage with the same syntax as `audigma set volume`; `-v` is applied as the user-volume component layered on top of `[gain] preamp_db`, not as a preamp replacement) and generic ad-hoc configuration overrides (`-O key=value`, e.g. `-O output.transport=dop -O output.buffer_ms=25`) which take precedence over the specified or default `config.toml`.
 - **`audigma run` & `audigma stop`:** `run` executes the live audio pipeline in the foreground (intended for `systemd --user` service or direct terminal invocation). `audigma stop` connects to the local control socket and requests an orderly shutdown: ramping PCM gain to zero, draining filter group delays, emitting the balanced DSD idle sequence, releasing the D-Bus `ReserveDevice1` device lock so PipeWire/WirePlumber immediately reclaims the DAC, and terminating the daemon.
+- **`audigma pause` & `audigma resume`:** `pause` tears the whole pipeline down exactly like `stop` (ramp to zero, drain, DSD idle pattern, close the output, release `ReserveDevice1`, drop the PipeWire sink, join the DSP workers and RT threads) but keeps the process, instance lock and control socket alive in state `Paused`; the request returns once the device is released. `resume` re-reads and re-validates the configuration file, then rebuilds the pipeline through the startup path; if the file is invalid the error is returned and the daemon stays `Paused`. `[runtime]` (threading, placement, RT) is fixed at process start: a change picked up by `resume` logs a warning and applies after a restart. User volume and mute persist across a pause. Both commands are idempotent (`pause` when paused and `resume` when running succeed); `stop` works while paused. While paused the PipeWire virtual sink does not exist, so applications fall back to another sink, as after `stop`. `status` shows only the state, uptime and volume while paused, with the reason in telemetry (`pause_reason`: `Requested` or `DeviceWaitExpired`). With `[output] device_wait_expiry = "pause"`, an expired `device_wait_ms` (including `0` with the device absent at start or at a `resume`) enters `Paused` with reason `DeviceWaitExpired` instead of exiting the process; `resume` itself reports success once the config is accepted, so a missing device surfaces as the daemon returning to `Paused`.
 - **`audigma configure` (`audigma-configurator`):** Interactive TUI (`--tui`, default) or temporary localhost Web wizard (`--web`, bound to `127.0.0.1:<port>` with a one-time session token that exits cleanly on save). Walks the user through selecting an output path (PipeWire PCM upsampler vs. Exclusive ALSA PCM/DSD), choosing a rate family policy (`"source"` vs. `"44100"` / `"48000"`), running a quick CPU benchmark, previewing headroom/latency, and writing `config.toml` + optional WirePlumber/systemd user snippets.
 - **`audigma doctor [--fix]` (`audigma-doctor`):** Inspects the host OS audio stack and diagnoses runtime issues:
   1. *ALSA Device Lockouts:* Inspects `/dev/snd/pcmC*D*p` file descriptor holders. If held by WirePlumber/PipeWire, `--fix` can dynamically invoke `wpctl set-profile <id> 0` or offer to write a permanent WirePlumber drop-in rule in `~/.config/wireplumber/`. If held by a foreign user or daemon (such as MPD), `--fix` interactively prompts the user before terminating the process, escalating to `sudo` if permissions are insufficient, or printing the exact command required.

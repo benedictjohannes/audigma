@@ -173,6 +173,17 @@ pub enum RateMode {
     Fixed,
 }
 
+/// `[output] device_wait_expiry` options: what happens when `device_wait_ms` runs out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DeviceWaitExpiry {
+    /// Exit the process.
+    #[default]
+    Exit,
+    /// Release everything and wait in the paused state for `audigma resume`.
+    Pause,
+}
+
 /// `[output] volume_control` options (`Design.md §1.8`, `§6.2`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum VolumeControlMode {
@@ -339,6 +350,7 @@ pub struct OutputConfig {
     pub period_ms: Option<u32>,
     pub volume_control: Option<VolumeControlMode>,
     pub device_wait_ms: Option<i64>,
+    pub device_wait_expiry: Option<DeviceWaitExpiry>,
     pub keep_audio_sink_ms: Option<i64>,
     pub mixer_control: Option<String>,
 }
@@ -358,6 +370,11 @@ impl OutputConfig {
     /// Returns device wait timeout in milliseconds (`-1` = wait indefinitely by default).
     pub fn device_wait_ms(&self) -> i64 {
         self.device_wait_ms.unwrap_or(-1)
+    }
+
+    /// Returns what happens when the device wait runs out (`exit` by default).
+    pub fn device_wait_expiry(&self) -> DeviceWaitExpiry {
+        self.device_wait_expiry.unwrap_or_default()
     }
 
     /// Returns audio sink keep-alive duration in milliseconds (`5000` ms by default).
@@ -742,6 +759,7 @@ impl Settings {
                     period_ms: None,
                     volume_control: None,
                     device_wait_ms: None,
+                    device_wait_expiry: None,
                     keep_audio_sink_ms: None,
                     mixer_control: None,
                 }),
@@ -800,6 +818,7 @@ impl Settings {
                     period_ms: None,
                     volume_control: None,
                     device_wait_ms: None,
+                    device_wait_expiry: None,
                     keep_audio_sink_ms: None,
                     mixer_control: None,
                 }),
@@ -858,6 +877,7 @@ impl Settings {
                     period_ms: None,
                     volume_control: None,
                     device_wait_ms: None,
+                    device_wait_expiry: None,
                     keep_audio_sink_ms: None,
                     mixer_control: None,
                 }),
@@ -916,6 +936,7 @@ impl Settings {
                     period_ms: None,
                     volume_control: None,
                     device_wait_ms: None,
+                    device_wait_expiry: None,
                     keep_audio_sink_ms: None,
                     mixer_control: None,
                 }),
@@ -1131,7 +1152,11 @@ impl Settings {
             let keep = output.keep_audio_sink_ms();
             if wait > 0 && keep > wait {
                 warnings.push(format!(
-                    "[output] keep_audio_sink_ms ({keep} ms) is greater than device_wait_ms ({wait} ms); daemon will exit before sink grace period expires"
+                    "[output] keep_audio_sink_ms ({keep} ms) is greater than device_wait_ms ({wait} ms); daemon will {} before sink grace period expires",
+                    match output.device_wait_expiry() {
+                        DeviceWaitExpiry::Exit => "exit",
+                        DeviceWaitExpiry::Pause => "pause",
+                    }
                 ));
             }
         }
@@ -2081,6 +2106,40 @@ overload_policy = "mute-recover"
                 "preamp_db = {bad} should be rejected: {err}"
             );
         }
+    }
+
+    #[test]
+    fn test_device_wait_expiry_parse_default_and_warning() {
+        let base = r#"
+schema_version = 1
+[output]
+backend = "alsa"
+device = "hw:CARD=Test,DEV=0"
+device_wait_ms = 1000
+keep_audio_sink_ms = 5000
+{EXTRA}
+[target]
+format = "pcm"
+pcm_rate_hz = 96000
+"#;
+        let parse = |extra: &str| Settings::from_toml_str(&base.replace("{EXTRA}", extra)).unwrap();
+
+        let default = parse("");
+        assert_eq!(
+            default.output.as_ref().unwrap().device_wait_expiry(),
+            DeviceWaitExpiry::Exit
+        );
+        assert!(default.warnings()[0].contains("daemon will exit"));
+
+        let pause = parse("device_wait_expiry = \"pause\"");
+        assert_eq!(
+            pause.output.as_ref().unwrap().device_wait_expiry(),
+            DeviceWaitExpiry::Pause
+        );
+        assert!(pause.warnings()[0].contains("daemon will pause"));
+
+        let bad = base.replace("{EXTRA}", "device_wait_expiry = \"later\"");
+        assert!(Settings::from_toml_str(&bad).is_err());
     }
 
     #[test]

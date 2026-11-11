@@ -42,7 +42,7 @@ pub use lifecycle::{
 };
 pub use live_pipeline::{
     DaemonControlHandle, DaemonOutputFormat, DaemonState, DaemonTelemetry, DaemonVolumeMode,
-    DspSession, LivePipeline, StreamExitReason,
+    DspSession, LivePipeline, PauseReason, StreamExitReason,
 };
 pub use offline_pipeline::{OfflinePipeline, OfflineReport};
 pub use peak::{Pass1PeakResult, measure_true_peak_pass1};
