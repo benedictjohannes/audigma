@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use audigma_dsp::config::TargetRateSpec;
 use audigma_dsp::rates::PcmRateHz;
+use audigma_engine::PauseReason;
 use audigma_engine::StreamExitReason;
 use audigma_engine::live_pipeline::{
     DaemonControlHandle, DaemonOutputFormat, DaemonState, DaemonVolumeMode, DspSession,
@@ -21,7 +22,6 @@ use audigma_io::alsa::{
 use audigma_io::dbus::DeviceReservation;
 #[cfg(feature = "pipewire")]
 use audigma_io::pipewire::{PipeWirePcmOutput, PipeWireVirtualSink};
-use audigma_engine::PauseReason;
 use audigma_settings::DeviceWaitExpiry;
 use audigma_settings::{InputBackend, OutputBackend, Settings};
 use clap::Args;
@@ -159,6 +159,10 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
             sigint_sigterm_handler as *const () as libc::sighandler_t,
         );
     }
+
+    // System tray (`[runtime] systray`); read once at process start. The guard removes the icon
+    // when the daemon exits. A `required` failure aborts before the control socket is bound.
+    let _tray = crate::tray::start(settings.runtime_config().systray, &instance, &control)?;
 
     // Start Unix Control Socket. It outlives every pipeline session so `resume`/`stop` stay
     // reachable while paused.
@@ -384,7 +388,6 @@ fn run_session(
             }),
         }
     };
-
 
     // Set up and spawn audigma-rt-log drainer thread (§8.4)
     let mut rt_drainer = audigma_log::RtLogDrainer::new();

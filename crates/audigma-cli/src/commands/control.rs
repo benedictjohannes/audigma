@@ -102,7 +102,16 @@ fn print_telemetry(telem: &audigma_engine::DaemonTelemetry) {
     println!("  Uptime:              {}s", telem.daemon_uptime_secs);
     println!("  Stream Uptime:       {}s", telem.stream_uptime_secs);
 
-    println!("  Input Rate:          {} Hz", telem.input_rate_hz);
+    match telem
+        .input_dsd_bit_rate_hz
+        .and_then(audigma_dsp::DsdBitRateHz::new)
+    {
+        Some(dsd) => println!(
+            "  Input Rate:          {dsd} (decimated to {} Hz)",
+            telem.input_rate_hz
+        ),
+        None => println!("  Input Rate:          {} Hz", telem.input_rate_hz),
+    }
     println!(
         "  Output Target:       {} @ {} Hz",
         telem.output_format, telem.output_rate_hz

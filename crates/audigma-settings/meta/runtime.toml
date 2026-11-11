@@ -3,8 +3,8 @@
 
 [section]
 title = "Runtime"
-summary = "Threads, CPU placement and real-time scheduling."
-description = "How many threads run the DSP, which cores they use and whether real-time priority is requested. The defaults suit most machines; change them to fix dropouts on a loaded or small CPU."
+summary = "Threads, CPU placement, real-time scheduling and the tray icon."
+description = "How many threads run the DSP, which cores they use and whether real-time priority is requested, and whether the daemon shows a system tray icon. The defaults suit most machines; change them to fix dropouts on a loaded or small CPU."
 advanced = true
 #
 # Decision (2026-11-08): no `recommended` values anywhere in [runtime]; the defaults are the
@@ -142,3 +142,30 @@ The list must not be empty or contain duplicates, and must not include `loop_cpu
 default_text = "unset: chosen by core_selection"
 show_if = { key = "runtime.dsp_threads", neq = "inline" }
 applies_to = ["run", "play", "convert"]
+
+[[field]]
+key = "systray"
+summary = "Whether the daemon shows a system tray icon."
+description = """
+The tray icon shows the daemon state and offers Pause/Resume and Stop. Each running instance has its own icon.
+
+Needs a desktop with a StatusNotifierItem tray host (KDE Plasma, or GNOME with an AppIndicator extension). Fixed at process start: changing it requires a restart.
+"""
+default = "off"
+applies_to = ["run"]
+
+[[field.options]]
+key = "off"
+label = "Off"
+summary = "No tray icon."
+
+[[field.options]]
+key = "auto"
+label = "Auto"
+summary = "Show the icon; warn and continue without it when no tray host is available."
+
+[[field.options]]
+key = "required"
+label = "Required"
+summary = "Do not start without a tray icon."
+caution = "Startup fails when no tray host is available, for example on a headless machine."

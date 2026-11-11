@@ -218,7 +218,11 @@ pub struct DaemonTelemetry {
     pub state: DaemonState,
     /// Set while `state` is `Paused`.
     pub pause_reason: Option<PauseReason>,
+    /// PCM rate entering the DSP; for DSD input the intermediate (decimated) rate.
     pub input_rate_hz: u32,
+    /// Bit rate of the DSD input stream, `None` for PCM input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_dsd_bit_rate_hz: Option<u32>,
     pub output_format: DaemonOutputFormat,
     pub output_rate_hz: u32,
     /// Active interpolation filter, e.g. `"linear, apodization off"`.
@@ -286,6 +290,8 @@ pub struct DaemonTelemetry {
 struct TelemetryState {
     state: AtomicU8,
     input_rate_hz: AtomicU32,
+    /// DSD input bit rate; `0` for PCM input.
+    input_dsd_bit_rate_hz: AtomicU32,
     output_format: AtomicU8,
     output_rate_hz: AtomicU32,
     filter: Mutex<String>,
@@ -379,6 +385,7 @@ impl DaemonControlHandle {
         let telemetry = TelemetryState {
             state: AtomicU8::new(DaemonState::Stopped as u8),
             input_rate_hz: AtomicU32::new(input_rate),
+            input_dsd_bit_rate_hz: AtomicU32::new(0),
             output_format: AtomicU8::new(output_format as u8),
             output_rate_hz: AtomicU32::new(output_rate),
             filter: Mutex::new(filter.to_string()),
@@ -670,6 +677,10 @@ impl DaemonControlHandle {
                 .pause_reason()
                 .filter(|_| self.state() == DaemonState::Paused),
             input_rate_hz: self.telemetry.input_rate_hz.load(Ordering::Relaxed),
+            input_dsd_bit_rate_hz: Some(
+                self.telemetry.input_dsd_bit_rate_hz.load(Ordering::Relaxed),
+            )
+            .filter(|&hz| hz > 0),
             output_format: DaemonOutputFormat::from_u8(
                 self.telemetry.output_format.load(Ordering::Relaxed),
             ),
@@ -732,6 +743,14 @@ impl DaemonControlHandle {
             dropped_chunks: self.telemetry.dropped_chunks.load(Ordering::Relaxed),
             processed_chunks: self.telemetry.processed_chunks.load(Ordering::Relaxed),
         }
+    }
+
+    /// Records the DSD bit rate of the current input stream (`None` for PCM input).
+    #[inline]
+    pub fn set_input_dsd_bit_rate(&self, bit_rate_hz: Option<u32>) {
+        self.telemetry
+            .input_dsd_bit_rate_hz
+            .store(bit_rate_hz.unwrap_or(0), Ordering::Relaxed);
     }
 
     /// Updates the input/output stream rates and target format after a reconfiguration.
@@ -1224,6 +1243,7 @@ impl LivePipeline {
                         (cap > 0).then(|| fill as f64 / cap as f64 * 100.0)
                     });
                     let b_ms = input.buffer_fill_secs().map(|s| s * 1000.0);
+                    control.set_input_dsd_bit_rate(input.info().dsd_bit_rate.map(|r| r.get()));
                     control.update_runtime_stats(
                         total_input_frames,
                         total_output_frames,

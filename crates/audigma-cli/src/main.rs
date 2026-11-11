@@ -5,12 +5,13 @@ pub mod error;
 pub mod ipc;
 pub mod overrides;
 pub mod runtime;
+pub mod tray;
 pub mod volume;
 
 use clap::Parser;
 use commands::{
-    Cli, Commands, resolve_config_path, run_benchmark, run_config, run_convert, run_play,
-    run_pause, run_probe, run_resume, run_run, run_set, run_status, run_stop,
+    Cli, Commands, resolve_config_path, run_benchmark, run_config, run_convert, run_pause,
+    run_play, run_probe, run_resume, run_run, run_set, run_status, run_stop,
 };
 use std::process::ExitCode;
 

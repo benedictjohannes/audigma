@@ -19,6 +19,9 @@ pub enum CliError {
     #[error("realtime = \"required\" could not be satisfied: {0}")]
     Realtime(String),
 
+    #[error("systray = \"required\" could not be satisfied: {0}")]
+    Systray(String),
+
     #[error("{0}")]
     Override(String),
 

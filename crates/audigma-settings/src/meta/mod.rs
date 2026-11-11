@@ -692,6 +692,7 @@ realtime = "auto"
 realtime_priority = 20
 core_selection = "performance"
 smt_siblings = "avoid"
+systray = "auto"
 loop_cpu = 1
 dsp_cpus = [2, 3]
 

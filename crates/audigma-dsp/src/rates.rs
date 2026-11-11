@@ -403,6 +403,18 @@ pub fn select_dsd_intermediate_rate(
     PcmRateHz::new(final_hz).unwrap_or(PcmRateHz::PCM_352800)
 }
 
+impl DsdBitRateHz {
+    /// Compact label without the bit rate: `DSD64`, `DSD256/48`, or `<hz> Hz (DSD)` when the
+    /// rate is not a standard multiple.
+    pub fn short_label(&self) -> String {
+        match (self.rate_family(), self.dsd_multiplier()) {
+            (RateFamily::Hz44100, Some(mult)) => format!("DSD{}", mult.factor()),
+            (RateFamily::Hz48000, Some(mult)) => format!("DSD{}/48", mult.factor()),
+            _ => format!("{} Hz (DSD)", self.0),
+        }
+    }
+}
+
 impl fmt::Display for DsdBitRateHz {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match (self.rate_family(), self.dsd_multiplier()) {
@@ -419,6 +431,19 @@ impl fmt::Display for DsdBitRateHz {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_dsd_short_label() {
+        assert_eq!(DsdBitRateHz::DSD64.short_label(), "DSD64");
+        assert_eq!(
+            DsdBitRateHz::new(11_289_600).unwrap().short_label(),
+            "DSD256"
+        );
+        assert_eq!(
+            DsdBitRateHz::new(12_288_000).unwrap().short_label(),
+            "DSD256/48"
+        );
+    }
+
     use super::*;
 
     #[test]

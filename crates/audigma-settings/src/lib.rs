@@ -566,6 +566,19 @@ pub enum RealtimeMode {
     Off,
 }
 
+/// `[runtime] systray`: whether the daemon shows a system tray icon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystrayMode {
+    /// No tray icon.
+    #[default]
+    Off,
+    /// Show a tray icon; warn and continue without one when no tray host is available.
+    Auto,
+    /// Startup fails when the tray icon cannot be created.
+    Required,
+}
+
 /// `[runtime] core_selection`: which cores DSP workers prefer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -605,6 +618,8 @@ pub struct RuntimeConfig {
     /// Explicit CPUs for DSP workers (one per worker).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dsp_cpus: Option<Vec<u32>>,
+    /// System tray icon for `run`; fixed at process start.
+    pub systray: SystrayMode,
 }
 
 impl Default for RuntimeConfig {
@@ -617,6 +632,7 @@ impl Default for RuntimeConfig {
             smt_siblings: SmtSiblings::Avoid,
             loop_cpu: None,
             dsp_cpus: None,
+            systray: SystrayMode::Off,
         }
     }
 }
@@ -1333,16 +1349,18 @@ mod tests {
         assert_eq!(r.realtime_priority, 20);
         assert_eq!(r.core_selection, CoreSelection::Performance);
         assert_eq!(r.smt_siblings, SmtSiblings::Avoid);
+        assert_eq!(r.systray, SystrayMode::Off);
         assert_eq!(r.explicit_worker_count(2), None);
     }
 
     #[test]
     fn test_runtime_full_section_parses() {
         let s = Settings::from_toml_str(&runtime_toml(
-            "[runtime]\ndsp_threads = 2\nrealtime = \"required\"\nrealtime_priority = 30\ncore_selection = \"efficient\"\nsmt_siblings = \"never\"\nloop_cpu = 4\ndsp_cpus = [0, 2]\n",
+            "[runtime]\ndsp_threads = 2\nrealtime = \"required\"\nrealtime_priority = 30\ncore_selection = \"efficient\"\nsmt_siblings = \"never\"\nloop_cpu = 4\ndsp_cpus = [0, 2]\nsystray = \"auto\"\n",
         ))
         .unwrap();
         let r = s.runtime_config();
+        assert_eq!(r.systray, SystrayMode::Auto);
         assert_eq!(r.dsp_threads, DspThreads::Count(2));
         assert_eq!(r.realtime, RealtimeMode::Required);
         assert_eq!(r.realtime_priority, 30);
@@ -1385,6 +1403,8 @@ mod tests {
             "[runtime]\nsmt_siblings = \"off\"\n",
             "[runtime]\nrealtime_priority = 2\n",
             "[runtime]\nrealtime_priority = 100\n",
+            "[runtime]\nsystray = \"on\"\n",
+            "[runtime]\nsystray = true\n",
             "[runtime]\nbogus = 1\n",
             "[runtime]\ndsp_cpus = []\n",
             "[runtime]\ndsp_cpus = [0, 0]\n",

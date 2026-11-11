@@ -32,6 +32,9 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 toml = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3.7", default-features = false, features = ["async-io", "blocking"] }
+
 [dev-dependencies]
 hound = { workspace = true }
 tempfile = { workspace = true }
