@@ -1,7 +1,7 @@
 //! Lossless `.flac` file encoder using the vendored `audigma-flac` (`Design.md §5`).
 //!
-//! Writes 16, 24 or 32-bit integer PCM. 24 bit and below use the full encoder (LPC, stereo
-//! decorrelation); 32 bit is coded per channel with FIXED predictors or verbatim. Sample rates
+//! Writes 16, 24 or 32-bit integer PCM with the full encoder (LPC, stereo decorrelation, exact
+//! predictor search at 32 bit). Sample rates
 //! up to 1,048,575 Hz are representable in the STREAMINFO header; rates above 96 kHz and
 //! 32-bit depth are outside the FLAC "subset", so player support varies.
 
