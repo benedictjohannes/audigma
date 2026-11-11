@@ -9,7 +9,7 @@ use audigma_format::AudioStreamInfo;
 use audigma_format::decoder::AudioDecoder;
 use audigma_format::dsf_reader::DsfReader;
 use std::fs::File;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
 
 #[allow(clippy::large_enum_variant)]
@@ -215,9 +215,13 @@ impl AudioInput for FileAudioInput {
     }
 }
 
+/// Write buffer of the file output sink (1 MiB: a few hundred syscalls per second of 768 kHz audio at most).
+const OUTPUT_BUFFER_BYTES: usize = 1 << 20;
+
 /// File-backed seekable audio output sink.
 pub struct FileAudioOutput {
-    file: File,
+    /// Buffered: container writers (`hound` in particular) write one sample at a time.
+    file: BufWriter<File>,
 }
 
 impl FileAudioOutput {
@@ -230,7 +234,9 @@ impl FileAudioOutput {
                 format!("failed to create output file '{}': {e}", path_ref.display()),
             ))
         })?;
-        Ok(Self { file })
+        Ok(Self {
+            file: BufWriter::with_capacity(OUTPUT_BUFFER_BYTES, file),
+        })
     }
 }
 
