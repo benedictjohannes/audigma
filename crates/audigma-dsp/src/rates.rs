@@ -41,6 +41,7 @@ impl RateFamily {
 }
 
 /// Standard DSD rate multiplier relative to its base PCM rate (`44.1 kHz` or `48 kHz`).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[repr(u32)]
@@ -81,6 +82,7 @@ impl fmt::Display for DsdMultiplier {
 }
 
 /// Multi-bit PCM sample rate in Hz (samples per second per channel).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PcmRateHz(pub u32);

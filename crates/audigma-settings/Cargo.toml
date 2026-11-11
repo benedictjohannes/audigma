@@ -14,11 +14,14 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 toml = { workspace = true }
 serde_json = { workspace = true, optional = true }
+schemars = { workspace = true, optional = true }
 
 [features]
 # Typed configurator metadata (`meta/*.toml`) and its loader.
 meta = ["dep:serde_json"]
+# `JsonSchema` for `Settings` and (with `meta`) the metadata types; feeds `audigma-configurator`.
+schema = ["dep:schemars", "audigma-dsp/schema", "audigma-format/schema"]
 
 [dev-dependencies]
 # Run the metadata tests in a plain `cargo test`.
-audigma-settings = { path = ".", features = ["meta"] }
+audigma-settings = { path = ".", features = ["meta", "schema"] }

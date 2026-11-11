@@ -4,6 +4,7 @@ use crate::rates::{DsdBitRateHz, PcmRateHz};
 use serde::{Deserialize, Serialize};
 
 /// Sample encoding format for PCM and packed DSD containers.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SampleFormat {
     #[serde(rename = "s16le")]
@@ -25,6 +26,7 @@ pub enum SampleFormat {
 }
 
 /// Target signal domain (`pcm` vs `dsd`).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TargetFormat {
@@ -33,6 +35,7 @@ pub enum TargetFormat {
 }
 
 /// FIR impulse response phase characteristic (`Design.md §4.2`).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FilterPhase {
@@ -112,6 +115,18 @@ impl std::fmt::Display for Apodization {
     }
 }
 
+/// Accepted TOML values (`"gentle"` is an input alias for `19000`); mirrors the `Deserialize` impl.
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for Apodization {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Apodization".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({ "enum": ["off", "gentle", 18000, 18500, 19000, 20000] })
+    }
+}
+
 impl Serialize for Apodization {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self.pass_edge_hz() {
@@ -161,6 +176,7 @@ impl<'de> Deserialize<'de> for Apodization {
 }
 
 /// Dither topology for integer PCM quantization and 1-bit DSM (`Design.md §4.2–§4.3`).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DitherType {
@@ -169,6 +185,7 @@ pub enum DitherType {
 }
 
 /// Modulator overload handling policy (`Design.md §4.4`).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum OverloadPolicy {
     #[default]

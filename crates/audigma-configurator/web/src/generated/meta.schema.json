@@ -1,0 +1,462 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "assists": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Assist"
+      }
+    },
+    "sections": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SectionBundle"
+      }
+    }
+  },
+  "required": [
+    "sections",
+    "assists"
+  ],
+  "$defs": {
+    "Assist": {
+      "type": "object",
+      "properties": {
+        "fills": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/AssistKind"
+        },
+        "label": {
+          "type": "string"
+        },
+        "presets": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AssistPreset"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "label",
+        "fills",
+        "presets"
+      ]
+    },
+    "AssistKind": {
+      "type": "string",
+      "enum": [
+        "probe",
+        "benchmark",
+        "check",
+        "preset"
+      ]
+    },
+    "AssistPreset": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "values": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "label",
+        "summary",
+        "values"
+      ]
+    },
+    "Command": {
+      "type": "string",
+      "enum": [
+        "run",
+        "play",
+        "convert"
+      ]
+    },
+    "Condition": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "eq": true,
+            "key": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "eq"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "neq": true
+          },
+          "required": [
+            "key",
+            "neq"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "in": {
+              "type": "array",
+              "items": true
+            },
+            "key": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "in"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "all": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              }
+            }
+          },
+          "required": [
+            "all"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "any": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              }
+            }
+          },
+          "required": [
+            "any"
+          ]
+        }
+      ]
+    },
+    "Field": {
+      "type": "object",
+      "properties": {
+        "also_integer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IntegerOption"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "applies_to": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Command"
+          }
+        },
+        "assist": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "default": {
+          "default": null
+        },
+        "default_text": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "description": {
+          "type": "string",
+          "default": ""
+        },
+        "key": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/FieldKind",
+          "default": "value"
+        },
+        "options": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/OptionMeta"
+          }
+        },
+        "path": {
+          "type": "string",
+          "default": "",
+          "readOnly": true
+        },
+        "range": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": null,
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "recommended": {
+          "type": "object",
+          "properties": {
+            "headless-appliance": {
+              "$ref": "#/$defs/Recommendation"
+            },
+            "interactive-desktop": {
+              "$ref": "#/$defs/Recommendation"
+            },
+            "offline-conversion": {
+              "$ref": "#/$defs/Recommendation"
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "required_for": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Command"
+          }
+        },
+        "required_if": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Condition"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "show_if": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Condition"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "path",
+        "kind",
+        "summary",
+        "description",
+        "default",
+        "default_text",
+        "range",
+        "show_if",
+        "required_if",
+        "required_for",
+        "applies_to",
+        "assist",
+        "recommended",
+        "options",
+        "also_integer"
+      ]
+    },
+    "FieldKind": {
+      "type": "string",
+      "enum": [
+        "value",
+        "group"
+      ]
+    },
+    "IntegerOption": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string",
+          "default": ""
+        },
+        "label": {
+          "type": "string"
+        },
+        "range": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "label",
+        "summary",
+        "description",
+        "range"
+      ]
+    },
+    "OptionMeta": {
+      "type": "object",
+      "properties": {
+        "caution": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "description": {
+          "type": "string",
+          "default": ""
+        },
+        "key": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "show_if": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Condition"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "label",
+        "summary",
+        "description",
+        "caution",
+        "show_if"
+      ]
+    },
+    "Recommendation": {
+      "type": "object",
+      "properties": {
+        "value": true,
+        "why": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "value",
+        "why"
+      ]
+    },
+    "SectionBundle": {
+      "type": "object",
+      "properties": {
+        "advanced": {
+          "type": "boolean",
+          "default": false
+        },
+        "applies_to": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Command"
+          }
+        },
+        "description": {
+          "type": "string",
+          "default": ""
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Field"
+          }
+        },
+        "name": {
+          "type": "string",
+          "default": "",
+          "readOnly": true
+        },
+        "summary": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "title",
+        "summary",
+        "description",
+        "applies_to",
+        "advanced",
+        "fields"
+      ]
+    }
+  }
+}

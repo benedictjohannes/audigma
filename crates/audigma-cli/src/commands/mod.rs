@@ -91,15 +91,71 @@ pub enum Commands {
     Probe(ProbeArgs),
 }
 
+/// Resolves the configuration path: `-c` / `--out` (`explicit`), then `$AUDIGMA_CONFIG`, then
+/// `$XDG_CONFIG_HOME/audigma/config.toml`, then `~/.config/audigma/config.toml`.
 pub fn resolve_config_path(explicit: Option<&Path>) -> PathBuf {
+    resolve_config_path_with(explicit, |k| std::env::var(k).ok())
+}
+
+fn resolve_config_path_with(
+    explicit: Option<&Path>,
+    env: impl Fn(&str) -> Option<String>,
+) -> PathBuf {
+    let non_empty = |k: &str| env(k).filter(|v| !v.is_empty());
     if let Some(p) = explicit {
         return p.to_path_buf();
     }
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+    if let Some(p) = non_empty("AUDIGMA_CONFIG") {
+        return PathBuf::from(p);
+    }
+    if let Some(xdg) = non_empty("XDG_CONFIG_HOME") {
         PathBuf::from(xdg).join("audigma/config.toml")
-    } else if let Ok(home) = std::env::var("HOME") {
+    } else if let Some(home) = non_empty("HOME") {
         PathBuf::from(home).join(".config/audigma/config.toml")
     } else {
         PathBuf::from("config.toml")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |k| {
+            pairs
+                .iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    #[test]
+    fn config_path_precedence() {
+        let all = [
+            ("AUDIGMA_CONFIG", "/env/a.toml"),
+            ("XDG_CONFIG_HOME", "/xdg"),
+            ("HOME", "/home/u"),
+        ];
+        assert_eq!(
+            resolve_config_path_with(Some(Path::new("/cli.toml")), env(&all)),
+            Path::new("/cli.toml")
+        );
+        assert_eq!(
+            resolve_config_path_with(None, env(&all)),
+            Path::new("/env/a.toml")
+        );
+        assert_eq!(
+            resolve_config_path_with(None, env(&all[1..])),
+            Path::new("/xdg/audigma/config.toml")
+        );
+        assert_eq!(
+            resolve_config_path_with(None, env(&all[2..])),
+            Path::new("/home/u/.config/audigma/config.toml")
+        );
+        assert_eq!(
+            resolve_config_path_with(None, env(&[("AUDIGMA_CONFIG", "")])),
+            Path::new("config.toml")
+        );
     }
 }

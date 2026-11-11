@@ -14,18 +14,25 @@ advanced = true
 key = "dsp_threads"
 summary = "How many threads run the DSP."
 description = """
-Accepts `"auto"`, `"inline"` or a whole number of at least 1.
-
-- `"auto"`: `min(channels, max(1, usable physical cores - 1))`, which is one thread per channel for stereo on a machine with 4 or more cores. It never picks `inline` or a single thread.
-- `"inline"`: no worker threads; all channels are processed one after the other on the audio loop thread. The output is bit-identical.
-- A number: that many worker threads, at most one per channel. Channels are spread over them; a worker handles its channels one after the other.
-
-One worker, or `inline`, needs about twice the time of a stereo pair of workers. On the reference machine that is enough up to about DSD256. Use it on small CPUs or for light targets only.
+Channels are spread over the worker threads; a worker handles its channels one after the other. One worker, or `inline`, needs about twice the time of a stereo pair of workers. On the reference machine that is enough up to about DSD256. Use it on small CPUs or for light targets only.
 
 Offline commands (`convert`, `play`, `benchmark`) use the same setting, with two channels.
 """
 default = "auto"
 applies_to = ["run", "play", "convert"]
+also_integer = { label = "Fixed count", summary = "A fixed number of worker threads.", description = "That many worker threads, at most one per channel. Use a whole number of at least 1.", range = [1, 256] }
+
+[[field.options]]
+key = "auto"
+label = "Automatic"
+summary = "One thread per channel, limited by the CPU."
+description = "Uses `min(channels, max(1, usable physical cores - 1))` threads, which is one thread per channel for stereo on a machine with 4 or more cores. It never picks `inline` or a single thread."
+
+[[field.options]]
+key = "inline"
+label = "Inline"
+summary = "No worker threads."
+description = "All channels are processed one after the other on the audio loop thread. The output is bit-identical."
 
 [[field]]
 key = "realtime"

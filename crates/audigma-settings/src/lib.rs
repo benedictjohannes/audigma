@@ -24,14 +24,49 @@ pub enum SettingsError {
     #[error("unsupported schema_version {got} (expected {SCHEMA_VERSION_V1})")]
     UnsupportedSchemaVersion { got: u32 },
 
-    #[error("invalid configuration invariant: {0}")]
-    Validation(&'static str),
+    /// A rule on one key (or one key's relation to others). `path` is the absolute dotted config
+    /// path the message is about, e.g. `output.device`, so a form can show it next to the field.
+    #[error("invalid configuration at `{path}`: {message}")]
+    Validation {
+        path: &'static str,
+        message: &'static str,
+    },
 
     #[error("unable to resolve target rate for input rate {0}")]
     UnresolvedTargetRate(PcmRateHz),
 }
 
+impl SettingsError {
+    /// A validation failure attributed to the config key `path`.
+    pub const fn invalid(path: &'static str, message: &'static str) -> Self {
+        Self::Validation { path, message }
+    }
+
+    /// The config key this error is about, when it is attributed to one.
+    pub fn path(&self) -> Option<&'static str> {
+        match self {
+            Self::Validation { path, .. } => Some(path),
+            _ => None,
+        }
+    }
+}
+
+/// A non-fatal finding attributed to a config key (`Settings::warnings`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldIssue {
+    /// Absolute dotted config path, e.g. `output.keep_audio_sink_ms`.
+    pub path: &'static str,
+    pub message: String,
+}
+
+impl std::fmt::Display for FieldIssue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "`{}`: {}", self.path, self.message)
+    }
+}
+
 /// `[input] backend` options (`Design.md §6.2`).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InputBackend {
@@ -39,6 +74,7 @@ pub enum InputBackend {
 }
 
 /// `[output] backend` options (`Design.md §6.2`).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputBackend {
@@ -47,6 +83,7 @@ pub enum OutputBackend {
 }
 
 /// `[output] transport` options (`Design.md §6.2`).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputTransport {
@@ -56,6 +93,7 @@ pub enum OutputTransport {
 }
 
 /// `[output] container` options (`Design.md §5.2–§5.3`, `§6.2`).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputContainer {
@@ -96,6 +134,7 @@ impl OutputContainer {
 }
 
 /// `[target] rate_family` options (`Design.md §1.1`, `§6.2`).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum TargetRateFamily {
     #[default]
@@ -133,6 +172,7 @@ impl std::fmt::Display for TargetRateFamily {
 }
 
 /// `[gain] peak_analysis` options (`Design.md §4.4`, `§6.2`).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum PeakAnalysisMode {
     #[default]
@@ -143,6 +183,7 @@ pub enum PeakAnalysisMode {
 }
 
 /// `[resampler] drift_correction` options (`Design.md §1.5`, `§6.2`).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DriftCorrection {
@@ -155,6 +196,7 @@ pub enum DriftCorrection {
 }
 
 /// `[offline] tail_policy` options (`Design.md §6.2`).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum TailPolicy {
     #[default]
@@ -165,6 +207,7 @@ pub enum TailPolicy {
 }
 
 /// `[input] rate_mode` options (`Design.md §3.2`, `§6.2`).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RateMode {
@@ -174,6 +217,7 @@ pub enum RateMode {
 }
 
 /// `[output] device_wait_expiry` options: what happens when `device_wait_ms` runs out.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DeviceWaitExpiry {
@@ -185,6 +229,7 @@ pub enum DeviceWaitExpiry {
 }
 
 /// `[output] volume_control` options (`Design.md §1.8`, `§6.2`).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum VolumeControlMode {
     #[default]
@@ -212,6 +257,7 @@ pub fn is_valid_channel_position(token: &str) -> bool {
 }
 
 /// `[input] dsd` options (`Design.md §1.6`, `§6.2`).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct DsdInputConfig {
@@ -233,6 +279,7 @@ impl DsdInputConfig {
 }
 
 /// `[input]` section (`Design.md §6.2`).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InputConfig {
@@ -336,6 +383,7 @@ impl InputConfig {
 }
 
 /// `[output]` section (`Design.md §6.2`).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutputConfig {
@@ -389,6 +437,7 @@ impl OutputConfig {
 }
 
 /// `[target]` section (`Design.md §6.2`).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TargetConfig {
@@ -403,6 +452,7 @@ pub struct TargetConfig {
 }
 
 /// `[gain]` section (`Design.md §6.2`).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GainConfig {
@@ -433,6 +483,7 @@ impl Default for GainConfig {
 }
 
 /// `[resampler]` section (`Design.md §4.2`, `§6.2`).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResamplerConfig {
@@ -474,6 +525,7 @@ impl Default for ResamplerConfig {
 }
 
 /// `[offline]` section (`Design.md §6.2`).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OfflineConfig {
@@ -510,6 +562,23 @@ pub enum DspThreads {
     /// No worker threads: all channels are processed sequentially on the loop thread.
     Inline,
     Count(u32),
+}
+
+/// `"auto" | "inline" | integer >= 1`; mirrors the hand-written `Deserialize` impl.
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for DspThreads {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "DspThreads".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "anyOf": [
+                { "enum": ["auto", "inline"] },
+                { "type": "integer", "minimum": 1 }
+            ]
+        })
+    }
 }
 
 impl Serialize for DspThreads {
@@ -554,6 +623,7 @@ impl<'de> Deserialize<'de> for DspThreads {
 }
 
 /// `[runtime] realtime`: RT scheduling policy.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RealtimeMode {
@@ -567,6 +637,7 @@ pub enum RealtimeMode {
 }
 
 /// `[runtime] systray`: whether the daemon shows a system tray icon.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SystrayMode {
@@ -580,6 +651,7 @@ pub enum SystrayMode {
 }
 
 /// `[runtime] core_selection`: which cores DSP workers prefer.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CoreSelection {
@@ -593,6 +665,7 @@ pub enum CoreSelection {
 }
 
 /// `[runtime] smt_siblings`: tolerance for placing DSP workers on SMT siblings.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SmtSiblings {
@@ -604,6 +677,7 @@ pub enum SmtSiblings {
 }
 
 /// `[runtime]` section: threading, core placement and RT scheduling.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct RuntimeConfig {
@@ -641,44 +715,51 @@ impl RuntimeConfig {
     /// Cross-field checks that do not need the machine.
     fn validate(&self) -> Result<(), SettingsError> {
         if !(MIN_REALTIME_PRIORITY..=MAX_REALTIME_PRIORITY).contains(&self.realtime_priority) {
-            return Err(SettingsError::Validation(
-                "[runtime] realtime_priority must be in 3..=99",
+            return Err(SettingsError::invalid(
+                "runtime.realtime_priority",
+                "must be in 3..=99",
             ));
         }
         if let DspThreads::Count(0) = self.dsp_threads {
-            return Err(SettingsError::Validation(
-                "[runtime] dsp_threads must be \"auto\", \"inline\" or >= 1",
+            return Err(SettingsError::invalid(
+                "runtime.dsp_threads",
+                "must be \"auto\", \"inline\" or >= 1",
             ));
         }
         if self.dsp_threads == DspThreads::Inline && self.dsp_cpus.is_some() {
-            return Err(SettingsError::Validation(
-                "[runtime] dsp_cpus cannot be combined with dsp_threads = \"inline\"",
+            return Err(SettingsError::invalid(
+                "runtime.dsp_cpus",
+                "cannot be combined with dsp_threads = \"inline\"",
             ));
         }
         if let Some(cpus) = &self.dsp_cpus {
             if cpus.is_empty() {
-                return Err(SettingsError::Validation(
-                    "[runtime] dsp_cpus must not be empty",
+                return Err(SettingsError::invalid(
+                    "runtime.dsp_cpus",
+                    "must not be empty",
                 ));
             }
             let mut seen = std::collections::BTreeSet::new();
             if !cpus.iter().all(|c| seen.insert(*c)) {
-                return Err(SettingsError::Validation(
-                    "[runtime] dsp_cpus must not contain duplicates",
+                return Err(SettingsError::invalid(
+                    "runtime.dsp_cpus",
+                    "must not contain duplicates",
                 ));
             }
             if let DspThreads::Count(n) = self.dsp_threads
                 && usize::try_from(n).ok() != Some(cpus.len())
             {
-                return Err(SettingsError::Validation(
-                    "[runtime] dsp_cpus length must equal dsp_threads",
+                return Err(SettingsError::invalid(
+                    "runtime.dsp_cpus",
+                    "length must equal dsp_threads",
                 ));
             }
             if let Some(loop_cpu) = self.loop_cpu
                 && cpus.contains(&loop_cpu)
             {
-                return Err(SettingsError::Validation(
-                    "[runtime] loop_cpu must not be in dsp_cpus",
+                return Err(SettingsError::invalid(
+                    "runtime.loop_cpu",
+                    "must not be in dsp_cpus",
                 ));
             }
         }
@@ -698,7 +779,9 @@ impl RuntimeConfig {
 }
 
 /// `[logging]` options.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LoggingConfig {
     pub format: Option<String>,
     pub level: Option<String>,
@@ -717,6 +800,7 @@ impl LoggingConfig {
 }
 
 /// Top-level `Schema v1` configuration (`Design.md §6`).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
@@ -742,6 +826,13 @@ impl Settings {
     /// Parses a TOML configuration string and validates all `Schema v1` invariants.
     pub fn from_toml_str(toml_str: &str) -> Result<Self, SettingsError> {
         let settings: Self = toml::from_str(toml_str)?;
+        settings.validate()?;
+        Ok(settings)
+    }
+
+    /// Builds and validates settings from an already parsed (and possibly layered) TOML table.
+    pub fn from_toml_table(table: toml::Table) -> Result<Self, SettingsError> {
+        let settings: Self = toml::Value::Table(table).try_into()?;
         settings.validate()?;
         Ok(settings)
     }
@@ -997,23 +1088,26 @@ impl Settings {
         }
 
         if self.target.is_none() {
-            return Err(SettingsError::Validation(
-                "configuration must specify [target]",
+            return Err(SettingsError::invalid(
+                "target",
+                "the configuration must specify [target]",
             ));
         }
 
         if let Some(gain) = &self.gain {
             if ![0.0, 0.25, 0.5].contains(&gain.dsd_safety_margin_db) {
-                return Err(SettingsError::Validation(
-                    "[gain] dsd_safety_margin_db must be 0, 0.25 or 0.5",
+                return Err(SettingsError::invalid(
+                    "gain.dsd_safety_margin_db",
+                    "must be 0, 0.25 or 0.5",
                 ));
             }
         }
 
         if let Some(resampler) = &self.resampler {
             if resampler.modulator_order != 5 && resampler.modulator_order != 7 {
-                return Err(SettingsError::Validation(
-                    "[resampler] modulator_order must be 5 or 7",
+                return Err(SettingsError::invalid(
+                    "resampler.modulator_order",
+                    "must be 5 or 7",
                 ));
             }
         }
@@ -1023,15 +1117,17 @@ impl Settings {
             if let Some(positions) = &input.channel_positions {
                 if let Some(ch) = input.channels {
                     if positions.len() != ch as usize {
-                        return Err(SettingsError::Validation(
-                            "[input] channel_positions length must strictly match channels",
+                        return Err(SettingsError::invalid(
+                            "input.channel_positions",
+                            "length must strictly match channels",
                         ));
                     }
                 }
                 for pos in positions {
                     if !is_valid_channel_position(pos) {
-                        return Err(SettingsError::Validation(
-                            "[input] channel_positions contains unrecognized channel position token",
+                        return Err(SettingsError::invalid(
+                            "input.channel_positions",
+                            "contains an unrecognized channel position token",
                         ));
                     }
                 }
@@ -1040,8 +1136,9 @@ impl Settings {
             if let Some(ref dsd) = input.dsd {
                 if let Some(gain_db) = dsd.gain_db {
                     if !(-30.0..=30.0).contains(&gain_db) || gain_db.is_nan() {
-                        return Err(SettingsError::Validation(
-                            "[input.dsd] gain_db must be between -30.0 and +30.0 dB",
+                        return Err(SettingsError::invalid(
+                            "input.dsd.gain_db",
+                            "must be between -30.0 and +30.0 dB",
                         ));
                     }
                 }
@@ -1056,8 +1153,9 @@ impl Settings {
                 || !(audigma_dsp::MIN_VOLUME_DB..=audigma_dsp::MAX_VOLUME_DB)
                     .contains(&gain.preamp_db)
             {
-                return Err(SettingsError::Validation(
-                    "[gain] preamp_db must be between -120.0 and +12.0 dB",
+                return Err(SettingsError::invalid(
+                    "gain.preamp_db",
+                    "must be between -120.0 and +12.0 dB",
                 ));
             }
         }
@@ -1066,15 +1164,17 @@ impl Settings {
         if let Some(output) = &self.output {
             if let Some(wait) = output.device_wait_ms {
                 if wait < -1 {
-                    return Err(SettingsError::Validation(
-                        "[output] device_wait_ms must be >= -1",
+                    return Err(SettingsError::invalid(
+                        "output.device_wait_ms",
+                        "must be >= -1",
                     ));
                 }
             }
             if let Some(keep) = output.keep_audio_sink_ms {
                 if keep < -1 {
-                    return Err(SettingsError::Validation(
-                        "[output] keep_audio_sink_ms must be >= -1",
+                    return Err(SettingsError::invalid(
+                        "output.keep_audio_sink_ms",
+                        "must be >= -1",
                     ));
                 }
             }
@@ -1083,8 +1183,9 @@ impl Settings {
             if output.backend == Some(OutputBackend::Alsa)
                 && output.device.as_deref().is_none_or(|d| d.trim().is_empty())
             {
-                return Err(SettingsError::Validation(
-                    "[output] backend = \"alsa\" requires device",
+                return Err(SettingsError::invalid(
+                    "output.device",
+                    "is required when backend = \"alsa\"",
                 ));
             }
 
@@ -1093,8 +1194,9 @@ impl Settings {
                 if target.format == TargetFormat::Dsd
                     && output.backend == Some(OutputBackend::Pipewire)
                 {
-                    return Err(SettingsError::Validation(
-                        "[target] format = \"dsd\" requires exclusive ALSA backend (cannot use output.backend = \"pipewire\")",
+                    return Err(SettingsError::invalid(
+                        "output.backend",
+                        "cannot be \"pipewire\" when [target] format = \"dsd\"; DSD output needs exclusive ALSA",
                     ));
                 }
             }
@@ -1103,13 +1205,26 @@ impl Settings {
             if let (Some(container), Some(target)) = (output.container, &self.target) {
                 match container {
                     OutputContainer::Dsf if target.format != TargetFormat::Dsd => {
-                        return Err(SettingsError::Validation(
-                            "output container = \"dsf\" requires [target] format = \"dsd\"",
+                        return Err(SettingsError::invalid(
+                            "output.container",
+                            "\"dsf\" requires [target] format = \"dsd\"",
+                        ));
+                    }
+                    OutputContainer::Flac
+                        if matches!(
+                            target.sample_format,
+                            Some(SampleFormat::S32Le | SampleFormat::F32 | SampleFormat::F64)
+                        ) =>
+                    {
+                        return Err(SettingsError::invalid(
+                            "target.sample_format",
+                            "FLAC output is 16 or 24 bit; use s16le, s24le or s24_3le (or leave it unset for 24 bit)",
                         ));
                     }
                     OutputContainer::Flac if target.format != TargetFormat::Pcm => {
-                        return Err(SettingsError::Validation(
-                            "output container = \"flac\" requires [target] format = \"pcm\"",
+                        return Err(SettingsError::invalid(
+                            "output.container",
+                            "\"flac\" requires [target] format = \"pcm\"",
                         ));
                     }
                     _ => {}
@@ -1122,15 +1237,17 @@ impl Settings {
             match target.format {
                 TargetFormat::Pcm => {
                     if target.pcm_rate_hz.is_none() {
-                        return Err(SettingsError::Validation(
-                            "[target] format = \"pcm\" requires pcm_rate_hz",
+                        return Err(SettingsError::invalid(
+                            "target.pcm_rate_hz",
+                            "is required when format = \"pcm\"",
                         ));
                     }
                 }
                 TargetFormat::Dsd => {
                     if target.dsd_rate.is_none() {
-                        return Err(SettingsError::Validation(
-                            "[target] format = \"dsd\" requires dsd_rate",
+                        return Err(SettingsError::invalid(
+                            "target.dsd_rate",
+                            "is required when format = \"dsd\"",
                         ));
                     }
                 }
@@ -1161,27 +1278,43 @@ impl Settings {
     }
 
     /// Returns any non-fatal configuration warnings (e.g. timeout inconsistencies).
-    pub fn warnings(&self) -> Vec<String> {
+    pub fn warnings(&self) -> Vec<FieldIssue> {
         let mut warnings = Vec::new();
         if let Some(output) = &self.output {
             let wait = output.device_wait_ms();
             let keep = output.keep_audio_sink_ms();
             if wait > 0 && keep > wait {
-                warnings.push(format!(
-                    "[output] keep_audio_sink_ms ({keep} ms) is greater than device_wait_ms ({wait} ms); daemon will {} before sink grace period expires",
-                    match output.device_wait_expiry() {
-                        DeviceWaitExpiry::Exit => "exit",
-                        DeviceWaitExpiry::Pause => "pause",
-                    }
-                ));
+                warnings.push(FieldIssue {
+                    path: "output.keep_audio_sink_ms",
+                    message: format!(
+                        "{keep} ms is greater than device_wait_ms ({wait} ms); daemon will {} before sink grace period expires",
+                        match output.device_wait_expiry() {
+                            DeviceWaitExpiry::Exit => "exit",
+                            DeviceWaitExpiry::Pause => "pause",
+                        }
+                    ),
+                });
             }
         }
         if self.drift_correction() == DriftCorrection::On
             && self.output_backend() == Some(OutputBackend::Pipewire)
         {
-            warnings.push(
-                "[resampler] drift_correction = \"on\" with a PipeWire output adds drift handling to a rate-matched stream; no benefit expected".to_string(),
-            );
+            warnings.push(FieldIssue {
+                path: "resampler.drift_correction",
+                message: "\"on\" with a PipeWire output adds drift handling to a rate-matched stream; no benefit expected".to_string(),
+            });
+        }
+        if self.output_backend() == Some(OutputBackend::Pipewire)
+            && self
+                .target
+                .as_ref()
+                .is_some_and(|t| t.format == TargetFormat::Pcm && t.sample_format.is_some())
+        {
+            warnings.push(FieldIssue {
+                path: "target.sample_format",
+                message: "ignored with a PipeWire output, which always carries unquantized f32"
+                    .to_string(),
+            });
         }
         warnings
     }
@@ -1278,7 +1411,10 @@ impl Settings {
             dsp_config
                 .apply_modulator_limits(bit_rate, gain.dsd_safety_margin_db)
                 .map_err(|_| {
-                    SettingsError::Validation("no modulator for this order and DSD rate")
+                    SettingsError::invalid(
+                        "resampler.modulator_order",
+                        "no modulator for this order and DSD rate",
+                    )
                 })?;
         }
 
@@ -1730,7 +1866,8 @@ dsd_rate = "dsd256"
 modulator_order = 6
 "#;
         let err = Settings::from_toml_str(toml).unwrap_err();
-        assert!(err.to_string().contains("modulator_order must be 5 or 7"));
+        assert!(err.to_string().contains("modulator_order"));
+        assert_eq!(err.path(), Some("resampler.modulator_order"));
     }
 
     #[test]
@@ -2149,14 +2286,14 @@ pcm_rate_hz = 96000
             default.output.as_ref().unwrap().device_wait_expiry(),
             DeviceWaitExpiry::Exit
         );
-        assert!(default.warnings()[0].contains("daemon will exit"));
+        assert!(default.warnings()[0].message.contains("daemon will exit"));
 
         let pause = parse("device_wait_expiry = \"pause\"");
         assert_eq!(
             pause.output.as_ref().unwrap().device_wait_expiry(),
             DeviceWaitExpiry::Pause
         );
-        assert!(pause.warnings()[0].contains("daemon will pause"));
+        assert!(pause.warnings()[0].message.contains("daemon will pause"));
 
         let bad = base.replace("{EXTRA}", "device_wait_expiry = \"later\"");
         assert!(Settings::from_toml_str(&bad).is_err());
@@ -2195,7 +2332,12 @@ pcm_rate_hz = 96000
         let warning_settings = Settings::from_toml_str(warning_toml).unwrap();
         let warnings = warning_settings.warnings();
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("is greater than device_wait_ms"));
+        assert!(
+            warnings[0]
+                .message
+                .contains("is greater than device_wait_ms")
+        );
+        assert_eq!(warnings[0].path, "output.keep_audio_sink_ms");
 
         // Reject values < -1
         let invalid_wait = r#"
@@ -2523,8 +2665,9 @@ pcm_rate_hz = 96000
 "#;
         let err = Settings::from_toml_str(invalid_toml).unwrap_err();
         match err {
-            SettingsError::Validation(msg) => {
-                assert!(msg.contains("[input.dsd] gain_db"));
+            SettingsError::Validation { path, message: msg } => {
+                assert_eq!(path, "input.dsd.gain_db");
+                assert!(msg.contains("between -30.0"));
             }
             other => panic!("expected Validation error, got: {other:?}"),
         }
@@ -2623,5 +2766,64 @@ phase = "minimum"
             .dsp_config;
         assert_eq!(pcm.profile_headroom_db, 0.0);
         assert_eq!(pcm.max_stable_input_dbfs, 0.0);
+    }
+    #[test]
+    fn flac_rejects_32_bit_sample_formats() {
+        let toml = |fmt: &str| {
+            format!(
+                "schema_version = 1\n[output]\ncontainer = \"flac\"\n[target]\nformat = \"pcm\"\npcm_rate_hz = 96000\n{fmt}"
+            )
+        };
+        for bad in ["s32le", "f32", "f64"] {
+            let err =
+                Settings::from_toml_str(&toml(&format!("sample_format = \"{bad}\""))).unwrap_err();
+            assert_eq!(err.path(), Some("target.sample_format"), "{bad}");
+        }
+        for ok in [
+            "",
+            "sample_format = \"s16le\"",
+            "sample_format = \"s24le\"",
+            "sample_format = \"s24_3le\"",
+        ] {
+            Settings::from_toml_str(&toml(ok)).unwrap_or_else(|e| panic!("{ok}: {e}"));
+        }
+    }
+
+    #[test]
+    fn pipewire_output_warns_that_sample_format_is_ignored() {
+        let base = |extra: &str| {
+            Settings::from_toml_str(&format!(
+                "schema_version = 1\n[output]\nbackend = \"pipewire\"\n[target]\nformat = \"pcm\"\npcm_rate_hz = 96000\n{extra}"
+            ))
+            .unwrap()
+        };
+        assert!(base("").warnings().is_empty());
+        let w = base("sample_format = \"s24le\"").warnings();
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].path, "target.sample_format");
+    }
+
+    #[test]
+    fn validation_errors_carry_the_field_path() {
+        let err = Settings::from_toml_str(
+            "schema_version = 1\n[output]\nbackend = \"alsa\"\n[target]\nformat = \"pcm\"\npcm_rate_hz = 96000\n",
+        )
+        .unwrap_err();
+        assert_eq!(err.path(), Some("output.device"));
+        assert!(err.to_string().contains("`output.device`"));
+    }
+    #[test]
+    fn from_toml_table_matches_from_toml_str() {
+        let text = "schema_version = 1\n[gain]\npreamp_db = -3\n[target]\nformat = \"pcm\"\npcm_rate_hz = 96000\n";
+        let table: toml::Table = toml::from_str(text).unwrap();
+        assert_eq!(
+            Settings::from_toml_table(table).unwrap(),
+            Settings::from_toml_str(text).unwrap()
+        );
+        let bad: toml::Table = toml::from_str("schema_version = 1").unwrap();
+        assert_eq!(
+            Settings::from_toml_table(bad).unwrap_err().path(),
+            Some("target")
+        );
     }
 }

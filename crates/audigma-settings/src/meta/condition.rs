@@ -35,6 +35,7 @@ impl Resolver for BTreeMap<String, Value> {
 }
 
 /// A visibility / requirement condition.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum Condition {

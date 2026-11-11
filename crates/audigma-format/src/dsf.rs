@@ -64,6 +64,7 @@ impl DsfBitOrder {
 }
 
 /// Padding strategy for unused trailing bytes in the final 4096-byte DSF block (`Design.md §5.2`).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum DsfPadMode {
     /// Sony DSF v1.01 §4 default: fill unused trailing bytes with `0x00` and record exact `sample_count`.

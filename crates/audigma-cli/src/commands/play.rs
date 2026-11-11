@@ -39,7 +39,7 @@ pub struct PlayArgs {
     pub overrides: Vec<String>,
 
     /// Optional TOML configuration file path
-    #[arg(short = 'c', long = "config")]
+    #[arg(short = 'c', long = "config", env = "AUDIGMA_CONFIG")]
     pub config: Option<PathBuf>,
 
     /// Emit JSON status report at playback completion
@@ -55,11 +55,9 @@ pub fn run_play(args: PlayArgs) -> Result<(), CliError> {
         toml::from_str(&content)
             .map_err(|e| CliError::Config(format!("failed to parse config TOML: {e}")))?
     } else {
-        let serialized = toml::to_string(&default_settings).map_err(|e| {
-            CliError::Serialization(format!("failed to serialize default settings: {e}"))
-        })?;
-        toml::from_str(&serialized)
-            .map_err(|e| CliError::Config(format!("failed to parse default TOML: {e}")))?
+        toml::Table::try_from(&default_settings).map_err(|e| {
+            CliError::Serialization(format!("failed to convert default settings: {e}"))
+        })?
     };
 
     // 2. Configure output as exclusive ALSA Raw container
@@ -133,9 +131,7 @@ pub fn run_play(args: PlayArgs) -> Result<(), CliError> {
     }
 
     // 5. Deserialize merged TOML table into typed Settings and validate
-    let settings_str = toml::to_string(&toml_table)
-        .map_err(|e| CliError::Serialization(format!("failed to serialize merged TOML: {e}")))?;
-    let mut settings = Settings::from_toml_str(&settings_str)?;
+    let mut settings = Settings::from_toml_table(toml_table)?;
     // `play` streams in real time and cannot look ahead; peak analysis is convert-only.
     if let Some(gain) = settings.gain.as_mut() {
         gain.peak_analysis = audigma_settings::PeakAnalysisMode::SinglePass;

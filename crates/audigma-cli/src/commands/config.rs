@@ -20,15 +20,15 @@ pub struct ConfigArgs {
 pub enum ConfigCommands {
     /// Validate configuration file syntax and invariants
     Check {
-        /// Configuration file path (defaults to ~/.config/audigma/config.toml)
-        #[arg(short = 'c', long = "config")]
+        /// Configuration file path (default: $AUDIGMA_CONFIG, else ~/.config/audigma/config.toml)
+        #[arg(short = 'c', long = "config", env = "AUDIGMA_CONFIG")]
         config: Option<PathBuf>,
     },
 
     /// Explain the resolved DSP plan for an input sample rate
     Explain {
-        /// Configuration file path (defaults to ~/.config/audigma/config.toml)
-        #[arg(short = 'c', long = "config")]
+        /// Configuration file path (default: $AUDIGMA_CONFIG, else ~/.config/audigma/config.toml)
+        #[arg(short = 'c', long = "config", env = "AUDIGMA_CONFIG")]
         config: Option<PathBuf>,
 
         /// Input PCM sample rate in Hz (defaults to 44100)

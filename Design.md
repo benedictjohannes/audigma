@@ -288,7 +288,9 @@ The engine state machine runs through:
 
 ## 6. Configuration Schema (`Schema v1`)
 
-Configuration lives at `$XDG_CONFIG_HOME/audigma/config.toml` (default `~/.config/audigma/config.toml`). Unknown keys or invalid cross-field combinations are rejected by `audigma config check`.
+Configuration path resolution, first match wins: `-c` / `--config` (and `--out` for writes), then `$AUDIGMA_CONFIG`, then `$XDG_CONFIG_HOME/audigma/config.toml`, then `~/.config/audigma/config.toml`. Every command that reads a config (`run`, `play`, `convert`, `benchmark`, `config check`, `config explain`) uses this order, and so will `configure` for reads and writes. Unknown keys or invalid cross-field combinations are rejected by `audigma config check`.
+
+Validation errors are attributed to a config key (`SettingsError::Validation { path, message }`; `path` is the absolute dotted key such as `output.device`), and `Settings::warnings()` returns `FieldIssue { path, message }` values, so a UI can show them next to the field. `container = "flac"` rejects an explicit `s32le`, `f32` or `f64` `target.sample_format` (FLAC output is 16 or 24 bit; an unset format writes 24 bit). A PCM target with `output.backend = "pipewire"` and an explicit `target.sample_format` warns that the format is ignored.
 
 ### 6.1 Declarative Target Resolution & `rate_family`
 Target resolution evaluates based on observed input rate/format and resolves into an explicit filter and target configuration. `rate_family = "source"` dynamically pairs 44.1 kHz-family and 48 kHz-family rates:

@@ -21,7 +21,7 @@ pub struct BenchmarkArgs {
     pub input: Option<PathBuf>,
 
     /// Optional TOML configuration file path
-    #[arg(short = 'c', long = "config")]
+    #[arg(short = 'c', long = "config", env = "AUDIGMA_CONFIG")]
     pub config: Option<PathBuf>,
 
     /// Emit benchmark results in JSON format

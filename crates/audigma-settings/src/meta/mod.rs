@@ -43,6 +43,8 @@
 //! against *resolved* values (unset keys resolve to their default).
 
 mod condition;
+#[cfg(all(test, feature = "schema"))]
+mod consistency;
 
 pub use condition::{Condition, Resolver};
 
@@ -54,6 +56,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub type KeyPath = String;
 
 /// Typical deployment, used to pick recommendations.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum UseCase {
@@ -63,6 +66,7 @@ pub enum UseCase {
 }
 
 /// A CLI command that reads the configuration.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Command {
@@ -72,6 +76,7 @@ pub enum Command {
 }
 
 /// What an assist does.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AssistKind {
@@ -86,6 +91,7 @@ pub enum AssistKind {
 }
 
 /// Whether an entry carries a value or only groups other entries.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FieldKind {
@@ -96,6 +102,7 @@ pub enum FieldKind {
 }
 
 /// A recommended value for one use case.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Recommendation {
@@ -104,6 +111,7 @@ pub struct Recommendation {
 }
 
 /// Text for one allowed value of an enum-like key.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OptionMeta {
@@ -121,7 +129,22 @@ pub struct OptionMeta {
     pub show_if: Option<Condition>,
 }
 
+/// A whole number accepted in addition to the listed options, e.g. `runtime.dsp_threads` takes
+/// `"auto"`, `"inline"` or a count. Frontends offer it as one more choice with a number input.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct IntegerOption {
+    pub label: String,
+    pub summary: String,
+    #[serde(default)]
+    pub description: String,
+    /// Inclusive bounds of the accepted numbers.
+    pub range: [i64; 2],
+}
+
 /// Metadata for one configuration key or group.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Field {
@@ -165,9 +188,13 @@ pub struct Field {
     /// Allowed values for enum-like keys.
     #[serde(default)]
     pub options: Vec<OptionMeta>,
+    /// A whole number the key also accepts besides `options` (needs at least one option).
+    #[serde(default)]
+    pub also_integer: Option<IntegerOption>,
 }
 
 /// An assist: a probe, benchmark or check a UI can offer on a key.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Assist {
@@ -184,6 +211,7 @@ pub struct Assist {
 }
 
 /// One named bundle of values offered by a `preset` assist.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AssistPreset {
@@ -204,6 +232,7 @@ struct SectionFile {
 }
 
 /// Title and prose for a whole section (`[section]` table at the top of a section file).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SectionMeta {
@@ -258,6 +287,24 @@ fn option_text(v: &Value) -> Option<String> {
         Value::Bool(b) => Some(b.to_string()),
         _ => None,
     }
+}
+
+/// Everything a frontend needs from the catalog, in canonical order (served as `GET /api/meta`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MetaBundle {
+    /// Sections in UI order, each with its entries in file order.
+    pub sections: Vec<SectionBundle>,
+    pub assists: Vec<Assist>,
+}
+
+/// One section with its entries.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SectionBundle {
+    #[serde(flatten)]
+    pub meta: SectionMeta,
+    pub fields: Vec<Field>,
 }
 
 const SECTION_SOURCES: &[(&str, &str)] = &[
@@ -347,6 +394,28 @@ impl Catalog {
         Ok(catalog)
     }
 
+    /// The whole catalog as one serializable value.
+    pub fn bundle(&self) -> MetaBundle {
+        MetaBundle {
+            sections: self
+                .sections()
+                .into_iter()
+                .filter_map(|name| {
+                    let meta = self.section(name)?.clone();
+                    let prefix = format!("{name}.");
+                    let fields = self
+                        .fields
+                        .iter()
+                        .filter(|f| f.path.starts_with(&prefix))
+                        .cloned()
+                        .collect();
+                    Some(SectionBundle { meta, fields })
+                })
+                .collect(),
+            assists: self.assists().cloned().collect(),
+        }
+    }
+
     /// All entries in file order.
     pub fn fields(&self) -> &[Field] {
         &self.fields
@@ -410,6 +479,55 @@ impl Catalog {
         }
         field.required_for.contains(&command)
             || field.required_if.as_ref().is_some_and(|e| e.eval(r))
+    }
+
+    /// The machine-checkable prose rules: markdown subset, no repo paths, no UI references, rule 13.
+    fn check_field_prose(&self, f: &Field) -> Result<(), MetaError> {
+        let p = f.path.as_str();
+        check_summary(p, &f.summary)?;
+        check_prose(p, "summary", &f.summary)?;
+        check_prose(p, "description", &f.description)?;
+        for o in &f.options {
+            let owner = format!("{p} option `{}`", o.key);
+            check_prose(&owner, "label", &o.label)?;
+            check_prose(&owner, "summary", &o.summary)?;
+            check_prose(&owner, "description", &o.description)?;
+            if let Some(c) = &o.caution {
+                check_prose(&owner, "caution", c)?;
+            }
+        }
+        if let Some(i) = &f.also_integer {
+            let owner = format!("{p} also_integer");
+            check_prose(&owner, "summary", &i.summary)?;
+            check_prose(&owner, "description", &i.description)?;
+        }
+        for (uc, r) in &f.recommended {
+            check_prose(p, &format!("recommended.{uc:?}.why"), &r.why)?;
+        }
+        // Rule 13: the field description does not enumerate or introduce the options.
+        if !f.options.is_empty() {
+            let d = f.description.trim_end();
+            if d.ends_with(':') {
+                return invalid(format!(
+                    "`{p}`: description of a key with options must not end with `:` (rule 13)"
+                ));
+            }
+            for line in f.description.lines() {
+                let Some(rest) = line.trim_start().strip_prefix("- ") else {
+                    continue;
+                };
+                if let Some(tail) = rest.strip_prefix('`') {
+                    let lead = tail.split('`').next().unwrap_or("");
+                    let lead = lead.trim_matches('"');
+                    if f.options.iter().any(|o| o.key == lead) {
+                        return invalid(format!(
+                            "`{p}`: description lists option `{lead}`; move it into the option's own description (rule 13)"
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn known_section(&self, path: &str) -> bool {
@@ -494,10 +612,26 @@ impl Catalog {
                     ));
                 }
             }
+            if let Some(i) = &f.also_integer {
+                if option_keys.is_empty() {
+                    return invalid(format!("`{p}`: also_integer needs at least one option"));
+                }
+                if i.label.trim().is_empty() || i.summary.trim().is_empty() {
+                    return invalid(format!("`{p}`: also_integer needs a label and summary"));
+                }
+                if i.range[0] > i.range[1] {
+                    return invalid(format!("`{p}`: also_integer range min exceeds max"));
+                }
+            }
             if !option_keys.is_empty() {
+                let integer_ok = |v: &Value| match (&f.also_integer, v.as_i64()) {
+                    (Some(i), Some(n)) => (i.range[0]..=i.range[1]).contains(&n),
+                    _ => false,
+                };
                 let check = |what: &str, v: &Value| -> Result<(), MetaError> {
                     match option_text(v) {
                         Some(s) if option_keys.contains(s.as_str()) => Ok(()),
+                        _ if integer_ok(v) => Ok(()),
                         _ => invalid(format!("`{p}`: {what} {v} is not one of the options")),
                     }
                 };
@@ -513,6 +647,16 @@ impl Catalog {
                     return invalid(format!("`{p}`: recommended.{uc:?} needs a reason"));
                 }
             }
+        }
+
+        for f in &self.fields {
+            self.check_field_prose(f)?;
+        }
+        for (name, m) in &self.section_meta {
+            for (what, text) in [("summary", &m.summary), ("description", &m.description)] {
+                check_prose(&format!("[{name}]"), what, text)?;
+            }
+            check_summary(&format!("[{name}]"), &m.summary)?;
         }
 
         for a in self.assists.values() {
@@ -592,7 +736,8 @@ impl Catalog {
                 if !target.options.is_empty() {
                     for lit in lits {
                         let ok = option_text(lit)
-                            .is_some_and(|s| target.options.iter().any(|o| o.key == s));
+                            .is_some_and(|s| target.options.iter().any(|o| o.key == s))
+                            || (target.also_integer.is_some() && lit.is_i64());
                         if !ok {
                             return invalid(format!(
                                 "`{owner}`: {lit} is not an option of `{path}`"
@@ -606,10 +751,77 @@ impl Catalog {
     }
 }
 
+/// One line that ends in a period (rule 10).
+fn check_summary(owner: &str, summary: &str) -> Result<(), MetaError> {
+    if summary.contains('\n') || !summary.trim_end().ends_with('.') {
+        return invalid(format!(
+            "`{owner}`: summary must be one line ending in a period"
+        ));
+    }
+    Ok(())
+}
+
+/// Text outside the markdown subset, repo-internal references and UI cross-references (rules 6,
+/// 9, 14). The text is shown by both frontends and written into config files as `##` comments.
+fn check_prose(owner: &str, what: &str, text: &str) -> Result<(), MetaError> {
+    let bad = |why: &str| invalid(format!("`{owner}` {what}: {why}"));
+    let mut in_code = false;
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            return bad("code fences are outside the markdown subset");
+        }
+        let t = line.trim_start();
+        if t.starts_with('#') || t.starts_with('>') || t.starts_with('|') {
+            return bad("headings, quotes and tables are outside the markdown subset");
+        }
+        // Only text outside `code` spans is checked for the rest.
+        let mut plain = String::new();
+        for ch in line.chars() {
+            if ch == '`' {
+                in_code = !in_code;
+            } else if !in_code {
+                plain.push(ch);
+            }
+        }
+        in_code = false;
+        if plain.contains("](") || plain.contains("![") {
+            return bad("links and images are outside the markdown subset");
+        }
+        if plain.contains('<') && plain.contains('>') {
+            return bad("HTML is outside the markdown subset");
+        }
+        if plain.contains('$') {
+            return bad("`$` (LaTeX) is outside the markdown subset");
+        }
+    }
+    for needle in ["docs/", concat!("scratch", "pad/"), ".md", "Design.md"] {
+        if text.contains(needle) {
+            return bad(&format!("repo-internal reference `{needle}` (rule 6)"));
+        }
+    }
+    let lower = text.to_ascii_lowercase();
+    for needle in [
+        "picker",
+        "dropdown",
+        "drop-down",
+        "see above",
+        "see below",
+        "listed above",
+        "listed below",
+    ] {
+        if lower.contains(needle) {
+            return bad(&format!(
+                "refers to the UI (`{needle}`); comments are plain text (rule 14)"
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{InputConfig, OutputConfig, TargetConfig};
+    use crate::InputConfig;
     use serde_json::json;
 
     fn catalog() -> Catalog {
@@ -621,103 +833,6 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.clone()))
             .collect()
-    }
-
-    /// A config setting every key of the sections that have metadata. Parsing it into the real
-    /// config types (`deny_unknown_fields`) proves each key exists; the leaf set is compared with
-    /// the catalog in both directions.
-    /// TODO(Session 2): replace with the generated JSON Schema so new `Settings` keys are caught.
-    const MAXIMAL: &str = r#"
-[input]
-backend = "pipewire"
-node_name = "audigma_sink"
-sample_format = "s32le"
-rate_hz = 48000
-channels = 2
-channel_positions = ["FL", "FR"]
-rate_mode = "dynamic"
-allowed_rates = [44100, 48000]
-allow_dsd = true
-
-[input.dsd]
-max_intermediate_rate_hz = 192000
-gain_db = 6.0
-
-[output]
-backend = "alsa"
-target_node = "x"
-device = "hw:CARD=K17,DEV=0"
-transport = "native"
-container = "dsf"
-dop_sample_format = "s32le"
-reserve_device = true
-buffer_ms = 40
-period_ms = 5
-volume_control = "software"
-mixer_control = "PCM"
-device_wait_ms = -1
-device_wait_expiry = "exit"
-keep_audio_sink_ms = 5000
-
-[target]
-format = "pcm"
-rate_family = "source"
-pcm_rate_hz = 192000
-dsd_rate = "dsd256"
-sample_format = "s32le"
-dither = "tpdf"
-dither_tpdf_seed = 12345
-
-[gain]
-preamp_db = -3.0
-peak_analysis = "single-pass"
-overload_policy = "mute-recover"
-dsd_safety_margin_db = 0.25
-
-[resampler]
-phase = "linear"
-apodization = "off"
-modulator_order = 5
-drift_correction = "auto"
-max_clock_drift_ppm = 500
-
-[offline]
-tail_policy = "trim-to-duration"
-write_report = true
-dsf_pad_mode = "spec-zero"
-
-[runtime]
-dsp_threads = 2
-realtime = "auto"
-realtime_priority = 20
-core_selection = "performance"
-smt_siblings = "avoid"
-systray = "auto"
-loop_cpu = 1
-dsp_cpus = [2, 3]
-
-[logging]
-format = "text"
-level = "info"
-rt_report_interval_ms = 10000
-"#;
-
-    fn leaves(prefix: &str, v: &toml::Value, out: &mut BTreeSet<String>) {
-        match v {
-            toml::Value::Table(t) => {
-                for (k, v) in t {
-                    let p = if prefix.is_empty() {
-                        k.clone()
-                    } else {
-                        format!("{prefix}.{k}")
-                    };
-                    leaves(&p, v, out);
-                }
-            }
-            _ => {
-                out.insert(prefix.to_string());
-            }
-        }
     }
 
     #[test]
@@ -768,49 +883,6 @@ rt_report_interval_ms = 10000
         let q = c.assist("quality-starting-point").unwrap();
         let names: Vec<_> = q.presets.iter().map(|p| p.key.as_str()).collect();
         assert_eq!(names, ["neutral", "apodizing", "low-latency"]);
-    }
-
-    #[test]
-    fn catalog_matches_settings_keys() {
-        let value: toml::Value = toml::from_str(MAXIMAL).unwrap();
-        let table = value.as_table().unwrap();
-        // Every key exists in the real types.
-        table["input"].clone().try_into::<InputConfig>().unwrap();
-        table["output"].clone().try_into::<OutputConfig>().unwrap();
-        table["target"].clone().try_into::<TargetConfig>().unwrap();
-        table["gain"]
-            .clone()
-            .try_into::<crate::GainConfig>()
-            .unwrap();
-        table["resampler"]
-            .clone()
-            .try_into::<crate::ResamplerConfig>()
-            .unwrap();
-        table["offline"]
-            .clone()
-            .try_into::<crate::OfflineConfig>()
-            .unwrap();
-        table["runtime"]
-            .clone()
-            .try_into::<crate::RuntimeConfig>()
-            .unwrap();
-        table["logging"]
-            .clone()
-            .try_into::<crate::LoggingConfig>()
-            .unwrap();
-
-        let mut config_leaves = BTreeSet::new();
-        leaves("", &value, &mut config_leaves);
-        let catalog_leaves: BTreeSet<String> = catalog()
-            .fields()
-            .iter()
-            .filter(|f| f.kind == FieldKind::Value)
-            .map(|f| f.path.clone())
-            .collect();
-        assert_eq!(
-            config_leaves, catalog_leaves,
-            "metadata entries and config keys must match exactly"
-        );
     }
 
     #[test]
@@ -926,65 +998,165 @@ rt_report_interval_ms = 10000
     fn rejects_structural_mistakes() {
         let e = |s: &str| load_err(s, NO_ASSISTS);
         // unknown TOML key
-        assert!(e("[[field]]\nkey='a'\nsummary='s'\nbogus=1").contains("bogus"));
+        assert!(e("[[field]]\nkey='a'\nsummary='s.'\nbogus=1").contains("bogus"));
         // empty summary
         assert!(e("[[field]]\nkey='a'\nsummary=' '").contains("summary"));
         // duplicate
         assert!(
-            e("[[field]]\nkey='a'\nsummary='s'\n[[field]]\nkey='a'\nsummary='s'")
+            e("[[field]]\nkey='a'\nsummary='s.'\n[[field]]\nkey='a'\nsummary='s.'")
                 .contains("duplicate field")
         );
         // missing parent group
-        assert!(e("[[field]]\nkey='g.a'\nsummary='s'").contains("missing parent group"));
+        assert!(e("[[field]]\nkey='g.a'\nsummary='s.'").contains("missing parent group"));
         // unknown assist
-        assert!(e("[[field]]\nkey='a'\nsummary='s'\nassist=['nope']").contains("unknown assist"));
+        assert!(e("[[field]]\nkey='a'\nsummary='s.'\nassist=['nope']").contains("unknown assist"));
         // malformed condition (a string, and two operators at once)
-        assert!(e("[[field]]\nkey='a'\nsummary='s'\nshow_if='a == 1'").contains("show_if"));
+        assert!(e("[[field]]\nkey='a'\nsummary='s.'\nshow_if='a == 1'").contains("show_if"));
         assert!(
-            e("[[field]]\nkey='a'\nsummary='s'\nshow_if={key='a',eq=1,neq=2}")
+            e("[[field]]\nkey='a'\nsummary='s.'\nshow_if={key='a',eq=1,neq=2}")
                 .contains("exactly one")
         );
         // reference to unknown path in a loaded section
         assert!(
-            e("[[field]]\nkey='a'\nsummary='s'\nshow_if={key='input.zzz',eq='x'}")
+            e("[[field]]\nkey='a'\nsummary='s.'\nshow_if={key='input.zzz',eq='x'}")
                 .contains("unknown path")
         );
         // default not an option
-        assert!(e("[[field]]\nkey='a'\nsummary='s'\ndefault='x'\n[[field.options]]\nkey='y'\nlabel='Y'\nsummary='y'")
+        assert!(e("[[field]]\nkey='a'\nsummary='s.'\ndefault='x'\n[[field.options]]\nkey='y'\nlabel='Y'\nsummary='y'")
             .contains("not one of the options"));
         // numeric option keys match numbers by their text
         assert!(
             Catalog::from_sources(
                 &[(
                     "input",
-                    "[[field]]\nkey='a'\nsummary='s'\ndefault=5\n[[field.options]]\nkey='5'\nlabel='Five'\nsummary='5'\n[[field.options]]\nkey='7'\nlabel='Seven'\nsummary='7'"
+                    "[[field]]\nkey='a'\nsummary='s.'\ndefault=5\n[[field.options]]\nkey='5'\nlabel='Five'\nsummary='5'\n[[field.options]]\nkey='7'\nlabel='Seven'\nsummary='7'"
                 )],
                 NO_ASSISTS
             )
             .is_ok()
         );
         // a number that is not an option is still rejected
-        assert!(e("[[field]]\nkey='a'\nsummary='s'\ndefault=6\n[[field.options]]\nkey='5'\nlabel='Five'\nsummary='5'")
+        assert!(e("[[field]]\nkey='a'\nsummary='s.'\ndefault=6\n[[field.options]]\nkey='5'\nlabel='Five'\nsummary='5'")
             .contains("not one of the options"));
         // literal not an option
-        assert!(e("[[field]]\nkey='a'\nsummary='s'\n[[field.options]]\nkey='y'\nlabel='Y'\nsummary='y'\n[[field]]\nkey='b'\nsummary='s'\nshow_if={key='input.a',eq='z'}")
+        assert!(e("[[field]]\nkey='a'\nsummary='s.'\n[[field.options]]\nkey='y'\nlabel='Y'\nsummary='y'\n[[field]]\nkey='b'\nsummary='s.'\nshow_if={key='input.a',eq='z'}")
             .contains("not an option"));
         // default and default_text together
         assert!(
-            e("[[field]]\nkey='a'\nsummary='s'\ndefault=1\ndefault_text='x'").contains("not both")
+            e("[[field]]\nkey='a'\nsummary='s.'\ndefault=1\ndefault_text='x'").contains("not both")
         );
         // group with a value
-        assert!(e("[[field]]\nkey='g'\nkind='group'\nsummary='s'\ndefault=1").contains("group"));
+        assert!(e("[[field]]\nkey='g'\nkind='group'\nsummary='s.'\ndefault=1").contains("group"));
     }
 
     #[test]
     fn rejects_assist_fills_to_unknown_path() {
         let assists = "[[assist]]\nid='x'\nkind='probe'\nlabel='X'\nfills=['input.zzz']";
         assert!(
-            load_err("[[field]]\nkey='a'\nsummary='s'", assists).contains("fills unknown path")
+            load_err("[[field]]\nkey='a'\nsummary='s.'", assists).contains("fills unknown path")
         );
         // paths in sections without metadata yet are tolerated
         let ok = "[[assist]]\nid='x'\nkind='probe'\nlabel='X'\nfills=['target.zzz']";
-        assert!(Catalog::from_sources(&[("input", "[[field]]\nkey='a'\nsummary='s'")], ok).is_ok());
+        assert!(
+            Catalog::from_sources(&[("input", "[[field]]\nkey='a'\nsummary='s.'")], ok).is_ok()
+        );
+    }
+    fn field_err(body: &str) -> String {
+        load_err(
+            &format!("[[field]]\nkey='a'\nsummary='s.'\n{body}"),
+            NO_ASSISTS,
+        )
+    }
+
+    #[test]
+    fn rejects_text_outside_the_markdown_subset() {
+        for (text, needle) in [
+            ("# Heading", "headings"),
+            ("| a | b |", "tables"),
+            ("see [x](http://y)", "links"),
+            ("a <b>bold</b> word", "HTML"),
+            ("costs $5 and $6", "LaTeX"),
+            ("```\ncode\n```", "code fences"),
+        ] {
+            let e = field_err(&format!("description = \"\"\"{text}\"\"\""));
+            assert!(e.contains(needle), "{text}: {e}");
+        }
+        // inside code spans the same characters are fine
+        assert!(
+            Catalog::from_sources(
+                &[(
+                    "input",
+                    "[[field]]\nkey='a'\nsummary='s.'\ndescription='Use `$HOME` or `<x>`.'"
+                )],
+                NO_ASSISTS
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn rejects_repo_paths_and_ui_references() {
+        assert!(field_err("description='see docs/hardware'").contains("repo-internal"));
+        assert!(field_err("description='see Design.md'").contains("repo-internal"));
+        assert!(field_err("description='pick one in the picker'").contains("UI"));
+        assert!(field_err("description='listed below'").contains("UI"));
+    }
+
+    #[test]
+    fn summaries_are_one_line_ending_in_a_period() {
+        let e = |summary: &str| {
+            load_err(
+                &format!("[[field]]\nkey='a'\nsummary=\"{summary}\""),
+                NO_ASSISTS,
+            )
+        };
+        assert!(e("No period").contains("ending in a period"));
+        assert!(e("Two\\nlines.").contains("ending in a period"));
+    }
+
+    #[test]
+    fn field_description_does_not_repeat_the_options() {
+        let opts = "[[field.options]]\nkey='linear'\nlabel='L'\nsummary='l.'\n[[field.options]]\nkey='minimum'\nlabel='M'\nsummary='m.'";
+        let e = |desc: &str| field_err(&format!("description = \"\"\"{desc}\"\"\"\n{opts}"));
+        assert!(e("Phase.\n\n- `linear`: symmetric.").contains("rule 13"));
+        assert!(e("Phase.\n\n- `\"minimum\"`: causal.").contains("rule 13"));
+        assert!(e("One of:").contains("rule 13"));
+        // bullets that are not options, and prose without options, are fine
+        let ok = format!(
+            "[[field]]\nkey='a'\nsummary='s.'\ndescription='Steps:\\n\\n- `first`: x'\n{opts}"
+        );
+        assert!(Catalog::from_sources(&[("input", &ok)], NO_ASSISTS).is_ok());
+        assert!(
+            Catalog::from_sources(
+                &[(
+                    "input",
+                    "[[field]]\nkey='a'\nsummary='s.'\ndescription='- `linear`: x\\n\\nEnds:'"
+                )],
+                NO_ASSISTS
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn also_integer_needs_options_and_a_sane_range() {
+        let opt = "[[field.options]]\nkey='auto'\nlabel='A'\nsummary='a.'";
+        assert!(
+            field_err("also_integer={label='N',summary='n.',range=[1,4]}")
+                .contains("at least one option")
+        );
+        assert!(
+            field_err(&format!(
+                "also_integer={{label='N',summary='n.',range=[4,1]}}\n{opt}"
+            ))
+            .contains("min exceeds max")
+        );
+        // an integer default inside the range is accepted next to the options
+        let ok = format!(
+            "[[field]]\nkey='a'\nsummary='s.'\ndefault=2\nalso_integer={{label='N',summary='n.',range=[1,4]}}\n{opt}"
+        );
+        assert!(Catalog::from_sources(&[("input", &ok)], NO_ASSISTS).is_ok());
+        let bad = ok.replace("default=2", "default=9");
+        assert!(Catalog::from_sources(&[("input", &bad)], NO_ASSISTS).is_err());
     }
 }

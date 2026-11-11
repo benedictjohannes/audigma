@@ -24,7 +24,7 @@ pub struct ConvertArgs {
     pub output: String,
 
     /// Optional TOML configuration file path
-    #[arg(short = 'c', long = "config")]
+    #[arg(short = 'c', long = "config", env = "AUDIGMA_CONFIG")]
     pub config: Option<PathBuf>,
 
     /// Emit JSON report at the end of conversion

@@ -44,8 +44,8 @@ extern "C" fn sigint_sigterm_handler(_: libc::c_int) {
 
 #[derive(Args, Debug)]
 pub struct RunArgs {
-    /// Optional configuration file path (defaults to ~/.config/audigma/config.toml)
-    #[arg(short = 'c', long = "config")]
+    /// Optional configuration file path (default: $AUDIGMA_CONFIG, else ~/.config/audigma/config.toml)
+    #[arg(short = 'c', long = "config", env = "AUDIGMA_CONFIG")]
     pub config: Option<PathBuf>,
 
     #[command(flatten)]

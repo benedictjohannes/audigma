@@ -1,0 +1,762 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "gain": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GainConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "input": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/InputConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "logging": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LoggingConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "offline": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/OfflineConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "output": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/OutputConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "resampler": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ResamplerConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "runtime": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RuntimeConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "target": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TargetConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version"
+  ],
+  "$defs": {
+    "Apodization": {
+      "enum": [
+        "off",
+        "gentle",
+        18000,
+        18500,
+        19000,
+        20000
+      ]
+    },
+    "CoreSelection": {
+      "type": "string",
+      "enum": [
+        "performance",
+        "efficient",
+        "os"
+      ]
+    },
+    "DeviceWaitExpiry": {
+      "type": "string",
+      "enum": [
+        "exit",
+        "pause"
+      ]
+    },
+    "DitherType": {
+      "type": "string",
+      "enum": [
+        "none",
+        "tpdf"
+      ]
+    },
+    "DriftCorrection": {
+      "type": "string",
+      "enum": [
+        "off",
+        "auto",
+        "on"
+      ]
+    },
+    "DsdInputConfig": {
+      "type": "object",
+      "properties": {
+        "gain_db": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "max_intermediate_rate_hz": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PcmRateHz"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "DsdMultiplier": {
+      "type": "string",
+      "enum": [
+        "dsd64",
+        "dsd128",
+        "dsd256",
+        "dsd512"
+      ]
+    },
+    "DsfPadMode": {
+      "type": "string",
+      "enum": [
+        "spec-zero",
+        "dsd-silence"
+      ]
+    },
+    "DspThreads": {
+      "anyOf": [
+        {
+          "enum": [
+            "auto",
+            "inline"
+          ]
+        },
+        {
+          "type": "integer",
+          "minimum": 1
+        }
+      ]
+    },
+    "FilterPhase": {
+      "type": "string",
+      "enum": [
+        "linear",
+        "minimum"
+      ]
+    },
+    "GainConfig": {
+      "type": "object",
+      "properties": {
+        "dsd_safety_margin_db": {
+          "type": "number",
+          "format": "double",
+          "default": 0.25
+        },
+        "overload_policy": {
+          "$ref": "#/$defs/OverloadPolicy",
+          "default": "mute-recover"
+        },
+        "peak_analysis": {
+          "$ref": "#/$defs/PeakAnalysisMode",
+          "default": "single-pass"
+        },
+        "preamp_db": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "InputBackend": {
+      "type": "string",
+      "enum": [
+        "pipewire"
+      ]
+    },
+    "InputConfig": {
+      "type": "object",
+      "properties": {
+        "allow_dsd": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "allowed_rates": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "backend": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InputBackend"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "channel_positions": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "channels": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "dsd": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DsdInputConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "node_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rate_hz": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PcmRateHz"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rate_mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RateMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sample_format": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SampleFormat"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "LoggingConfig": {
+      "type": "object",
+      "properties": {
+        "format": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "level": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rt_report_interval_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "OfflineConfig": {
+      "type": "object",
+      "properties": {
+        "dsf_pad_mode": {
+          "$ref": "#/$defs/DsfPadMode",
+          "default": "spec-zero"
+        },
+        "tail_policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TailPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "write_report": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "OutputBackend": {
+      "type": "string",
+      "enum": [
+        "pipewire",
+        "alsa"
+      ]
+    },
+    "OutputConfig": {
+      "type": "object",
+      "properties": {
+        "backend": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OutputBackend"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "buffer_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "container": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OutputContainer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "device": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "device_wait_expiry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeviceWaitExpiry"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "device_wait_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "dop_sample_format": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SampleFormat"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "keep_audio_sink_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "mixer_control": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "period_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "reserve_device": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "target_node": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "transport": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OutputTransport"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "volume_control": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VolumeControlMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "OutputContainer": {
+      "type": "string",
+      "enum": [
+        "dsf",
+        "wav",
+        "flac",
+        "raw"
+      ]
+    },
+    "OutputTransport": {
+      "type": "string",
+      "enum": [
+        "pcm",
+        "native",
+        "dop"
+      ]
+    },
+    "OverloadPolicy": {
+      "type": "string",
+      "enum": [
+        "mute-recover",
+        "error"
+      ]
+    },
+    "PcmRateHz": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "PeakAnalysisMode": {
+      "type": "string",
+      "enum": [
+        "single-pass",
+        "two-pass"
+      ]
+    },
+    "RateMode": {
+      "type": "string",
+      "enum": [
+        "dynamic",
+        "fixed"
+      ]
+    },
+    "RealtimeMode": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "required",
+        "off"
+      ]
+    },
+    "ResamplerConfig": {
+      "type": "object",
+      "properties": {
+        "apodization": {
+          "$ref": "#/$defs/Apodization",
+          "default": "off"
+        },
+        "drift_correction": {
+          "$ref": "#/$defs/DriftCorrection",
+          "default": "auto"
+        },
+        "max_clock_drift_ppm": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "modulator_order": {
+          "type": "integer",
+          "format": "uint8",
+          "default": 5,
+          "maximum": 255,
+          "minimum": 0
+        },
+        "phase": {
+          "$ref": "#/$defs/FilterPhase",
+          "default": "linear"
+        }
+      },
+      "additionalProperties": false
+    },
+    "RuntimeConfig": {
+      "type": "object",
+      "properties": {
+        "core_selection": {
+          "$ref": "#/$defs/CoreSelection",
+          "default": "performance"
+        },
+        "dsp_cpus": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "dsp_threads": {
+          "$ref": "#/$defs/DspThreads",
+          "default": "auto"
+        },
+        "loop_cpu": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "realtime": {
+          "$ref": "#/$defs/RealtimeMode",
+          "default": "auto"
+        },
+        "realtime_priority": {
+          "type": "integer",
+          "format": "uint8",
+          "default": 20,
+          "maximum": 255,
+          "minimum": 0
+        },
+        "smt_siblings": {
+          "$ref": "#/$defs/SmtSiblings",
+          "default": "avoid"
+        },
+        "systray": {
+          "$ref": "#/$defs/SystrayMode",
+          "default": "off"
+        }
+      },
+      "additionalProperties": false
+    },
+    "SampleFormat": {
+      "type": "string",
+      "enum": [
+        "s16le",
+        "s24le",
+        "s24_3le",
+        "s32le",
+        "f32",
+        "f64",
+        "dsd_u32_be",
+        "dsd_u32_le"
+      ]
+    },
+    "SmtSiblings": {
+      "type": "string",
+      "enum": [
+        "avoid",
+        "never"
+      ]
+    },
+    "SystrayMode": {
+      "type": "string",
+      "enum": [
+        "off",
+        "auto",
+        "required"
+      ]
+    },
+    "TailPolicy": {
+      "type": "string",
+      "enum": [
+        "trim-to-duration",
+        "preserve-tail"
+      ]
+    },
+    "TargetConfig": {
+      "type": "object",
+      "properties": {
+        "dither": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DitherType"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dither_tpdf_seed": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "dsd_rate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DsdMultiplier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "format": {
+          "$ref": "#/$defs/TargetFormat"
+        },
+        "pcm_rate_hz": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PcmRateHz"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rate_family": {
+          "$ref": "#/$defs/TargetRateFamily",
+          "default": "source"
+        },
+        "sample_format": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SampleFormat"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "format"
+      ]
+    },
+    "TargetFormat": {
+      "type": "string",
+      "enum": [
+        "pcm",
+        "dsd"
+      ]
+    },
+    "TargetRateFamily": {
+      "type": "string",
+      "enum": [
+        "source",
+        "44100",
+        "48000"
+      ]
+    },
+    "VolumeControlMode": {
+      "type": "string",
+      "enum": [
+        "hardware-software-fallback",
+        "software",
+        "hardware",
+        "none"
+      ]
+    }
+  }
+}

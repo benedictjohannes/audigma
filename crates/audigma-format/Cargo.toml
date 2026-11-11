@@ -15,3 +15,8 @@ symphonia = { workspace = true }
 hound = { workspace = true }
 flacenc = { workspace = true }
 tracing = { workspace = true }
+schemars = { workspace = true, optional = true }
+
+[features]
+# `JsonSchema` derives for the configuration types (configurator schema pipeline).
+schema = ["dep:schemars", "audigma-dsp/schema"]

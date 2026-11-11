@@ -8,9 +8,14 @@ rust-version.workspace = true
 description = "Core DSP types, rate domains, filter/modulator tables, and PCM/DSD signal processing for audigma"
 
 [dependencies]
+schemars = { workspace = true, optional = true }
 serde = { workspace = true }
 smallvec = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
 toml = { workspace = true }
+
+[features]
+# `JsonSchema` derives for the configuration types (configurator schema pipeline).
+schema = ["dep:schemars"]
