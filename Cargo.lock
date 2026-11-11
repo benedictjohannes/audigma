@@ -244,6 +244,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 name = "audigma-cli"
 version = "0.1.0"
 dependencies = [
+ "audigma-configurator",
  "audigma-dsp",
  "audigma-engine",
  "audigma-format",
@@ -266,10 +267,16 @@ dependencies = [
 name = "audigma-configurator"
 version = "0.1.0"
 dependencies = [
+ "audigma-dsp",
+ "audigma-engine",
+ "audigma-format",
+ "audigma-io",
  "audigma-settings",
  "schemars",
+ "serde",
  "serde_json",
  "tempfile",
+ "thiserror",
 ]
 
 [[package]]

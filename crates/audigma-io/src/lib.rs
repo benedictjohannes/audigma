@@ -9,6 +9,7 @@ pub mod pipewire;
 pub mod pipewire_probe;
 #[cfg(feature = "pipewire")]
 pub mod pipewire_watch;
+pub mod runtime;
 #[cfg(target_os = "linux")]
 pub mod sched;
 pub mod stdio;

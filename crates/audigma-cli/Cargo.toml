@@ -18,6 +18,7 @@ dbus = ["audigma-io/dbus"]
 pipewire = ["audigma-io/pipewire"]
 
 [dependencies]
+audigma-configurator = { path = "../audigma-configurator" }
 audigma-dsp = { path = "../audigma-dsp" }
 audigma-format = { path = "../audigma-format" }
 audigma-settings = { path = "../audigma-settings" }

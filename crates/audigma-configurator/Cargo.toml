@@ -5,11 +5,17 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Configurator core for audigma: schema pipeline now; draft, writer and assists later"
+description = "Configurator core for audigma: schema pipeline and assists now; draft and writer later"
 
 [dependencies]
 audigma-settings = { path = "../audigma-settings", features = ["meta", "schema"] }
+audigma-dsp = { path = "../audigma-dsp" }
+audigma-engine = { path = "../audigma-engine" }
+audigma-format = { path = "../audigma-format" }
+audigma-io = { path = "../audigma-io" }
 schemars = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
