@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use audigma_dsp::rates::PcmRateHz;
 use audigma_engine::OfflinePipeline;
-use audigma_engine::traits::{AudioInput, AudioOutput, EngineError};
+use audigma_engine::traits::{AudioInput, AudioOutput};
 use audigma_io::file::{FileAudioInput, FileAudioOutput};
 use audigma_io::stdio::{StdioAudioInput, StdioAudioOutput};
 use audigma_settings::{OutputContainer, Settings};
@@ -33,44 +33,32 @@ pub struct ConvertArgs {
 }
 
 pub fn run_convert(args: ConvertArgs) -> Result<(), CliError> {
-    // 1. Resolve Settings
+    // 1. Resolve the container from the output path, then the settings.
+    // `-o -` is a raw stream; otherwise the file extension decides (no config key).
+    let container = if args.output == "-" {
+        OutputContainer::Raw
+    } else {
+        OutputContainer::from_path(Path::new(&args.output)).ok_or_else(|| {
+            CliError::Config(format!(
+                "cannot tell the output container from '{}': use a .dsf, .wav, .flac or .raw extension, or -o - for a raw stream",
+                args.output
+            ))
+        })?
+    };
     let settings = if let Some(ref cfg_path) = args.config {
         let content = std::fs::read_to_string(cfg_path)?;
         Settings::from_toml_str(&content)?
-    } else if args.output != "-" {
-        // Auto-infer from output extension
-        let ext = Path::new(&args.output)
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
-        let container = OutputContainer::from_extension(ext).unwrap_or(OutputContainer::Dsf);
-        Settings::default_offline(container)
     } else {
-        // Output is stdout ("-")
-        Settings::default_offline(OutputContainer::Raw)
+        Settings::default_offline(container)
     };
+    if let Some(target) = settings.target.as_ref() {
+        container.check_target(target)?;
+    }
 
-    // If writing to stdout, verify invariants
+    // If writing to stdout, verify invariants (stdout is non-seekable, so only a raw
+    // stream, which `-o -` always is, can be written to it).
     if args.output == "-" {
-        // Stdout is non-seekable: only headerless raw streams can be written to it.
         let output = settings.output.as_ref();
-        match output.and_then(|o| o.container) {
-            Some(OutputContainer::Dsf) => {
-                return Err(EngineError::SeekableOutputRequired { container: "dsf" }.into());
-            }
-            Some(OutputContainer::Wav) => {
-                return Err(EngineError::SeekableOutputRequired { container: "wav" }.into());
-            }
-            Some(OutputContainer::Flac) => {
-                return Err(EngineError::SeekableOutputRequired { container: "flac" }.into());
-            }
-            Some(OutputContainer::Raw) => {}
-            None => {
-                return Err(CliError::Config(
-                    "writing to stdout (-o -) requires [output] container = \"raw\"".to_string(),
-                ));
-            }
-        }
         let target = settings.target.as_ref();
         let transport = output.and_then(|o| o.transport);
         if transport == Some(audigma_settings::OutputTransport::Dop) {
@@ -145,6 +133,7 @@ pub fn run_convert(args: ConvertArgs) -> Result<(), CliError> {
             &*input,
             Some(crate::runtime::worker_setup(&placement)),
         )?
+        .with_container(container)
     };
     let report = pipeline.run(&mut *input, output)?;
 

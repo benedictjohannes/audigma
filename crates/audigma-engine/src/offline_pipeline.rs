@@ -92,18 +92,15 @@ impl<'a> ContainerWriter<'a> {
         settings: &Settings,
         dsp_config: &DspConfiguration,
         target_spec: &TargetRateSpec,
+        container: Option<OutputContainer>,
         output: Box<dyn AudioOutput + 'a>,
     ) -> Result<Self, EngineError> {
         let dither = dsp_config.dither;
         let dither_seed = dsp_config.dither_tpdf_seed;
-        let container = settings
-            .output
-            .as_ref()
-            .and_then(|o| o.container)
-            .unwrap_or(match target_spec {
-                TargetRateSpec::Dsd { .. } => OutputContainer::Dsf,
-                TargetRateSpec::Pcm { .. } => OutputContainer::Wav,
-            });
+        let container = container.unwrap_or(match target_spec {
+            TargetRateSpec::Dsd { .. } => OutputContainer::Dsf,
+            TargetRateSpec::Pcm { .. } => OutputContainer::Wav,
+        });
 
         match container {
             OutputContainer::Dsf => {
@@ -459,6 +456,8 @@ pub struct OfflinePipeline {
     /// Raw DSD input decoded by the workers (`None`: the input delivers decoded PCM).
     raw_dsd: bool,
     mult: usize,
+    /// Output container; `None` writes DSF for DSD targets and WAV for PCM targets.
+    container: Option<OutputContainer>,
 }
 
 impl OfflinePipeline {
@@ -542,6 +541,7 @@ impl OfflinePipeline {
             processor,
             raw_dsd: dsd_input.is_some(),
             mult,
+            container: None,
         })
     }
 
@@ -558,6 +558,12 @@ impl OfflinePipeline {
     /// Returns the underlying tile processor.
     pub fn processor(&self) -> &TileProcessor {
         &self.processor
+    }
+
+    /// Selects the output container (the CLI derives it from the output file extension).
+    pub fn with_container(mut self, container: OutputContainer) -> Self {
+        self.container = Some(container);
+        self
     }
 
     /// Layers a runtime user-volume attenuation (dB) on top of `[gain] preamp_db`.
@@ -587,8 +593,13 @@ impl OfflinePipeline {
             // Automatic Opportunistic Bit-Exact DSD Passthrough (Design.md §1.6):
             // The input is DSD, target matches input rate, and software volume attenuation is unity (100%).
             // Direct bit-exact transfer bypassing decimation, filtering, and remodulation.
-            let mut container_writer =
-                ContainerWriter::new(&self.settings, &self.plan.dsp_config, &target_spec, output)?;
+            let mut container_writer = ContainerWriter::new(
+                &self.settings,
+                &self.plan.dsp_config,
+                &target_spec,
+                self.container,
+                output,
+            )?;
             let total_input_frames = transfer_offline_dsd_passthrough(input, |l, r| {
                 container_writer.write_stereo_dsd(l, r)
             })?;
@@ -659,8 +670,13 @@ impl OfflinePipeline {
         let mut tail_manager =
             TailManager::new(tail_policy, aligned_group_delay, target_output_samples);
 
-        let mut container_writer =
-            ContainerWriter::new(&self.settings, &self.plan.dsp_config, &target_spec, output)?;
+        let mut container_writer = ContainerWriter::new(
+            &self.settings,
+            &self.plan.dsp_config,
+            &target_spec,
+            self.container,
+            output,
+        )?;
 
         let mut feeder = InputFeeder::new(&self.processor, self.raw_dsd);
         let mut total_input_frames = 0u64;

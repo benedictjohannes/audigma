@@ -92,10 +92,9 @@ pub enum OutputTransport {
     Dop,
 }
 
-/// `[output] container` options (`Design.md §5.2–§5.3`, `§6.2`).
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+/// Offline output container (`Design.md §5.2–§5.3`). Not a config key: `audigma convert`
+/// derives it from the output file extension (`-o -` is raw).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputContainer {
     Dsf,
     Wav,
@@ -121,6 +120,46 @@ impl OutputContainer {
         path.extension()
             .and_then(|ext| ext.to_str())
             .and_then(Self::from_extension)
+    }
+
+    /// Lower-case name, as used in messages and file extensions.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Dsf => "dsf",
+            Self::Wav => "wav",
+            Self::Flac => "flac",
+            Self::Raw => "raw",
+        }
+    }
+
+    /// Checks that `target` can be written to this container.
+    pub fn check_target(self, target: &TargetConfig) -> Result<(), SettingsError> {
+        match self {
+            Self::Dsf if target.format != TargetFormat::Dsd => Err(SettingsError::invalid(
+                "target.format",
+                "a .dsf output requires format = \"dsd\"",
+            )),
+            Self::Wav if target.format != TargetFormat::Pcm => Err(SettingsError::invalid(
+                "target.format",
+                "a .wav output requires format = \"pcm\"",
+            )),
+            Self::Flac if target.format != TargetFormat::Pcm => Err(SettingsError::invalid(
+                "target.format",
+                "a .flac output requires format = \"pcm\"",
+            )),
+            Self::Flac
+                if matches!(
+                    target.sample_format,
+                    Some(SampleFormat::F32 | SampleFormat::F64)
+                ) =>
+            {
+                Err(SettingsError::invalid(
+                    "target.sample_format",
+                    "FLAC carries integer PCM only; use s16le, s24le, s24_3le or s32le (or leave it unset for 32 bit)",
+                ))
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Returns the canonical target format associated with this container, if fixed.
@@ -391,7 +430,6 @@ pub struct OutputConfig {
     pub target_node: Option<String>,
     pub device: Option<String>,
     pub transport: Option<OutputTransport>,
-    pub container: Option<OutputContainer>,
     pub dop_sample_format: Option<SampleFormat>,
     pub reserve_device: Option<bool>,
     pub buffer_ms: Option<u32>,
@@ -859,7 +897,6 @@ impl Settings {
                     target_node: None,
                     device: None,
                     transport: None,
-                    container: Some(OutputContainer::Dsf),
                     dop_sample_format: None,
                     reserve_device: None,
                     buffer_ms: None,
@@ -918,7 +955,6 @@ impl Settings {
                     target_node: None,
                     device: None,
                     transport: None,
-                    container: Some(OutputContainer::Wav),
                     dop_sample_format: None,
                     reserve_device: None,
                     buffer_ms: None,
@@ -977,7 +1013,6 @@ impl Settings {
                     target_node: None,
                     device: None,
                     transport: None,
-                    container: Some(OutputContainer::Flac),
                     dop_sample_format: None,
                     reserve_device: None,
                     buffer_ms: None,
@@ -1036,7 +1071,6 @@ impl Settings {
                     target_node: None,
                     device: None,
                     transport: Some(OutputTransport::Dop),
-                    container: Some(OutputContainer::Raw),
                     dop_sample_format: Some(SampleFormat::S24_3Le),
                     reserve_device: None,
                     buffer_ms: None,
@@ -1198,36 +1232,6 @@ impl Settings {
                         "output.backend",
                         "cannot be \"pipewire\" when [target] format = \"dsd\"; DSD output needs exclusive ALSA",
                     ));
-                }
-            }
-
-            // Container vs Target format consistency
-            if let (Some(container), Some(target)) = (output.container, &self.target) {
-                match container {
-                    OutputContainer::Dsf if target.format != TargetFormat::Dsd => {
-                        return Err(SettingsError::invalid(
-                            "output.container",
-                            "\"dsf\" requires [target] format = \"dsd\"",
-                        ));
-                    }
-                    OutputContainer::Flac
-                        if matches!(
-                            target.sample_format,
-                            Some(SampleFormat::F32 | SampleFormat::F64)
-                        ) =>
-                    {
-                        return Err(SettingsError::invalid(
-                            "target.sample_format",
-                            "FLAC carries integer PCM only; use s16le, s24le, s24_3le or s32le (or leave it unset for 32 bit)",
-                        ));
-                    }
-                    OutputContainer::Flac if target.format != TargetFormat::Pcm => {
-                        return Err(SettingsError::invalid(
-                            "output.container",
-                            "\"flac\" requires [target] format = \"pcm\"",
-                        ));
-                    }
-                    _ => {}
                 }
             }
         }
@@ -1877,9 +1881,6 @@ schema_version = 1
 
 [input]
 
-[output]
-container = "dsf"
-
 [target]
 format = "dsd"
 rate_family = "44100"
@@ -1923,7 +1924,6 @@ rate_hz = 44100
 channels = 2
 
 [output]
-container = "raw"
 transport = "dop"
 dop_sample_format = "s24_3le"
 
@@ -1973,9 +1973,6 @@ schema_version = 1
 
 [input]
 
-[output]
-container = "flac"
-
 [target]
 format = "pcm"
 rate_family = "48000"
@@ -1990,10 +1987,9 @@ overload_policy = "error"
 [resampler]
 "#;
         let settings = Settings::from_toml_str(flac_toml).unwrap();
-        assert_eq!(
-            settings.output.as_ref().unwrap().container,
-            Some(OutputContainer::Flac)
-        );
+        OutputContainer::Flac
+            .check_target(settings.target.as_ref().unwrap())
+            .unwrap();
 
         // Test extension & path inference
         assert_eq!(
@@ -2028,28 +2024,36 @@ overload_policy = "error"
     }
 
     #[test]
-    fn test_rejects_container_target_mismatch() {
-        let flac_dsd = r#"
-schema_version = 1
-[output]
-container = "flac"
-[target]
-format = "dsd"
-rate_family = "44100"
-dsd_rate = "dsd256"
-"#;
-        assert!(Settings::from_toml_str(flac_dsd).is_err());
+    fn test_container_target_mismatch() {
+        let target = |body: &str| {
+            Settings::from_toml_str(&format!("schema_version = 1\n[target]\n{body}"))
+                .unwrap()
+                .target
+                .unwrap()
+        };
+        let dsd = target("format = \"dsd\"\nrate_family = \"44100\"\ndsd_rate = \"dsd256\"\n");
+        let pcm = target("format = \"pcm\"\nrate_family = \"48000\"\npcm_rate_hz = 192000\n");
+        for c in [OutputContainer::Flac, OutputContainer::Wav] {
+            assert_eq!(
+                c.check_target(&dsd).unwrap_err().path(),
+                Some("target.format")
+            );
+            c.check_target(&pcm).unwrap();
+        }
+        assert_eq!(
+            OutputContainer::Dsf.check_target(&pcm).unwrap_err().path(),
+            Some("target.format")
+        );
+        OutputContainer::Dsf.check_target(&dsd).unwrap();
+        OutputContainer::Raw.check_target(&dsd).unwrap();
+        OutputContainer::Raw.check_target(&pcm).unwrap();
+    }
 
-        let dsf_pcm = r#"
-schema_version = 1
-[output]
-container = "dsf"
-[target]
-format = "pcm"
-rate_family = "48000"
-pcm_rate_hz = 192000
-"#;
-        assert!(Settings::from_toml_str(dsf_pcm).is_err());
+    #[test]
+    fn test_output_container_key_is_gone() {
+        let err = Settings::from_toml_str("schema_version = 1\n[output]\ncontainer = \"flac\"\n")
+            .unwrap_err();
+        assert!(err.to_string().contains("container"), "{err}");
     }
 
     #[test]
@@ -2770,13 +2774,14 @@ phase = "minimum"
     #[test]
     fn flac_rejects_float_sample_formats() {
         let toml = |fmt: &str| {
-            format!(
-                "schema_version = 1\n[output]\ncontainer = \"flac\"\n[target]\nformat = \"pcm\"\npcm_rate_hz = 96000\n{fmt}"
-            )
+            format!("schema_version = 1\n[target]\nformat = \"pcm\"\npcm_rate_hz = 96000\n{fmt}")
+        };
+        let check = |fmt: &str| {
+            let settings = Settings::from_toml_str(&toml(fmt))?;
+            OutputContainer::Flac.check_target(settings.target.as_ref().unwrap())
         };
         for bad in ["f32", "f64"] {
-            let err =
-                Settings::from_toml_str(&toml(&format!("sample_format = \"{bad}\""))).unwrap_err();
+            let err = check(&format!("sample_format = \"{bad}\"")).unwrap_err();
             assert_eq!(err.path(), Some("target.sample_format"), "{bad}");
         }
         for ok in [
@@ -2786,7 +2791,7 @@ phase = "minimum"
             "sample_format = \"s24_3le\"",
             "sample_format = \"s32le\"",
         ] {
-            Settings::from_toml_str(&toml(ok)).unwrap_or_else(|e| panic!("{ok}: {e}"));
+            check(ok).unwrap_or_else(|e| panic!("{ok}: {e}"));
         }
     }
 

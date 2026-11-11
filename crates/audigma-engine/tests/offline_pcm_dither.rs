@@ -13,12 +13,7 @@ use std::io::Cursor;
 
 const IN_RATE: PcmRateHz = PcmRateHz::PCM_44100;
 
-fn settings(
-    container: OutputContainer,
-    format: SampleFormat,
-    dither: DitherType,
-    seed: Option<u64>,
-) -> Settings {
+fn settings(format: SampleFormat, dither: DitherType, seed: Option<u64>) -> Settings {
     let mut s = Settings::default_offline(OutputContainer::Wav);
     let target = s.target.as_mut().unwrap();
     target.pcm_rate_hz = Some(PcmRateHz::PCM_48000);
@@ -26,14 +21,13 @@ fn settings(
     target.dither = Some(dither);
     target.dither_tpdf_seed = seed;
     let output = s.output.as_mut().unwrap();
-    output.container = Some(container);
     output.transport = Some(OutputTransport::Pcm);
     s.gain.as_mut().unwrap().peak_analysis = PeakAnalysisMode::SinglePass;
     s
 }
 
 /// A quiet low-frequency sine keeps quantization error visible (a few LSB at 16 bit).
-fn convert(settings: Settings) -> Vec<u8> {
+fn convert(container: OutputContainer, settings: Settings) -> Vec<u8> {
     let n = (IN_RATE.get() as f64 * 0.05) as usize;
     let sine = |phase: f64| -> Vec<f64> {
         (0..n)
@@ -45,6 +39,7 @@ fn convert(settings: Settings) -> Vec<u8> {
     let mut out = Cursor::new(Vec::new());
     OfflinePipeline::prepare(settings, IN_RATE)
         .unwrap()
+        .with_container(container)
         .run(&mut input, Box::new(SeekableSink(&mut out)))
         .unwrap();
     out.into_inner()
@@ -79,12 +74,10 @@ fn flac_i16(bytes: Vec<u8>) -> Vec<i16> {
 #[test]
 fn tpdf_seed_is_deterministic_and_none_differs() {
     let run = |dither, seed| {
-        wav_i16(convert(settings(
+        wav_i16(convert(
             OutputContainer::Wav,
-            SampleFormat::S16Le,
-            dither,
-            seed,
-        )))
+            settings(SampleFormat::S16Le, dither, seed),
+        ))
     };
     let a = run(DitherType::Tpdf, Some(42));
     let b = run(DitherType::Tpdf, Some(42));
@@ -103,24 +96,18 @@ fn tpdf_seed_is_deterministic_and_none_differs() {
 #[test]
 fn wav_flac_raw_agree_sample_for_sample() {
     for dither in [DitherType::None, DitherType::Tpdf] {
-        let wav = wav_i16(convert(settings(
+        let wav = wav_i16(convert(
             OutputContainer::Wav,
-            SampleFormat::S16Le,
-            dither,
-            Some(7),
-        )));
-        let flac = flac_i16(convert(settings(
+            settings(SampleFormat::S16Le, dither, Some(7)),
+        ));
+        let flac = flac_i16(convert(
             OutputContainer::Flac,
-            SampleFormat::S16Le,
-            dither,
-            Some(7),
-        )));
-        let raw = raw_i16(&convert(settings(
+            settings(SampleFormat::S16Le, dither, Some(7)),
+        ));
+        let raw = raw_i16(&convert(
             OutputContainer::Raw,
-            SampleFormat::S16Le,
-            dither,
-            Some(7),
-        )));
+            settings(SampleFormat::S16Le, dither, Some(7)),
+        ));
         assert!(!wav.is_empty());
         assert_eq!(wav, raw, "raw != wav for {dither:?}");
         assert_eq!(wav, flac, "flac != wav for {dither:?}");
@@ -130,12 +117,10 @@ fn wav_flac_raw_agree_sample_for_sample() {
 #[test]
 fn raw_s24le_uses_24_bit_scale() {
     // Raw S24_LE words carry 24-bit codes (as live does), not 32-bit full scale.
-    let bytes = convert(settings(
+    let bytes = convert(
         OutputContainer::Raw,
-        SampleFormat::S24Le,
-        DitherType::None,
-        None,
-    ));
+        settings(SampleFormat::S24Le, DitherType::None, None),
+    );
     let max = bytes
         .chunks_exact(4)
         .map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]).abs())

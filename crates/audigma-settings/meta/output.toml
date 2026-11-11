@@ -4,7 +4,7 @@
 [section]
 title = "Output"
 summary = "Where the processed audio goes: PipeWire or an exclusive ALSA device."
-description = "Chooses the backend, the DAC, the DSD transport (native or DoP), buffering and volume control for live playback, and the container for converted files."
+description = "Chooses the backend, the DAC, the DSD transport (native or DoP), buffering and volume control for live playback."
 
 [[field]]
 key = "backend"
@@ -90,38 +90,6 @@ description = "Packs DSD into PCM words with DoP markers. Works on any DAC that 
 key = "pcm"
 label = "PCM"
 summary = "Plain PCM; used for PCM targets."
-
-[[field]]
-key = "container"
-summary = "File or stream container for offline output."
-description = """
-When unset, `audigma convert` picks the container from the output file extension.
-"""
-default_text = "dsf for DSD targets; wav for PCM targets"
-applies_to = ["convert"]
-recommended.offline-conversion = { value = "dsf", why = "for DSD targets; wav or flac for PCM." }
-
-[[field.options]]
-key = "dsf"
-label = "DSF"
-summary = "DSD file; needs a seekable output."
-description = "DSD Stream File. DSD only; needs a seekable output file."
-
-[[field.options]]
-key = "wav"
-label = "WAV"
-summary = "PCM file; needs a seekable output."
-description = "Uncompressed PCM. Needs a seekable output file."
-
-[[field.options]]
-key = "flac"
-label = "FLAC"
-summary = "Lossless PCM file, 16 or 24-bit; needs a seekable output."
-
-[[field.options]]
-key = "raw"
-label = "Raw"
-summary = "Headerless stream; the only choice for stdout."
 
 [[field]]
 key = "dop_sample_format"

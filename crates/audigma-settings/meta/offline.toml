@@ -60,7 +60,7 @@ description = """
 DSF files store audio in 4096-byte blocks per channel, so the last block is usually only partly used. The header records the exact sample count, and this setting decides what fills the rest.
 """
 default = "spec-zero"
-show_if = { key = "output.container", eq = "dsf" }
+show_if = { key = "target.format", eq = "dsd" }
 applies_to = ["convert"]
 
 [[field.options]]

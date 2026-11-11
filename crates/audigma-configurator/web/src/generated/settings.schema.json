@@ -400,16 +400,6 @@
           "format": "uint32",
           "minimum": 0
         },
-        "container": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/OutputContainer"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "device": {
           "type": [
             "string",
@@ -498,15 +488,6 @@
         }
       },
       "additionalProperties": false
-    },
-    "OutputContainer": {
-      "type": "string",
-      "enum": [
-        "dsf",
-        "wav",
-        "flac",
-        "raw"
-      ]
     },
     "OutputTransport": {
       "type": "string",

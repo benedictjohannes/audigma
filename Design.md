@@ -280,8 +280,9 @@ The engine state machine runs through:
      - `dsf_pad_mode = "dsd-silence"` (fills trailing pad bytes with `0x69` balanced DSD silence to prevent end-of-track pops on broken players).
 
 ### 5.3 Stdio Streaming & Container Seekability Constraints
-- **Raw Streams (`container = "raw"`):** Require complete format declarations (`sample_format`, `rate_hz`, `channels` on input; `transport` on output; `target.sample_format` for PCM or `output.dop_sample_format` for DoP). `stdout` must carry audio payload bytes only; all logs and diagnostics go strictly to `stderr`.
-- **Header-Finalized Containers (`dsf` / `wav`):** Writing valid `.dsf` or `.wav` headers requires either a **seekable output file** (to patch chunk sizes and `sample_count` at EOF) or a known-length strategy. `audigma convert -o -` must explicitly reject unsupported non-seekable `stdout` combinations (such as streaming `container = "dsf"` to a pipe) rather than emitting corrupt headers.
+- **Container selection:** there is no config key. `audigma convert` takes the container from the output file extension (`.dsf`, `.wav`, `.flac`, `.raw`; case-insensitive, `.wave` is WAV); `-o -` is a raw stream. A missing or unknown extension is an error, and the target must fit the container (`.dsf` needs `target.format = "dsd"`, `.wav` / `.flac` need `"pcm"`; FLAC also rejects `f32` / `f64`). A `[output] container` key in a config is an unknown-key error. One config can therefore write several containers. The engine takes the container as an explicit argument (`OfflinePipeline::with_container`); without it, DSD targets write DSF and PCM targets write WAV.
+- **Raw Streams (`.raw` or `-o -`):** Require complete format declarations (`sample_format`, `rate_hz`, `channels` on input; `transport` on output; `target.sample_format` for PCM or `output.dop_sample_format` for DoP). `stdout` must carry audio payload bytes only; all logs and diagnostics go strictly to `stderr`.
+- **Header-Finalized Containers (`dsf` / `wav`):** Writing valid `.dsf` or `.wav` headers requires either a **seekable output file** (to patch chunk sizes and `sample_count` at EOF) or a known-length strategy. `audigma convert -o -` must explicitly reject unsupported non-seekable `stdout` combinations (a `-o -` stream is always raw, so a header container cannot be requested for a pipe) rather than emitting corrupt headers.
 - **Pipe Resilience:** Handle pipe backpressure, partial frame reads/writes, clean `EOF` draining, and `EPIPE` (broken pipe) gracefully without panicking.
 - **Album-Continuous Processing:** When converting multi-track albums, state (filter ring buffers, modulator integrators, dither state) must be preserved across track boundaries, splitting output files at exact rational sample boundaries to guarantee click-free gapless playback.
 
@@ -291,7 +292,7 @@ The engine state machine runs through:
 
 Configuration path resolution, first match wins: `-c` / `--config` (and `--out` for writes), then `$AUDIGMA_CONFIG`, then `$XDG_CONFIG_HOME/audigma/config.toml`, then `~/.config/audigma/config.toml`. Every command that reads a config (`run`, `play`, `convert`, `benchmark`, `config check`, `config explain`) uses this order, and so will `configure` for reads and writes. Unknown keys or invalid cross-field combinations are rejected by `audigma config check`.
 
-Validation errors are attributed to a config key (`SettingsError::Validation { path, message }`; `path` is the absolute dotted key such as `output.device`), and `Settings::warnings()` returns `FieldIssue { path, message }` values, so a UI can show them next to the field. `container = "flac"` rejects an explicit `f32` or `f64` `target.sample_format` (FLAC carries integer PCM only; an unset format resolves to the default `s32le` and is written as 32 bit). A PCM target with `output.backend = "pipewire"` and an explicit `target.sample_format` warns that the format is ignored.
+Validation errors are attributed to a config key (`SettingsError::Validation { path, message }`; `path` is the absolute dotted key such as `output.device`), and `Settings::warnings()` returns `FieldIssue { path, message }` values, so a UI can show them next to the field. `audigma convert` rejects an explicit `f32` or `f64` `target.sample_format` for a `.flac` output (FLAC carries integer PCM only; an unset format resolves to the default `s32le` and is written as 32 bit). A PCM target with `output.backend = "pipewire"` and an explicit `target.sample_format` warns that the format is ignored.
 
 ### 6.1 Declarative Target Resolution & `rate_family`
 Target resolution evaluates based on observed input rate/format and resolves into an explicit filter and target configuration. `rate_family = "source"` dynamically pairs 44.1 kHz-family and 48 kHz-family rates:
@@ -418,9 +419,6 @@ schema_version = 1
 
 [input]
 
-[output]
-container = "dsf"
-
 [target]
 format = "dsd"
 rate_family = "44100"
@@ -453,7 +451,6 @@ rate_hz = 44100
 channels = 2
 
 [output]
-container = "raw"
 transport = "dop"
 dop_sample_format = "s24_3le"
 

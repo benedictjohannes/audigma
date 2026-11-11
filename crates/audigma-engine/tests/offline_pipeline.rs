@@ -161,7 +161,9 @@ fn test_offline_pipeline_flac_conversion() {
     let mut out_buffer = Cursor::new(Vec::new());
 
     let settings = Settings::default_offline(OutputContainer::Flac);
-    let pipeline = OfflinePipeline::prepare(settings, in_rate).expect("prepare failed");
+    let pipeline = OfflinePipeline::prepare(settings, in_rate)
+        .expect("prepare failed")
+        .with_container(OutputContainer::Flac);
     let report = pipeline
         .run(&mut input, Box::new(SeekableSink(&mut out_buffer)))
         .expect("conversion failed");

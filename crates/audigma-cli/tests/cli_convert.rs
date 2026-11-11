@@ -98,42 +98,56 @@ drift_correction = "on"
     let _ = std::fs::remove_file(cfg_path);
 }
 
+/// The output extension is the only container selector: an unknown one is an error, a DSD
+/// target cannot go to `.wav`/`.flac`, and the removed `[output] container` key is rejected.
 #[test]
-fn test_cli_convert_rejects_non_seekable_stdout_for_dsf() {
+fn test_cli_convert_container_comes_from_the_extension() {
     let bin = env!("CARGO_BIN_EXE_audigma");
-    let temp_dir = std::env::temp_dir();
-    let cfg_path = temp_dir.join("test_audigma_stdout_dsf.toml");
+    let dir = std::env::temp_dir();
+    let cfg_dsd = dir.join("audigma_test_ext_dsd.toml");
+    let cfg_old = dir.join("audigma_test_ext_old_key.toml");
+    std::fs::write(
+        &cfg_dsd,
+        "schema_version = 1\n[target]\nformat = \"dsd\"\nrate_family = \"44100\"\ndsd_rate = \"dsd256\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &cfg_old,
+        "schema_version = 1\n[output]\ncontainer = \"wav\"\n",
+    )
+    .unwrap();
 
-    let toml = r#"
-schema_version = 1
+    let run = |cfg: &std::path::Path, out: &str| {
+        let o = Command::new(bin)
+            .args(["convert", "-i", "-", "-o", out, "-c"])
+            .arg(cfg)
+            .output()
+            .expect("failed to run audigma convert");
+        assert!(!o.status.success(), "{out} must fail");
+        String::from_utf8_lossy(&o.stderr).to_string()
+    };
+    let dir_s = |n: &str| dir.join(n).to_string_lossy().to_string();
 
-[output]
-container = "dsf"
+    let err = run(&cfg_dsd, &dir_s("audigma_test_ext.bin"));
+    assert!(err.contains("cannot tell the output container"), "{err}");
+    let err = run(&cfg_dsd, &dir_s("audigma_test_ext.wav"));
+    assert!(
+        err.contains("target.format") && err.contains(".wav"),
+        "{err}"
+    );
+    let err = run(&cfg_dsd, &dir_s("audigma_test_ext.flac"));
+    assert!(
+        err.contains("target.format") && err.contains(".flac"),
+        "{err}"
+    );
+    let err = run(&cfg_old, &dir_s("audigma_test_ext.wav"));
+    assert!(err.contains("container"), "{err}");
+    // Writing a header container to stdout is not possible: `-o -` is a raw stream.
+    let err = run(&cfg_dsd, "-");
+    assert!(err.contains("error"), "{err}");
 
-[target]
-format = "dsd"
-rate_family = "44100"
-dsd_rate = "dsd256"
-"#;
-    let mut f = File::create(&cfg_path).unwrap();
-    f.write_all(toml.as_bytes()).unwrap();
-
-    let output = Command::new(bin)
-        .arg("convert")
-        .arg("-i")
-        .arg("-")
-        .arg("-o")
-        .arg("-")
-        .arg("-c")
-        .arg(&cfg_path)
-        .output()
-        .expect("failed to run audigma convert");
-
-    assert!(!output.status.success());
-    let err_str = String::from_utf8_lossy(&output.stderr);
-    assert!(err_str.contains("error") || err_str.contains("cannot write container = \"dsf\""));
-
-    let _ = std::fs::remove_file(cfg_path);
+    let _ = std::fs::remove_file(cfg_dsd);
+    let _ = std::fs::remove_file(cfg_old);
 }
 
 #[test]
@@ -258,8 +272,6 @@ format = "pcm"
 pcm_rate_hz = 44100
 sample_format = "s16le"
 
-[output]
-container = "wav"
 
 [offline]
 write_report = true
@@ -327,7 +339,7 @@ fn test_cli_convert_flac_bit_depth_follows_sample_format() {
         std::fs::write(
             &cfg,
             format!(
-                "schema_version = 1\n[output]\ncontainer = \"flac\"\n[target]\nformat = \"pcm\"\npcm_rate_hz = 44100\n{format_line}"
+                "schema_version = 1\n[target]\nformat = \"pcm\"\npcm_rate_hz = 44100\n{format_line}"
             ),
         )
         .unwrap();

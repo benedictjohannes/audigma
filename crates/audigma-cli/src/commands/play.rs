@@ -60,19 +60,15 @@ pub fn run_play(args: PlayArgs) -> Result<(), CliError> {
         })?
     };
 
-    // 2. Configure output as exclusive ALSA Raw container
+    // 2. Configure output as exclusive ALSA
     let output_entry = toml_table
         .entry("output".to_string())
         .or_insert_with(|| toml::Value::Table(toml::Table::new()));
     if let toml::Value::Table(output_tbl) = output_entry {
-        // Live hardware playback always uses ALSA and raw stream container
+        // Live hardware playback always uses ALSA
         output_tbl.insert(
             "backend".to_string(),
             toml::Value::String("alsa".to_string()),
-        );
-        output_tbl.insert(
-            "container".to_string(),
-            toml::Value::String("raw".to_string()),
         );
         output_tbl
             .entry("transport".to_string())
