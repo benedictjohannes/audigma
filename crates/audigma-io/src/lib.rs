@@ -5,12 +5,18 @@ pub mod dbus;
 pub mod file;
 #[cfg(feature = "pipewire")]
 pub mod pipewire;
+#[cfg(feature = "pipewire")]
+pub mod pipewire_probe;
 #[cfg(target_os = "linux")]
 pub mod sched;
 pub mod stdio;
 
 #[cfg(feature = "pipewire")]
 pub use self::pipewire::{PipeWireError, PipeWirePcmOutput, PipeWireVirtualSink};
+#[cfg(feature = "pipewire")]
+pub use self::pipewire_probe::{
+    PipeWireProbeReport, PipeWireSinkInfo, probe_pipewire_sinks, sink_from_props,
+};
 pub use alsa::{
     AlsaAudioOutput, AlsaCardReport, AlsaDeviceReport, AlsaDeviceWatcher, AlsaHardwareMixer,
     AlsaOutputConfig, AlsaOutputError, AlsaProbeReport, is_alsa_device_present, probe_alsa_devices,

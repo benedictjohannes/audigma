@@ -29,6 +29,12 @@ use thiserror::Error;
 mod capture_pull;
 use capture_pull::{PullClock, PullDemand, TriggerDone, advance_driver_clock};
 
+/// Node property that marks audigma's own virtual sinks, so probes can skip them.
+pub(crate) const AUDIGMA_NODE_PROP: &str = "audigma.sink";
+
+/// Default `node.name` prefix of audigma's virtual sinks (`audigma_sink`, `audigma_sink_<instance>`).
+pub(crate) const AUDIGMA_SINK_PREFIX: &str = "audigma_sink";
+
 /// A pull whose cycle has not completed within this window is presumed lost
 /// (e.g. the follower vanished mid-cycle) so capture cannot stall forever.
 const PULL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
@@ -802,6 +808,7 @@ impl PipeWireVirtualSink {
                     *pipewire::keys::NODE_NAME => stream_name.as_str(),
                     *pipewire::keys::NODE_DESCRIPTION => desc.as_str(),
                     *pipewire::keys::MEDIA_CLASS => "Audio/Sink",
+                    AUDIGMA_NODE_PROP => "true",
                     *pipewire::keys::MEDIA_TYPE => "Audio",
                     *pipewire::keys::MEDIA_ROLE => "Music",
                     *pipewire::keys::AUDIO_CHANNELS => format!("{channels}"),

@@ -1,9 +1,7 @@
 //! Handler for `audigma probe` subcommand.
 
-use clap::Args;
-use serde_json::json;
-
 use crate::error::CliError;
+use clap::Args;
 
 #[derive(Args, Debug)]
 pub struct ProbeArgs {
@@ -32,28 +30,60 @@ pub fn run_probe(args: ProbeArgs) -> Result<(), CliError> {
             }
             Ok(())
         }
-        "pipewire" => {
-            if args.json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&json!({
-                        "backend": "pipewire",
-                        "status": "not yet implemented",
-                        "note": "Use 'audigma probe --backend alsa' to inspect direct ALSA DAC hardware."
-                    }))
-                    .unwrap()
-                );
-            } else {
-                println!("audigma probe: PipeWire backend probing is not yet implemented.");
-                println!(
-                    "Use 'audigma probe --backend alsa' to probe direct hardware ALSA devices."
-                );
-            }
-            Ok(())
-        }
+        "pipewire" => run_pipewire_probe(args.json),
         other => Err(CliError::UnknownBackend {
             backend: other.to_string(),
         }),
+    }
+}
+
+#[cfg(feature = "pipewire")]
+fn run_pipewire_probe(json: bool) -> Result<(), CliError> {
+    let report = audigma_io::probe_pipewire_sinks()
+        .map_err(|e| CliError::Other(format!("PipeWire probe failed: {e}")))?;
+    if json {
+        let json_val = serde_json::to_string_pretty(&report)
+            .map_err(|e| CliError::Serialization(format!("JSON serialization failed: {e}")))?;
+        println!("{json_val}");
+    } else {
+        print_pipewire_probe_report(&report);
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "pipewire"))]
+fn run_pipewire_probe(_json: bool) -> Result<(), CliError> {
+    Err(CliError::Other(
+        "this build has no PipeWire support (feature `pipewire`)".to_string(),
+    ))
+}
+
+#[cfg(feature = "pipewire")]
+pub fn print_pipewire_probe_report(report: &audigma_io::PipeWireProbeReport) {
+    println!("=== PipeWire Sink Probe Report ===");
+    println!(
+        "Discovered {} sink(s) (audigma's own sinks excluded):\n",
+        report.sinks.len()
+    );
+    for sink in &report.sinks {
+        println!("Sink: {}", sink.node_name);
+        if let Some(desc) = &sink.description {
+            println!("  Description: {desc}");
+        }
+        if let Some(api) = &sink.device_api {
+            println!("  Device API:  {api}");
+        }
+        match (sink.alsa_card, &sink.alsa_card_name, &sink.alsa_path) {
+            (None, None, None) => {}
+            (card, name, path) => {
+                let card = card.map(|c| format!("card {c}")).unwrap_or_default();
+                let name = name.clone().unwrap_or_default();
+                let path = path.as_ref().map(|p| format!(" [{p}]")).unwrap_or_default();
+                println!("  ALSA:        {card} {name}{path}");
+            }
+        }
+        println!("  Use as:      output.target_node = \"{}\"", sink.node_name);
+        println!();
     }
 }
 
