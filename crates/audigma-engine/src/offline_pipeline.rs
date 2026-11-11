@@ -160,8 +160,15 @@ impl<'a> ContainerWriter<'a> {
                 };
                 let bits_per_sample = match sample_format {
                     SampleFormat::S16Le => 16,
-                    SampleFormat::S24Le | SampleFormat::S24_3Le | SampleFormat::S32Le => 24,
-                    _ => 24,
+                    SampleFormat::S24Le | SampleFormat::S24_3Le => 24,
+                    SampleFormat::S32Le => 32,
+                    other => {
+                        return Err(EngineError::InvalidTopology {
+                            message: format!(
+                                "FLAC cannot carry sample format {other:?}; use s16le, s24le, s24_3le or s32le"
+                            ),
+                        });
+                    }
                 };
                 let writer = FlacEncoder::new(output, pcm_rate, bits_per_sample)?
                     .with_dither(dither, dither_seed);

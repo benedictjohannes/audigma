@@ -1213,12 +1213,12 @@ impl Settings {
                     OutputContainer::Flac
                         if matches!(
                             target.sample_format,
-                            Some(SampleFormat::S32Le | SampleFormat::F32 | SampleFormat::F64)
+                            Some(SampleFormat::F32 | SampleFormat::F64)
                         ) =>
                     {
                         return Err(SettingsError::invalid(
                             "target.sample_format",
-                            "FLAC output is 16 or 24 bit; use s16le, s24le or s24_3le (or leave it unset for 24 bit)",
+                            "FLAC carries integer PCM only; use s16le, s24le, s24_3le or s32le (or leave it unset for 32 bit)",
                         ));
                     }
                     OutputContainer::Flac if target.format != TargetFormat::Pcm => {
@@ -2768,13 +2768,13 @@ phase = "minimum"
         assert_eq!(pcm.max_stable_input_dbfs, 0.0);
     }
     #[test]
-    fn flac_rejects_32_bit_sample_formats() {
+    fn flac_rejects_float_sample_formats() {
         let toml = |fmt: &str| {
             format!(
                 "schema_version = 1\n[output]\ncontainer = \"flac\"\n[target]\nformat = \"pcm\"\npcm_rate_hz = 96000\n{fmt}"
             )
         };
-        for bad in ["s32le", "f32", "f64"] {
+        for bad in ["f32", "f64"] {
             let err =
                 Settings::from_toml_str(&toml(&format!("sample_format = \"{bad}\""))).unwrap_err();
             assert_eq!(err.path(), Some("target.sample_format"), "{bad}");
@@ -2784,6 +2784,7 @@ phase = "minimum"
             "sample_format = \"s16le\"",
             "sample_format = \"s24le\"",
             "sample_format = \"s24_3le\"",
+            "sample_format = \"s32le\"",
         ] {
             Settings::from_toml_str(&toml(ok)).unwrap_or_else(|e| panic!("{ok}: {e}"));
         }

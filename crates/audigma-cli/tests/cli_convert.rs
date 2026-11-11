@@ -291,3 +291,83 @@ write_report = true
     let _ = std::fs::remove_file(out_wav_path);
     let _ = std::fs::remove_file(cfg_path);
 }
+
+/// FLAC output writes the documented default `s32le` as 32 bit (no silent narrowing), and an
+/// explicit `s16le` as 16 bit.
+#[test]
+fn test_cli_convert_flac_bit_depth_follows_sample_format() {
+    let bin = env!("CARGO_BIN_EXE_audigma");
+    let dir = std::env::temp_dir();
+    let in_wav = dir.join("audigma_test_in_flac_depth.wav");
+    let spec = hound::WavSpec {
+        channels: 2,
+        sample_rate: 44100,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut writer = hound::WavWriter::create(&in_wav, spec).unwrap();
+    for i in 0..4410 {
+        let t = i as f64 / 44100.0;
+        let s = (0.3 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin() * 32767.0) as i16;
+        writer.write_sample(s).unwrap();
+        writer.write_sample(s).unwrap();
+    }
+    writer.finalize().unwrap();
+
+    for (name, sample_format, expected_bits) in [
+        ("default", None, "32"),
+        ("s24le", Some("s24le"), "24"),
+        ("s16le", Some("s16le"), "16"),
+    ] {
+        let out_flac = dir.join(format!("audigma_test_out_flac_depth_{name}.flac"));
+        let cfg = dir.join(format!("audigma_test_flac_depth_{name}.toml"));
+        let format_line = sample_format
+            .map(|f| format!("sample_format = \"{f}\"\n"))
+            .unwrap_or_default();
+        std::fs::write(
+            &cfg,
+            format!(
+                "schema_version = 1\n[output]\ncontainer = \"flac\"\n[target]\nformat = \"pcm\"\npcm_rate_hz = 44100\n{format_line}"
+            ),
+        )
+        .unwrap();
+
+        let conv = Command::new(bin)
+            .arg("convert")
+            .arg("-i")
+            .arg(&in_wav)
+            .arg("-o")
+            .arg(&out_flac)
+            .arg("-c")
+            .arg(&cfg)
+            .output()
+            .expect("failed to run audigma convert");
+        assert!(
+            conv.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&conv.stderr)
+        );
+
+        let probe = Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=bits_per_raw_sample",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(&out_flac)
+            .output()
+            .expect("failed to run ffprobe");
+        assert!(probe.status.success(), "{name}: ffprobe failed");
+        assert_eq!(
+            String::from_utf8_lossy(&probe.stdout).trim(),
+            expected_bits,
+            "{name}"
+        );
+        let _ = std::fs::remove_file(out_flac);
+        let _ = std::fs::remove_file(cfg);
+    }
+    let _ = std::fs::remove_file(in_wav);
+}

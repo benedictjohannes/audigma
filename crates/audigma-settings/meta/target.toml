@@ -130,6 +130,8 @@ description = """
 Sample word format of the PCM output. Applies to exclusive ALSA and file outputs only. Use the integer format your DAC or file container takes; `s32le` is the usual choice for 24-bit DACs. Integer formats are quantized with the dither setting below.
 
 PipeWire output ignores this setting and always uses `f32`, because the graph carries unquantized floating point.
+
+FLAC files carry integer samples only: `s16le` is written as 16 bit, `s24le` and `s24_3le` as 24 bit, `s32le` as 32 bit; the float formats are rejected. FLAC at 32 bit, and at rates above 96 kHz, lies outside the FLAC subset, so some players may not accept such files.
 """
 show_if = { all = [
   { key = "target.format", eq = "pcm" },

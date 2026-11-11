@@ -1,12 +1,13 @@
-//! Lossless `.flac` file encoder using `flacenc` (`Design.md §2`).
+//! Lossless `.flac` file encoder using the vendored `audigma-flac` (`Design.md §5`).
 //!
-//! Supports 16-bit and 24-bit PCM at sampling rates up to 384 kHz.
+//! Writes 16, 24 or 32-bit integer PCM. 24 bit and below use the full encoder (LPC, stereo
+//! decorrelation); 32 bit is coded per channel with FIXED predictors or verbatim. Sample rates
+//! up to 1,048,575 Hz are representable in the STREAMINFO header; rates above 96 kHz and
+//! 32-bit depth are outside the FLAC "subset", so player support varies.
 
 use crate::FormatError;
 use audigma_dsp::{DitherType, PcmQuantizer, PcmRateHz, SampleFormat};
-use flacenc::component::BitRepr;
-use flacenc::error::Verify;
-use flacenc::source::MemSource;
+use rusty_flac::Encoder;
 use std::io::Write;
 
 /// Lossless FLAC file encoder.
@@ -27,21 +28,13 @@ impl<W: Write> FlacEncoder<W> {
         bits_per_sample: usize,
     ) -> Result<Self, FormatError> {
         let bits = match bits_per_sample {
-            16 => 16,
-            24 => 24,
+            16 | 24 | 32 => bits_per_sample,
             other => {
                 return Err(FormatError::EncoderError(format!(
-                    "unsupported FLAC bits_per_sample: {other} (must be 16 or 24)"
+                    "unsupported FLAC bits_per_sample: {other} (must be 16, 24 or 32)"
                 )));
             }
         };
-
-        if sample_rate.get() > 96_000 {
-            return Err(FormatError::EncoderError(format!(
-                "sample rate {} Hz exceeds FLAC format subset limit (96,000 Hz); please use WAV container for high-rate PCM (> 96 kHz)",
-                sample_rate.get()
-            )));
-        }
 
         Ok(Self {
             writer,
@@ -54,10 +47,10 @@ impl<W: Write> FlacEncoder<W> {
     }
 
     fn quantizer_for(bits: usize, dither: DitherType, seed: Option<u64>) -> PcmQuantizer {
-        let format = if bits == 16 {
-            SampleFormat::S16Le
-        } else {
-            SampleFormat::S24Le
+        let format = match bits {
+            16 => SampleFormat::S16Le,
+            24 => SampleFormat::S24Le,
+            _ => SampleFormat::S32Le,
         };
         PcmQuantizer::new(format, dither, seed, 2).expect("integer PCM format")
     }
@@ -92,44 +85,16 @@ impl<W: Write> FlacEncoder<W> {
 
     /// Encodes all accumulated samples and writes the FLAC bitstream to the underlying writer.
     pub fn finalize(mut self) -> Result<u64, FormatError> {
-        let config = flacenc::config::Encoder::default()
-            .into_verified()
-            .map_err(|e| FormatError::EncoderError(format!("FLAC encoder config error: {e:?}")))?;
-
-        let channels = 2;
-        let source = MemSource::from_samples(
-            &self.interleaved_samples,
-            channels,
-            self.bits_per_sample,
-            self.sample_rate.get() as usize,
-        );
-
-        let total_frames = self.frames_written as usize;
-        let block_size = if total_frames > 0 && total_frames < config.block_size {
-            total_frames.max(32)
-        } else {
-            config.block_size
-        };
-
-        let mut flac_stream = flacenc::encode_with_fixed_block_size(&config, source, block_size)
-            .map_err(|e| FormatError::EncoderError(format!("FLAC encoding failed: {e:?}")))?;
-
-        // Ensure STREAMINFO min_block_size == max_block_size for fixed-block streams,
-        // matching the libFLAC reference encoder specification and Symphonia expectations.
-        flac_stream
-            .stream_info_mut()
-            .set_block_sizes(block_size, block_size)
-            .map_err(|e| {
-                FormatError::EncoderError(format!("FLAC block size verify error: {e:?}"))
-            })?;
-
-        let mut sink = flacenc::bitsink::ByteSink::new();
-        flac_stream.write(&mut sink).map_err(|e| {
-            FormatError::EncoderError(format!("FLAC bitstream write failed: {e:?}"))
-        })?;
+        let mut encoder = Encoder::new(self.sample_rate.get(), 2, self.bits_per_sample as u32)
+            .map_err(|e| FormatError::EncoderError(format!("FLAC encoder config error: {e}")))?;
+        encoder.set_compression_level(8);
+        encoder
+            .push_interleaved(&self.interleaved_samples)
+            .map_err(|e| FormatError::EncoderError(format!("FLAC encoding failed: {e}")))?;
+        let bytes = encoder.finish();
 
         self.writer
-            .write_all(sink.as_slice())
+            .write_all(&bytes)
             .map_err(|e| FormatError::IoError(e.to_string()))?;
         self.writer
             .flush()
@@ -158,5 +123,74 @@ mod tests {
         // Verify FLAC stream magic: "fLaC"
         assert!(out.len() > 4);
         assert_eq!(&out[0..4], b"fLaC");
+    }
+
+    fn test_signal(frames: usize) -> (Vec<f64>, Vec<f64>) {
+        let mut l = Vec::with_capacity(frames);
+        let mut r = Vec::with_capacity(frames);
+        for i in 0..frames {
+            let t = i as f64 / 96_000.0;
+            l.push((2.0 * std::f64::consts::PI * 997.0 * t).sin() * 0.9);
+            r.push((2.0 * std::f64::consts::PI * 3001.0 * t).sin() * 0.3);
+        }
+        (l, r)
+    }
+
+    /// Encode, then decode with the vendored decoder and compare against the quantizer output
+    /// bit for bit, for every supported depth with dither off and on.
+    #[test]
+    fn roundtrip_matches_quantizer_at_16_24_32_bit() {
+        let (l, r) = test_signal(10_000);
+        for bits in [16usize, 24, 32] {
+            for (dither, seed) in [(DitherType::None, None), (DitherType::Tpdf, Some(12345))] {
+                let mut out = Vec::new();
+                let mut enc = FlacEncoder::new(&mut out, PcmRateHz::PCM_96000, bits)
+                    .unwrap()
+                    .with_dither(dither, seed);
+                enc.write_stereo_samples(&l, &r).unwrap();
+                enc.finalize().unwrap();
+
+                let mut q = FlacEncoder::<Vec<u8>>::quantizer_for(bits, dither, seed);
+                let want_l: Vec<i32> = l.iter().map(|&x| q.quantize(0, x)).collect();
+                let want_r: Vec<i32> = r.iter().map(|&x| q.quantize(1, x)).collect();
+
+                let (info, planes) = rusty_flac::decode(&out).unwrap();
+                assert_eq!(info.bits_per_sample as usize, bits);
+                assert_eq!(planes[0], want_l, "{bits} bit {dither:?} left");
+                assert_eq!(planes[1], want_r, "{bits} bit {dither:?} right");
+            }
+        }
+    }
+
+    /// The reader used by `convert`/`play` (symphonia) must accept what the writer produces.
+    #[test]
+    fn symphonia_reads_32_bit_output() {
+        let (l, r) = test_signal(6_000);
+        let mut out = Vec::new();
+        let mut enc = FlacEncoder::new(&mut out, PcmRateHz::PCM_96000, 32).unwrap();
+        enc.write_stereo_samples(&l, &r).unwrap();
+        enc.finalize().unwrap();
+
+        let mut dec =
+            crate::AudioDecoder::try_new(std::io::Cursor::new(out), Some("flac")).unwrap();
+        let (mut dl, mut dr) = (Vec::new(), Vec::new());
+        let mut n = 0;
+        loop {
+            let got = dec.read_stereo_chunk(&mut dl, &mut dr).unwrap();
+            if got == 0 {
+                break;
+            }
+            n += got;
+        }
+        assert_eq!(n, l.len());
+        for i in 0..l.len() {
+            assert!((dl[i] - l[i]).abs() < 1e-8, "L {i}: {} vs {}", dl[i], l[i]);
+            assert!((dr[i] - r[i]).abs() < 1e-8, "R {i}");
+        }
+    }
+
+    #[test]
+    fn rejects_unsupported_depth() {
+        assert!(FlacEncoder::new(Vec::new(), PcmRateHz::PCM_44100, 20).is_err());
     }
 }

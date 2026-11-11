@@ -1,0 +1,26 @@
+[package]
+name = "audigma-flac"
+version.workspace = true
+# Upstream is edition 2021; the vendored sources are kept byte-identical to the fork.
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/benedictjohannes/audigma_rusty_flac"
+rust-version.workspace = true
+description = "Vendored fork of rusty_flac (pure-Rust FLAC codec) with 32-bit encode, for audigma"
+
+[lib]
+# Keep the upstream crate name so the vendored src/ and tests/ need no edits.
+name = "rusty_flac"
+
+[features]
+default = ["std"]
+std = []
+libm = ["dep:libm"]
+profile = ["std"]
+
+[dependencies]
+libm = { version = "0.2", optional = true, default-features = false }
+
+[dev-dependencies]
+claxon = "0.4"
+rusty_alloc-api = "=2.2.6"
