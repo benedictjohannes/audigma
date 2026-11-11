@@ -5,12 +5,14 @@ use std::path::PathBuf;
 
 use audigma_dsp::config::{SampleFormat, TargetRateSpec};
 use audigma_dsp::rates::PcmRateHz;
-use audigma_engine::traits::AudioInput;
+use audigma_engine::traits::{AudioInput, AudioOutput};
 use audigma_engine::{IdleCarrierFormat, LifecycleController, OfflinePipeline};
 use audigma_io::alsa::{AlsaAudioOutput, AlsaOutputConfig};
 use audigma_io::file::FileAudioInput;
+#[cfg(feature = "pipewire")]
+use audigma_io::pipewire::PipeWirePcmOutput;
 use audigma_io::stdio::StdioAudioInput;
-use audigma_settings::{OutputContainer, OutputTransport, Settings};
+use audigma_settings::{OutputBackend, OutputContainer, OutputTransport, Settings};
 use clap::Args;
 use serde_json::json;
 
@@ -60,30 +62,6 @@ pub fn run_play(args: PlayArgs) -> Result<(), CliError> {
         })?
     };
 
-    // 2. Configure output as exclusive ALSA
-    let output_entry = toml_table
-        .entry("output".to_string())
-        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-    if let toml::Value::Table(output_tbl) = output_entry {
-        // Live hardware playback always uses ALSA
-        output_tbl.insert(
-            "backend".to_string(),
-            toml::Value::String("alsa".to_string()),
-        );
-        output_tbl
-            .entry("transport".to_string())
-            .or_insert_with(|| toml::Value::String("native".to_string()));
-        output_tbl
-            .entry("buffer_ms".to_string())
-            .or_insert_with(|| toml::Value::Integer(40));
-        output_tbl
-            .entry("period_ms".to_string())
-            .or_insert_with(|| toml::Value::Integer(5));
-        output_tbl
-            .entry("reserve_device".to_string())
-            .or_insert_with(|| toml::Value::Boolean(true));
-    }
-
     // For live playback, default peak_analysis to single-pass (force override from file's two-pass)
     // Users can still explicitly opt into two-pass using `-O gain.peak_analysis=two-pass`.
     let gain_entry = toml_table
@@ -126,6 +104,9 @@ pub fn run_play(args: PlayArgs) -> Result<(), CliError> {
         apply_toml_override(&mut toml_table, key.trim(), val.trim())?;
     }
 
+    // Live backend: whatever the config or `-O output.backend=...` chose, else exclusive ALSA.
+    let backend = apply_live_output_defaults(&mut toml_table, args.device.is_some())?;
+
     // 5. Deserialize merged TOML table into typed Settings and validate
     let mut settings = Settings::from_toml_table(toml_table)?;
     // `play` streams in real time and cannot look ahead; peak analysis is convert-only.
@@ -135,7 +116,7 @@ pub fn run_play(args: PlayArgs) -> Result<(), CliError> {
     settings.validate()?;
 
     // 3. Open AudioInput
-    let (mut input, input_rate): (Box<dyn AudioInput>, PcmRateHz) = if args.input == "-" {
+    let (input, input_rate): (Box<dyn AudioInput>, PcmRateHz) = if args.input == "-" {
         let sample_format = settings
             .input
             .as_ref()
@@ -182,11 +163,102 @@ pub fn run_play(args: PlayArgs) -> Result<(), CliError> {
         Some(db) => pipeline.with_user_volume_db(db),
         None => pipeline,
     };
+    // Live sinks are raw streams (not seekable); the engine would otherwise default to WAV/DSF.
+    let pipeline = pipeline.with_container(OutputContainer::Raw);
+    match backend {
+        OutputBackend::Alsa => play_alsa(&args, &settings, input, input_rate, pipeline),
+        OutputBackend::Pipewire => play_pipewire(&args, &settings, input, input_rate, pipeline),
+    }
+}
+
+/// Applies the live-output defaults after all overrides and returns the chosen backend.
+///
+/// `backend` defaults to exclusive ALSA. A PipeWire output carries unquantized interleaved f32
+/// (`Design.md §1.4`), so it fixes `transport = "pcm"` and `target.sample_format = "f32"`;
+/// an explicit conflicting transport, a DSD target or `-d` is rejected rather than ignored.
+fn apply_live_output_defaults(
+    table: &mut toml::Table,
+    device_flag: bool,
+) -> Result<OutputBackend, CliError> {
+    let out = table
+        .entry("output".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| CliError::Config("[output] must be a table".into()))?;
+    let backend = match out.get("backend").and_then(|v| v.as_str()) {
+        None | Some("alsa") => OutputBackend::Alsa,
+        Some("pipewire") => OutputBackend::Pipewire,
+        Some(other) => {
+            return Err(CliError::Config(format!(
+                "output.backend \"{other}\" is not a live backend (expected \"pipewire\" or \"alsa\")"
+            )));
+        }
+    };
+    out.insert(
+        "backend".to_string(),
+        toml::Value::String(
+            match backend {
+                OutputBackend::Alsa => "alsa",
+                OutputBackend::Pipewire => "pipewire",
+            }
+            .to_string(),
+        ),
+    );
+    match backend {
+        OutputBackend::Alsa => {
+            out.entry("transport".to_string())
+                .or_insert_with(|| toml::Value::String("native".to_string()));
+            out.entry("buffer_ms".to_string())
+                .or_insert_with(|| toml::Value::Integer(40));
+            out.entry("period_ms".to_string())
+                .or_insert_with(|| toml::Value::Integer(5));
+            out.entry("reserve_device".to_string())
+                .or_insert_with(|| toml::Value::Boolean(true));
+        }
+        OutputBackend::Pipewire => {
+            if device_flag {
+                return Err(CliError::Config(
+                    "-d/--device selects an ALSA device; with output.backend = \"pipewire\" use -O output.target_node='\"<node>\"'".into(),
+                ));
+            }
+            match out.get("transport").and_then(|v| v.as_str()) {
+                None | Some("pcm") => {}
+                Some(t) => {
+                    return Err(CliError::Config(format!(
+                        "output.transport = \"{t}\" cannot be used with output.backend = \"pipewire\" (PCM only)"
+                    )));
+                }
+            }
+            out.insert(
+                "transport".to_string(),
+                toml::Value::String("pcm".to_string()),
+            );
+            out.entry("buffer_ms".to_string())
+                .or_insert_with(|| toml::Value::Integer(40));
+            if let Some(target) = table.get_mut("target").and_then(|v| v.as_table_mut()) {
+                target.insert(
+                    "sample_format".to_string(),
+                    toml::Value::String("f32".to_string()),
+                );
+            }
+        }
+    }
+    Ok(backend)
+}
+
+/// Plays through an exclusive ALSA device.
+fn play_alsa(
+    args: &PlayArgs,
+    settings: &Settings,
+    mut input: Box<dyn AudioInput>,
+    input_rate: PcmRateHz,
+    pipeline: OfflinePipeline,
+) -> Result<(), CliError> {
     let plan = pipeline.plan().clone();
     let target_spec = plan.stream_spec.target;
 
     // 5. Build ALSA Output Driver
-    let alsa_config = AlsaOutputConfig::from_settings(&settings, &target_spec)
+    let alsa_config = AlsaOutputConfig::from_settings(settings, &target_spec)
         .map_err(|e| CliError::Other(format!("failed to configure ALSA output: {e}")))?;
     // Opened before the banner: DoP `auto` only knows its word once the device is open.
     let mut alsa_output = AlsaAudioOutput::open(alsa_config)
@@ -242,8 +314,7 @@ pub fn run_play(args: PlayArgs) -> Result<(), CliError> {
     }
 
     // 6. Click-free Priming (in the DoP word the device was opened with)
-    let carrier =
-        IdleCarrierFormat::from_settings(&settings, &target_spec).for_output(&alsa_output);
+    let carrier = IdleCarrierFormat::from_settings(settings, &target_spec).for_output(&alsa_output);
 
     let mut lifecycle = LifecycleController::new(carrier, 256, 256);
     let prime_frames = (alsa_output.period_frames() * 2) as usize;
@@ -294,4 +365,174 @@ pub fn run_play(args: PlayArgs) -> Result<(), CliError> {
     }
 
     Ok(())
+}
+
+/// Plays PCM into the PipeWire graph (the graph, not audigma, owns the device).
+#[cfg(feature = "pipewire")]
+fn play_pipewire(
+    args: &PlayArgs,
+    settings: &Settings,
+    mut input: Box<dyn AudioInput>,
+    input_rate: PcmRateHz,
+    pipeline: OfflinePipeline,
+) -> Result<(), CliError> {
+    let plan = pipeline.plan().clone();
+    let TargetRateSpec::Pcm { rate, .. } = plan.stream_spec.target else {
+        return Err(CliError::Config(
+            "output.backend = \"pipewire\" cannot carry a DSD target; use backend = \"alsa\""
+                .into(),
+        ));
+    };
+    let out_cfg = settings.output.as_ref();
+    let buffer_ms = out_cfg.and_then(|o| o.buffer_ms).unwrap_or(40) as usize;
+    let target_node = out_cfg.and_then(|o| o.target_node.clone());
+    // Same queue sizing as `audigma run` (~64 frames per tile, 64..=256 tiles).
+    let tiles_per_sec = (rate.get() as f64 / 64.0).ceil() as usize;
+    let queue_depth = (tiles_per_sec * buffer_ms / 1000).clamp(64, 256);
+    let placement = crate::runtime::resolve(settings, 2, true)?;
+    let mut pw_out = PipeWirePcmOutput::new(
+        "audigma_play",
+        target_node.as_deref(),
+        rate.get(),
+        2,
+        queue_depth,
+        Some(placement.pipewire()),
+    )
+    .map_err(|e| CliError::Other(format!("failed to initialize PipeWire output: {e}")))?;
+
+    if !args.json {
+        eprintln!("audigma: starting PipeWire playback");
+        eprintln!(
+            "  Input:         {} ({} Hz, {} channels)",
+            args.input,
+            input_rate.get(),
+            input.info().original_channels
+        );
+        eprintln!(
+            "  Node:          {}",
+            target_node.as_deref().unwrap_or("(default sink)")
+        );
+        eprintln!("  Format:        f32 @ {} Hz", rate.get());
+        eprintln!("  Filter:        {}", plan.dsp_config.filter_description());
+        eprintln!(
+            "  Gain:          preamp {:.2} dB + volume {:.2} dB + headroom {:.2} dB = {:.2} dB",
+            plan.dsp_config.preamp_db,
+            plan.dsp_config.user_volume_db,
+            plan.dsp_config.profile_headroom_db,
+            plan.dsp_config.total_configured_gain_db()
+        );
+    }
+
+    let report = pipeline.run(&mut *input, Box::new(&mut pw_out))?;
+    pw_out.drain(std::time::Duration::from_millis(2000 + buffer_ms as u64));
+    let xruns = pw_out.xrun_count();
+
+    if args.json {
+        let json_val = json!({
+            "node": target_node,
+            "format": "f32",
+            "frame_rate_hz": rate.get(),
+            "total_input_frames": report.total_input_frames,
+            "total_output_frames": report.total_output_frames,
+            "total_bytes_written": report.total_bytes_written,
+            "xrun_count": xruns,
+            "applied_gain_db": report.applied_gain_db,
+            "overload_count": report.overload_count,
+            "elapsed_ms": report.elapsed_ms,
+        });
+        println!("{}", serde_json::to_string_pretty(&json_val).unwrap());
+    } else {
+        eprintln!("audigma: playback finished cleanly.");
+        eprintln!(
+            "  Input Frames:    {} ({:.2} s)",
+            report.total_input_frames,
+            report.total_input_frames as f64 / input_rate.get() as f64
+        );
+        eprintln!(
+            "  Output Frames:   {} ({} bytes written)",
+            report.total_output_frames, report.total_bytes_written
+        );
+        eprintln!("  XRuns / Glitches: {}", xruns);
+        eprintln!("  Elapsed Time:    {} ms", report.elapsed_ms);
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "pipewire"))]
+fn play_pipewire(
+    _args: &PlayArgs,
+    _settings: &Settings,
+    _input: Box<dyn AudioInput>,
+    _input_rate: PcmRateHz,
+    _pipeline: OfflinePipeline,
+) -> Result<(), CliError> {
+    Err(CliError::Config(
+        "PipeWire feature is disabled in this build".into(),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn table(src: &str) -> toml::Table {
+        toml::from_str(src).unwrap()
+    }
+
+    #[test]
+    fn backend_defaults_to_alsa_with_live_defaults() {
+        let mut t = table("");
+        assert_eq!(
+            apply_live_output_defaults(&mut t, false).unwrap(),
+            OutputBackend::Alsa
+        );
+        let out = t["output"].as_table().unwrap();
+        assert_eq!(out["backend"].as_str(), Some("alsa"));
+        assert_eq!(out["transport"].as_str(), Some("native"));
+        assert_eq!(out["buffer_ms"].as_integer(), Some(40));
+    }
+
+    #[test]
+    fn configured_alsa_settings_are_kept() {
+        let mut t = table("[output]\nbackend = \"alsa\"\ntransport = \"dop\"\nbuffer_ms = 20\n");
+        apply_live_output_defaults(&mut t, true).unwrap();
+        let out = t["output"].as_table().unwrap();
+        assert_eq!(out["transport"].as_str(), Some("dop"));
+        assert_eq!(out["buffer_ms"].as_integer(), Some(20));
+    }
+
+    #[test]
+    fn pipewire_is_honoured_and_forces_f32_pcm() {
+        let mut t = table(
+            "[output]\nbackend = \"pipewire\"\n[target]\nformat = \"pcm\"\nsample_format = \"s24le\"\n",
+        );
+        assert_eq!(
+            apply_live_output_defaults(&mut t, false).unwrap(),
+            OutputBackend::Pipewire
+        );
+        assert_eq!(t["output"]["backend"].as_str(), Some("pipewire"));
+        assert_eq!(t["output"]["transport"].as_str(), Some("pcm"));
+        assert_eq!(t["target"]["sample_format"].as_str(), Some("f32"));
+        assert!(
+            t["output"]
+                .as_table()
+                .unwrap()
+                .get("reserve_device")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn pipewire_rejects_device_flag_and_non_pcm_transport() {
+        let mut t = table("[output]\nbackend = \"pipewire\"\n");
+        assert!(apply_live_output_defaults(&mut t, true).is_err());
+        let mut t = table("[output]\nbackend = \"pipewire\"\ntransport = \"dop\"\n");
+        assert!(apply_live_output_defaults(&mut t, false).is_err());
+    }
+
+    #[test]
+    fn non_live_backend_is_rejected() {
+        let mut t = table("[output]\nbackend = \"file\"\n");
+        assert!(apply_live_output_defaults(&mut t, false).is_err());
+    }
 }

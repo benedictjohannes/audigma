@@ -2167,6 +2167,24 @@ impl PipeWirePcmOutput {
 }
 
 impl PipeWirePcmOutput {
+    /// Blocks until the graph has consumed everything queued by `write`, so dropping the
+    /// stream afterwards does not cut off the tail of a finite track.
+    ///
+    /// Gives up after `timeout` (the graph may be stalled or the node paused).
+    pub fn drain(&mut self, timeout: std::time::Duration) {
+        let start = std::time::Instant::now();
+        let capacity = self.producer.buffer().capacity();
+        while self.producer.slots() < capacity
+            && self.running.load(Ordering::Relaxed)
+            && start.elapsed() < timeout
+        {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        // The last chunk may still be partially held by the RT callback or the graph's
+        // own buffer; one extra quantum covers it.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
     /// Number of output callbacks where the queued byte stream was empty.
     pub fn underrun_count(&self) -> u64 {
         self.underruns.load(Ordering::Relaxed)
