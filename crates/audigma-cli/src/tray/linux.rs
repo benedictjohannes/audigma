@@ -4,12 +4,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 
-use audigma_engine::DaemonControlHandle;
+use audigma_engine::{DaemonControlHandle, DaemonState, DaemonVolumeMode};
 use audigma_settings::SystrayMode;
+use ksni::Orientation;
 use ksni::blocking::{Handle, TrayMethods};
 use ksni::menu::{MenuItem, StandardItem};
 
-use super::model::{MenuEntry, TrayModel};
+use super::model::{MenuEntry, ScrollAccumulator, TrayModel, step_percent};
 use super::{REFRESH_INTERVAL, perform};
 
 struct DaemonTray {
@@ -18,6 +19,22 @@ struct DaemonTray {
     control: DaemonControlHandle,
     /// False while no StatusNotifierWatcher (tray host) is reachable.
     host_available: Arc<AtomicBool>,
+    scroll: ScrollAccumulator,
+}
+
+impl DaemonTray {
+    /// Mouse wheel over the icon: 2 % volume per notch; scrolling also unmutes.
+    fn adjust_volume(&self, notches: i32) {
+        let t = self.control.get_telemetry();
+        if t.volume_mode == DaemonVolumeMode::None {
+            return;
+        }
+        self.control
+            .set_volume_percent(step_percent(t.volume_percent, notches));
+        if t.is_muted {
+            self.control.set_muted(false);
+        }
+    }
 }
 
 impl ksni::Tray for DaemonTray {
@@ -38,6 +55,24 @@ impl ksni::Tray for DaemonTray {
             title: self.model.title(),
             description: self.model.status_line(),
             ..Default::default()
+        }
+    }
+
+    fn scroll(&mut self, delta: i32, orientation: Orientation) {
+        if orientation != Orientation::Vertical {
+            return;
+        }
+        let notches = self.scroll.push(delta);
+        if notches != 0 {
+            self.adjust_volume(notches);
+        }
+    }
+
+    /// Middle-click: toggle mute.
+    fn secondary_activate(&mut self, _x: i32, _y: i32) {
+        let t = self.control.get_telemetry();
+        if t.state != DaemonState::Stopped {
+            self.control.set_muted(!t.is_muted);
         }
     }
 
@@ -114,6 +149,7 @@ impl LinuxTray {
             model,
             control: control.clone(),
             host_available: Arc::clone(&host_available),
+            scroll: ScrollAccumulator::default(),
         };
         // `auto` tolerates a missing watcher/host: the icon appears when one shows up later.
         // `required` fails on a missing watcher or host.

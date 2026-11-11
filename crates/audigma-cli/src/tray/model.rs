@@ -9,6 +9,8 @@ use audigma_engine::{DaemonOutputFormat, DaemonState, DaemonTelemetry, PauseReas
 pub enum TrayAction {
     Pause,
     Resume,
+    Mute,
+    Unmute,
     Stop,
 }
 
@@ -39,7 +41,47 @@ pub struct TrayModel {
     pub output_rate_hz: u32,
     /// Volume rounded to 0.1 dB so meter jitter does not cause updates.
     pub volume_tenth_db: i32,
+    /// Volume in whole percent (perceptual curve).
+    pub volume_percent: u32,
     pub muted: bool,
+}
+
+/// One scroll-wheel notch in StatusNotifierItem `Scroll` delta units (Qt's angle-delta
+/// convention, used by KDE). Hosts that report smaller units accumulate until a notch.
+pub const SCROLL_NOTCH: i32 = 120;
+
+/// Volume change per scroll notch, in percent.
+pub const SCROLL_STEP_PERCENT: f64 = 2.0;
+
+/// Turns raw scroll deltas into whole notches, carrying the remainder so high-resolution
+/// wheels and touchpads step once per notch's worth of travel.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ScrollAccumulator {
+    remainder: i32,
+}
+
+impl ScrollAccumulator {
+    /// Adds `delta` and returns the whole notches reached: positive for scroll up (volume
+    /// up). A direction change discards the remainder of the previous direction.
+    pub fn push(&mut self, delta: i32) -> i32 {
+        if delta != 0 && self.remainder != 0 && (delta < 0) != (self.remainder < 0) {
+            self.remainder = 0;
+        }
+        self.remainder = self.remainder.saturating_add(delta);
+        let notches = self.remainder / SCROLL_NOTCH;
+        self.remainder -= notches * SCROLL_NOTCH;
+        notches
+    }
+}
+
+/// Applies `notches` to `current_percent`, clamped to 0..=100 (100 % is 0 dBFS).
+pub fn step_percent(current_percent: f64, notches: i32) -> f64 {
+    let base = if current_percent.is_finite() {
+        current_percent
+    } else {
+        0.0
+    };
+    (base + f64::from(notches) * SCROLL_STEP_PERCENT).clamp(0.0, 100.0)
 }
 
 impl TrayModel {
@@ -53,6 +95,7 @@ impl TrayModel {
             output_format: t.output_format,
             output_rate_hz: t.output_rate_hz,
             volume_tenth_db: (t.volume_db * 10.0).round() as i32,
+            volume_percent: t.volume_percent.round().clamp(0.0, 100.0) as u32,
             muted: t.is_muted,
         }
     }
@@ -69,8 +112,9 @@ impl TrayModel {
                     "muted".to_string()
                 } else {
                     format!(
-                        "{} dB",
-                        trim_decimal(f64::from(self.volume_tenth_db) / 10.0)
+                        "{} dB ({}%)",
+                        trim_decimal(f64::from(self.volume_tenth_db) / 10.0),
+                        self.volume_percent
                     )
                 };
                 format!(
@@ -122,9 +166,22 @@ impl TrayModel {
         }
     }
 
-    /// Menu: status line, Pause or Resume (by state), Stop.
+    /// Menu: status line, Mute or Unmute, Pause or Resume (by state), Stop.
     pub fn menu(&self) -> Vec<MenuEntry> {
         let stopped = self.state == DaemonState::Stopped;
+        let mute = if self.muted {
+            MenuEntry::Action {
+                label: "Unmute",
+                action: TrayAction::Unmute,
+                enabled: !stopped,
+            }
+        } else {
+            MenuEntry::Action {
+                label: "Mute",
+                action: TrayAction::Mute,
+                enabled: !stopped,
+            }
+        };
         let toggle = if self.state == DaemonState::Paused {
             MenuEntry::Action {
                 label: "Resume",
@@ -141,6 +198,7 @@ impl TrayModel {
         vec![
             MenuEntry::Status(self.status_line()),
             MenuEntry::Separator,
+            mute,
             toggle,
             MenuEntry::Action {
                 label: "Stop",
@@ -176,6 +234,7 @@ mod tests {
             output_format: DaemonOutputFormat::Dsd,
             output_rate_hz: 11_289_600,
             volume_tenth_db: -120,
+            volume_percent: 85,
             muted: false,
         }
     }
@@ -184,7 +243,7 @@ mod tests {
     fn running_status_line_shows_rates_and_volume() {
         assert_eq!(
             running().status_line(),
-            "k17: Running - 96 kHz -> DSD256 - -12 dB"
+            "k17: Running - 96 kHz -> DSD256 - -12 dB (85%)"
         );
     }
 
@@ -197,7 +256,7 @@ mod tests {
         m.volume_tenth_db = -125;
         assert_eq!(
             m.status_line(),
-            "k17: Running - 44.1 kHz -> 352.8 kHz - -12.5 dB"
+            "k17: Running - 44.1 kHz -> 352.8 kHz - -12.5 dB (85%)"
         );
     }
 
@@ -213,7 +272,10 @@ mod tests {
         let mut m = running();
         m.input_rate_hz = 176_400;
         m.input_dsd_bit_rate_hz = Some(2_822_400);
-        assert_eq!(m.status_line(), "k17: Running - DSD64 -> DSD256 - -12 dB");
+        assert_eq!(
+            m.status_line(),
+            "k17: Running - DSD64 -> DSD256 - -12 dB (85%)"
+        );
     }
 
     #[test]
@@ -241,13 +303,21 @@ mod tests {
         assert_eq!(
             menu[2],
             MenuEntry::Action {
+                label: "Mute",
+                action: TrayAction::Mute,
+                enabled: true
+            }
+        );
+        assert_eq!(
+            menu[3],
+            MenuEntry::Action {
                 label: "Pause",
                 action: TrayAction::Pause,
                 enabled: true
             }
         );
         assert_eq!(
-            menu[3],
+            menu[4],
             MenuEntry::Action {
                 label: "Stop",
                 action: TrayAction::Stop,
@@ -258,10 +328,24 @@ mod tests {
         let mut p = running();
         p.state = DaemonState::Paused;
         assert_eq!(
-            p.menu()[2],
+            p.menu()[3],
             MenuEntry::Action {
                 label: "Resume",
                 action: TrayAction::Resume,
+                enabled: true
+            }
+        );
+    }
+
+    #[test]
+    fn menu_offers_unmute_while_muted() {
+        let mut m = running();
+        m.muted = true;
+        assert_eq!(
+            m.menu()[2],
+            MenuEntry::Action {
+                label: "Unmute",
+                action: TrayAction::Unmute,
                 enabled: true
             }
         );
@@ -284,5 +368,47 @@ mod tests {
         assert_eq!(m.icon_name(), "audio-card");
         m.state = DaemonState::Paused;
         assert_eq!(m.icon_name(), "media-playback-pause");
+    }
+
+    #[test]
+    fn scroll_one_notch_is_one_step() {
+        let mut a = ScrollAccumulator::default();
+        assert_eq!(a.push(120), 1);
+        assert_eq!(a.push(-120), -1);
+    }
+
+    #[test]
+    fn scroll_partial_deltas_accumulate_and_carry() {
+        let mut a = ScrollAccumulator::default();
+        assert_eq!(a.push(50), 0);
+        assert_eq!(a.push(50), 0);
+        assert_eq!(a.push(50), 1); // 150 -> 1 notch, 30 carried
+        assert_eq!(a.push(90), 1); // 120 -> 1 notch
+        assert_eq!(a, ScrollAccumulator::default());
+    }
+
+    #[test]
+    fn scroll_fast_flick_gives_multiple_notches() {
+        let mut a = ScrollAccumulator::default();
+        assert_eq!(a.push(-240), -2);
+        assert_eq!(a.push(0), 0);
+    }
+
+    #[test]
+    fn scroll_direction_change_drops_remainder() {
+        let mut a = ScrollAccumulator::default();
+        assert_eq!(a.push(100), 0);
+        // Without the reset, +100 - 100 - 30 would stay under a notch.
+        assert_eq!(a.push(-100), 0);
+        assert_eq!(a.push(-30), -1);
+    }
+
+    #[test]
+    fn step_percent_clamps() {
+        assert_eq!(step_percent(50.0, 1), 52.0);
+        assert_eq!(step_percent(50.0, -2), 46.0);
+        assert_eq!(step_percent(99.0, 1), 100.0);
+        assert_eq!(step_percent(1.0, -1), 0.0);
+        assert_eq!(step_percent(f64::NAN, 1), 2.0);
     }
 }

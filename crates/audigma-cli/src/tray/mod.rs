@@ -29,6 +29,14 @@ pub(crate) fn perform(control: &DaemonControlHandle, action: TrayAction) {
     let result = match action {
         TrayAction::Pause => control.pause_and_wait(ACTION_TIMEOUT),
         TrayAction::Resume => control.resume_and_wait(ACTION_TIMEOUT),
+        TrayAction::Mute => {
+            control.set_muted(true);
+            Ok(())
+        }
+        TrayAction::Unmute => {
+            control.set_muted(false);
+            Ok(())
+        }
         TrayAction::Stop => {
             control.stop();
             Ok(())
