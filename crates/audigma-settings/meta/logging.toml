@@ -11,10 +11,6 @@ advanced = true
 key = "format"
 summary = "How log lines are written to stderr."
 description = """
-- `text`: human-readable lines.
-- `json`: one JSON object per line, for log collectors.
-- `auto`: `text` when stderr is a terminal, otherwise `json`.
-
 Precedence, highest first: `--log-format`, the `AUDIGMA_LOG_FORMAT` environment variable, this setting.
 """
 default = "text"
@@ -28,11 +24,13 @@ summary = "Human-readable lines."
 key = "json"
 label = "JSON"
 summary = "One JSON object per line."
+description = "One JSON object per line, for log collectors."
 
 [[field.options]]
 key = "auto"
 label = "Auto"
 summary = "Text on a terminal, JSON otherwise."
+description = "`text` when stderr is a terminal, otherwise `json`."
 
 [[field]]
 key = "level"

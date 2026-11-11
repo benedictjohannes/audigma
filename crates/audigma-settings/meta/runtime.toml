@@ -33,10 +33,6 @@ summary = "Whether to request real-time scheduling."
 description = """
 Real-time scheduling lets the audio threads preempt ordinary work, which keeps deadlines under load.
 
-- `auto`: tries, and continues at normal priority with a warning if it is not granted.
-- `required`: refuses to start if real-time scheduling cannot be acquired.
-- `off`: never requests it.
-
 Real-time scheduling is granted by the kernel limits or by RTKit. Offline commands never request it, whatever this says.
 """
 default = "auto"
@@ -77,10 +73,6 @@ summary = "Which CPU cores the DSP workers are placed on."
 description = """
 Each DSP worker is pinned to its own core. Cores are ranked by the first speed measure that all allowed cores expose (`highest_perf`, `cpuinfo_max_freq` or `cpu_capacity`). If none exists, workers are left unpinned.
 
-- `performance`: fastest cores first.
-- `efficient`: slowest cores first.
-- `os`: no automatic pinning; the operating system decides. Workers also do not busy-wait before sleeping. Explicit `dsp_cpus` still applies.
-
 Everything else (the audio loop, PipeWire threads, IPC, logging) runs on the remaining allowed cores.
 """
 default = "performance"
@@ -100,15 +92,13 @@ summary = "Slowest cores first."
 key = "os"
 label = "Operating system"
 summary = "No automatic pinning."
+description = "No automatic pinning; the operating system decides. Workers also do not busy-wait before sleeping. Explicit `dsp_cpus` still applies."
 
 [[field]]
 key = "smt_siblings"
 summary = "Whether two DSP workers may share a physical core."
 description = """
 With simultaneous multithreading, one physical core appears as two logical CPUs (siblings) that share execution units.
-
-- `avoid`: siblings are used only after every allowed physical core has a worker.
-- `never`: workers never share a physical core. Startup fails if there are more workers than allowed physical cores.
 """
 default = "avoid"
 show_if = { key = "runtime.core_selection", neq = "os" }

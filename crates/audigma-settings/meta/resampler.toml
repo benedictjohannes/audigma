@@ -10,12 +10,7 @@ description = "Filter phase, how the first upsampling stage rolls off near 20 kH
 key = "phase"
 summary = "Filter phase response."
 description = """
-Selects the phase behaviour of the interpolation filters:
-
-- `linear`: symmetric impulse response. All frequencies stay time-aligned, but the filter rings before sharp transients as well as after them (pre-ringing). Delay is about 1.3 ms.
-- `minimum`: asymmetric impulse response. No pre-ringing from this stage; all ringing follows the transient. Delay is about 0.1 ms, but frequencies are delayed unevenly (phase shift, mostly towards the top of the band).
-
-Both are equally flat in level across the audio band.
+Selects the phase behaviour of the interpolation filters. Both settings are equally flat in level across the audio band.
 """
 default = "linear"
 assist = ["quality-starting-point"]
@@ -24,23 +19,21 @@ assist = ["quality-starting-point"]
 key = "linear"
 label = "Linear phase"
 summary = "Symmetric filter; pre- and post-ringing; no phase shift."
+description = "Symmetric impulse response. All frequencies stay time-aligned, but the filter rings before sharp transients as well as after them (pre-ringing). Delay is about 1.3 ms."
 
 [[field.options]]
 key = "minimum"
 label = "Minimum phase"
 summary = "No pre-ringing, lower delay; uneven phase response."
+description = "Asymmetric impulse response. No pre-ringing from this stage; all ringing follows the transient. Delay is about 0.1 ms, but frequencies are delayed unevenly (phase shift, mostly towards the top of the band)."
 
 [[field]]
 key = "apodization"
 summary = "Trade top-of-band level for less ringing."
 description = """
-Applies to the first upsampling stage only. It decides where that stage rolls off:
+Applies to the first upsampling stage only. It decides where that stage rolls off.
 
-- `off`: flat to 20 kHz, then a steep cutoff with full rejection at 24.1 kHz.
-- `gentle` (alias for `19000`): rolls off from a 19 kHz edge, with about -0.8 dB at 20 kHz.
-- `18000` / `18500` / `19000` / `20000`: the pass edge in Hz. The response rolls off from the edge and reaches full rejection at 22.05 kHz, which shortens the ringing at the cost of attenuating the top of the audio band. Measured level at 20 kHz: about -5.7 dB (18000), -2.8 dB (18500), -0.8 dB (19000), 0 dB (20000). The 20000 stage is flat at 20 kHz (its -3 dB point is 20.9 kHz) but is the longest filter (409 taps) and costs noticeably more CPU at DSD64.
-
-For 48 kHz sources the edge is scaled by 48/44.1. Whether the shorter ringing is audible is a matter of taste; the level loss is measurable.
+The numeric values are the pass edge in Hz. The response rolls off from the edge and reaches full rejection at 22.05 kHz, which shortens the ringing at the cost of attenuating the top of the audio band. For 48 kHz sources the edge is scaled by 48/44.1. Whether the shorter ringing is audible is a matter of taste; the level loss is measurable.
 """
 default = "off"
 
@@ -48,37 +41,40 @@ default = "off"
 key = "off"
 label = "Off"
 summary = "Flat to 20 kHz, steepest cutoff."
+description = "Flat to 20 kHz, then a steep cutoff with full rejection at 24.1 kHz."
 
 [[field.options]]
 key = "gentle"
 label = "Gentle (19 kHz edge)"
 summary = "Rolls off from 19 kHz; about -0.8 dB at 20 kHz; less ringing. Alias for 19000."
+description = "Rolls off from a 19 kHz pass edge, with about -0.8 dB at 20 kHz. The config file also accepts `19000` for the same setting."
 caution = "Attenuates the top of the audio band (above about 19 kHz)."
 
 [[field.options]]
 key = "18000"
 label = "18 kHz edge"
 summary = "Strongest roll-off; about -5.7 dB at 20 kHz."
+description = "Pass edge 18 kHz. Measured level at 20 kHz: about -5.7 dB."
 caution = "Attenuates the top of the audio band (above about 18 kHz)."
 
 [[field.options]]
 key = "18500"
 label = "18.5 kHz edge"
 summary = "Roll-off from 18.5 kHz; about -2.8 dB at 20 kHz."
+description = "Pass edge 18.5 kHz. Measured level at 20 kHz: about -2.8 dB."
 caution = "Attenuates the top of the audio band (above about 18.5 kHz)."
 
 [[field.options]]
 key = "20000"
 label = "20 kHz edge"
 summary = "Mildest roll-off; flat at 20 kHz, -3 dB at 20.9 kHz; longest stage."
+description = "Pass edge 20 kHz. The stage is flat at 20 kHz (its -3 dB point is 20.9 kHz) but is the longest filter (409 taps) and costs noticeably more CPU at DSD64."
 
 [[field]]
 key = "modulator_order"
 summary = "Order of the 1-bit delta-sigma modulator."
 description = """
-`5` or `7`. This setting only applies to DSD targets; PCM targets ignore it.
-
-The 5th order is the default, and the better choice at DSD64, where the 7th order is limited by dither noise. In our measurements the 7th order costs about 10 percent more CPU and shows no consistent benefit at any rate, so keep `5` unless you have verified a gain on your own setup.
+This setting only applies to DSD targets; PCM targets ignore it. Keep `5` unless you have verified a gain from `7` on your own setup.
 """
 default = 5
 show_if = { key = "target.format", eq = "dsd" }
@@ -88,11 +84,13 @@ assist = ["benchmark-validate"]
 key = "5"
 label = "5th order"
 summary = "Default modulator."
+description = "The better choice at DSD64, where the 7th order is limited by dither noise."
 
 [[field.options]]
 key = "7"
 label = "7th order"
 summary = "Higher-order noise shaping; about 10% more CPU."
+description = "In our measurements it costs about 10 percent more CPU and shows no consistent benefit at any rate."
 
 [[field]]
 key = "drift_correction"
@@ -103,12 +101,6 @@ Only `audigma run` uses this setting.
 Drift correction is needed only when the input runs on its own clock: then its rate differs from the output device's by a few parts per million and the queue between them slowly runs empty or full. Audigma measures that difference from the queue and resamples the input by the measured ratio. The correction runs at the low baseband rate, never on DSD bits.
 
 The PipeWire virtual sink does not run on its own clock: audigma pulls it whenever the queue gets low, so it follows the output device exactly and needs no correction.
-
-- `auto`: correct an input with its own clock when `output.backend = "alsa"` (the DAC clock is master); otherwise off. With the PipeWire virtual sink this means off.
-- `on`: correct an input with its own clock. With the PipeWire virtual sink the drift is only measured and shown by `audigma status`; nothing is changed in the audio. With a PipeWire output a warning is shown: the output stream is already rate-matched by PipeWire.
-- `off`: never correct or measure drift.
-
-If the key is left out, it is `auto`.
 """
 default = "auto"
 applies_to = ["run"]
@@ -117,11 +109,13 @@ applies_to = ["run"]
 key = "auto"
 label = "Automatic"
 summary = "Correct an input with its own clock on ALSA output; otherwise off."
+description = "Corrects an input with its own clock when `output.backend = \"alsa\"`, because the DAC clock is then master. With the PipeWire virtual sink this means off."
 
 [[field.options]]
 key = "on"
 label = "On"
 summary = "Correct an input with its own clock; only measure the PipeWire sink."
+description = "Corrects an input with its own clock. With the PipeWire virtual sink the drift is only measured and shown by `audigma status`; nothing is changed in the audio. With a PipeWire output a warning is shown, because PipeWire already rate-matches the output stream."
 
 [[field.options]]
 key = "off"

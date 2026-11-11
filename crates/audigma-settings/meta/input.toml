@@ -103,8 +103,7 @@ default_text = "synthesized from channels: 1 MONO; 2 FL FR; 4 FL FR RL RR; 6 FL 
 key = "rate_mode"
 summary = "Whether the virtual sink follows the application's sample rate."
 description = """
-- `dynamic`: advertises every rate in `allowed_rates`, so PipeWire lets each app play at its native rate and does not resample a single input stream. All upsampling is then left to audigma.
-- `fixed`: advertises only `rate_hz`, so PipeWire resamples everything to that rate first. Not recommended, because the double resampling lowers quality.
+This is a property of the PipeWire virtual sink: it decides which sample rates applications may use when they play into it. Only `audigma run` uses this setting.
 """
 default = "dynamic"
 applies_to = ["run"]
@@ -113,11 +112,13 @@ applies_to = ["run"]
 key = "dynamic"
 label = "Dynamic"
 summary = "Advertise every allowed rate; apps play at their native rate."
+description = "Advertises every rate in `allowed_rates`, so PipeWire lets each app play at its native rate and does not resample a single input stream. All upsampling is then left to audigma."
 
 [[field.options]]
 key = "fixed"
 label = "Fixed"
 summary = "Advertise only rate_hz; PipeWire resamples everything to it."
+description = "Advertises only `rate_hz`, so PipeWire resamples everything to that rate first. The double resampling lowers quality."
 
 [[field]]
 key = "allowed_rates"

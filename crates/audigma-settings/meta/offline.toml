@@ -14,10 +14,7 @@ summary = "What to do with the filter delay at the start and end of a file."
 description = """
 Only `audigma convert` uses this setting.
 
-Every filter delays the signal and keeps ringing after the last input sample. This decides how the converted file handles that:
-
-- `trim-to-duration`: drops the initial filter delay and stops at exactly `input frames × output rate / input rate` frames, so the output has the same duration as the input and is time-aligned with it. Consecutive album tracks stay gapless.
-- `preserve-tail`: keeps the filter ringing after the last input sample until it has died away. The file is slightly longer than the input.
+Every filter delays the signal and keeps ringing after the last input sample. This decides how the converted file handles that.
 """
 default = "trim-to-duration"
 applies_to = ["convert"]
@@ -27,11 +24,13 @@ recommended.offline-conversion = { value = "trim-to-duration", why = "output len
 key = "trim-to-duration"
 label = "Trim to duration"
 summary = "Same duration as the input; time-aligned."
+description = "Drops the initial filter delay and stops at exactly `input frames × output rate / input rate` frames, so the output has the same duration as the input and is time-aligned with it. Consecutive album tracks stay gapless."
 
 [[field.options]]
 key = "preserve-tail"
 label = "Preserve tail"
 summary = "Keep the ringing after the last sample; slightly longer file."
+description = "Keeps the filter ringing after the last input sample until it has died away. The file is slightly longer than the input."
 
 [[field]]
 key = "write_report"
@@ -58,10 +57,7 @@ summary = "Machine-readable JSON on stderr."
 key = "dsf_pad_mode"
 summary = "How to fill the unused end of the last DSF block."
 description = """
-DSF files store audio in 4096-byte blocks per channel, so the last block is usually only partly used. The header records the exact sample count, and this setting decides what fills the rest:
-
-- `spec-zero`: `0x00` bytes, as the DSF specification says.
-- `dsd-silence`: `0x69`, a balanced DSD idle pattern. Players that ignore the recorded sample count then play silence at the end instead of the all-zero pattern, which is not silence in DSD.
+DSF files store audio in 4096-byte blocks per channel, so the last block is usually only partly used. The header records the exact sample count, and this setting decides what fills the rest.
 """
 default = "spec-zero"
 show_if = { key = "output.container", eq = "dsf" }
@@ -76,4 +72,4 @@ summary = "Pad with zero bytes, as the DSF specification says."
 key = "dsd-silence"
 label = "DSD silence (0x69)"
 summary = "Pad with a balanced silence pattern."
-description = "Safer with players that ignore the recorded sample count."
+description = "Pads with `0x69`, a balanced DSD idle pattern. Players that ignore the recorded sample count then play silence at the end instead of the all-zero pattern, which is not silence in DSD."

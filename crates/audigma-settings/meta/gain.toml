@@ -25,13 +25,7 @@ summary = "Extra headroom below the modulator's stable input limit (dB)."
 description = """
 This setting only applies to DSD targets. PCM targets ignore it.
 
-A 1-bit modulator becomes unstable if its input is too hot. Audigma attenuates to the modulator's maximum stable input level, which was measured with a 0.25 dB guard step and is verified at build time. This margin is subtracted on top of that limit:
-
-- `0.25 dB` (default): one guard step below the measured limit.
-- `0 dB`: runs the modulator right at its measured limit.
-- `0.5 dB`: one further guard step.
-
-Each step lowers the DSD output level by the same amount.
+A 1-bit modulator becomes unstable if its input is too hot. Audigma attenuates to the modulator's maximum stable input level, which was measured with a 0.25 dB guard step and is verified at build time. This margin is subtracted on top of that limit, and lowers the DSD output level by the same amount.
 """
 default = 0.25
 show_if = { key = "target.format", eq = "dsd" }
@@ -45,6 +39,7 @@ summary = "No extra margin; runs at the measured limit."
 key = "0.25"
 label = "0.25 dB"
 summary = "Default."
+description = "One guard step below the measured limit."
 
 [[field.options]]
 key = "0.5"
@@ -56,9 +51,6 @@ key = "peak_analysis"
 summary = "Whether to measure the true peak before converting."
 description = """
 Only `audigma convert` uses this setting. `run` and `play` ignore it.
-
-- `two-pass`: first runs the resampler over the whole file to find the true peak after upsampling, then lowers the gain just enough to stay within the output limit. It never raises the gain above the configured value. The limit is 0.5 dB below full scale for PCM targets, and 0.5 dB below the modulator's stable input limit for DSD targets. Needs a seekable input file (not stdin) and adds an analysis pass.
-- `single-pass`: applies the configured gain only, with no look-ahead. The only choice when the input is stdin.
 """
 default = "single-pass"
 applies_to = ["convert"]
@@ -68,11 +60,13 @@ recommended.offline-conversion = { value = "two-pass", why = "guarantees no clip
 key = "single-pass"
 label = "Single pass"
 summary = "Apply the configured gain as is; works with stdin."
+description = "Applies the configured gain only, with no look-ahead. The only choice when the input is stdin."
 
 [[field.options]]
 key = "two-pass"
 label = "Two pass"
 summary = "Measure the true peak first, then trim the gain to fit."
+description = "First runs the resampler over the whole file to find the true peak after upsampling, then lowers the gain just enough to stay within the output limit. It never raises the gain above the configured value. The limit is 0.5 dB below full scale for PCM targets, and 0.5 dB below the modulator's stable input limit for DSD targets. Adds an analysis pass."
 caution = "Needs a seekable input file; not available for stdin."
 
 [[field]]
@@ -80,9 +74,6 @@ key = "overload_policy"
 summary = "What happens when the modulator is overloaded."
 description = """
 Applies to the 1-bit modulator only.
-
-- `mute-recover`: mutes, resets the modulator and fades back in once levels are safe, so playback continues. The mute is audible, but short.
-- `error`: treats an overload as a fatal error and stops. Use it when a conversion must never contain a repaired glitch.
 """
 default = "mute-recover"
 show_if = { key = "target.format", eq = "dsd" }
@@ -94,8 +85,10 @@ recommended.offline-conversion = { value = "error", why = "fail loudly instead o
 key = "mute-recover"
 label = "Mute and recover"
 summary = "Mute, reset the modulator, fade back in; playback continues."
+description = "Mutes, resets the modulator and fades back in once levels are safe, so playback continues. The mute is audible, but short."
 
 [[field.options]]
 key = "error"
 label = "Stop with error"
 summary = "Treat overload as fatal; no repaired glitches in the output."
+description = "Treats an overload as a fatal error and stops. Use it when a conversion must never contain a repaired glitch."

@@ -42,9 +42,6 @@ summary = "How the output clock follows the source."
 description = """
 Sample rates come in two families: multiples of 44.1 kHz (44.1, 88.2, 176.4, 352.8 kHz and the DSD rates) and multiples of 48 kHz (48, 96, 192, 384 kHz).
 
-- `source`: switches the output between the two families to follow each track, so the conversion uses only pure power-of-two interpolation (best quality and efficient). The DAC relocks its clock when the family changes, which on some DACs is audible as a relay click or a short delay.
-- `44100` or `48000`: pins the output clock to that family. The DAC never relocks (no clicks or delays when switching between apps), and sources from the other family are bridged by rational resampling.
-
 Keep it on `source` unless your DAC has problems with rate switching.
 """
 default = "source"
@@ -57,7 +54,7 @@ key = "source"
 label = "Follow source"
 summary = "Switch between 44.1 kHz and 48 kHz families per track."
 description = """
-44.1 kHz-family sources get a 44.1 kHz-family target; 48 kHz and other sources get the 48 kHz family. Every conversion is a pure power-of-two step, at the cost of a DAC clock relock whenever the family changes.
+Switches the output between the two families to follow each track: 44.1 kHz-family sources get a 44.1 kHz-family target; 48 kHz and other sources get the 48 kHz family. Every conversion is a pure power-of-two interpolation (best quality and efficient). The DAC relocks its clock when the family changes, which on some DACs is audible as a relay click or a short delay.
 """
 
 [[field.options]]
@@ -65,7 +62,7 @@ key = "44100"
 label = "Pin 44.1 kHz family"
 summary = "Always output in the 44.1 kHz family."
 description = """
-Zero relock. 48 kHz-family sources are bridged by rational resampling.
+Pins the output clock to the 44.1 kHz family. The DAC never relocks (no clicks or delays when switching between apps). 48 kHz-family sources are bridged by rational resampling.
 """
 
 [[field.options]]
@@ -73,7 +70,7 @@ key = "48000"
 label = "Pin 48 kHz family"
 summary = "Always output in the 48 kHz family."
 description = """
-Zero relock. 44.1 kHz-family sources are bridged by rational resampling.
+Pins the output clock to the 48 kHz family. The DAC never relocks (no clicks or delays when switching between apps). 44.1 kHz-family sources are bridged by rational resampling.
 """
 
 [[field]]

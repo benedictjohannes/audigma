@@ -10,12 +10,7 @@ description = "Chooses the backend, the DAC, the DSD transport (native or DoP), 
 key = "backend"
 summary = "Where processed audio goes."
 description = """
-Live output used by `audigma run` and `audigma play`:
-
-- `alsa`: opens your DAC exclusively through ALSA. Audigma owns the device, bypasses desktop mixing, and is paced by the DAC's own clock. Required for all DSD output (native and DoP).
-- `pipewire`: sends PCM back into the PipeWire graph, where it shares the DAC with other applications. No DSD.
-
-Required for `run`. `audigma convert` ignores this setting (it writes to the `-o` file or stdout).
+Live output used by `audigma run` and `audigma play`. Required for `run`. `audigma convert` ignores this setting (it writes to the `-o` file or stdout).
 """
 required_for = ["run"]
 applies_to = ["run", "play"]
@@ -27,7 +22,7 @@ key = "pipewire"
 label = "PipeWire graph"
 summary = "Play into the PipeWire graph; PipeWire keeps ownership of the DAC."
 description = """
-PCM only (DSD cannot pass through the PipeWire graph). Output shares the DAC with other applications under one PipeWire clock, so no drift correction is needed.
+Sends PCM back into the PipeWire graph, where it shares the DAC with other applications under one PipeWire clock, so no drift correction is needed. PCM only: DSD cannot pass through the PipeWire graph.
 """
 caution = """
 Make sure the PipeWire graph does not route audigma's output back into its own virtual sink (an audio loop).
@@ -38,7 +33,7 @@ key = "alsa"
 label = "Exclusive ALSA"
 summary = "Open an ALSA hardware device exclusively."
 description = """
-Required for DSD (native or DoP). Audigma owns the DAC while running, so other applications must play through audigma's virtual sink. Output is paced by the DAC clock, with drift correction on the input side.
+Opens your DAC exclusively through ALSA. Audigma owns the device while running and bypasses desktop mixing, so other applications must play through audigma's virtual sink. Output is paced by the DAC's own clock, with drift correction on the input side. Required for all DSD output (native and DoP).
 """
 
 [[field]]
@@ -70,9 +65,7 @@ assist = ["alsa-detect"]
 key = "transport"
 summary = "How DSD is carried to the device."
 description = """
-- `native`: sends true DSD (`DSD_U32_BE`) to a DAC and driver that support it.
-- `dop`: packs DSD into PCM words with DoP markers. Works on any DAC that understands DoP, but needs a bit-perfect path: no software volume or resampling in between.
-- `pcm`: plain PCM, for PCM targets.
+The DSD bits are sent either as native DSD or inside PCM words. PCM targets always use plain PCM.
 """
 default_text = "native for DSD targets; pcm for PCM targets"
 show_if = { key = "target.format", eq = "dsd" }
@@ -85,11 +78,13 @@ recommended.interactive-desktop = { value = "native", why = "if the DAC supports
 key = "native"
 label = "Native DSD"
 summary = "True DSD (DSD_U32_BE) to a DAC that supports it."
+description = "Sends true DSD (`DSD_U32_BE`) to a DAC and driver that support it."
 
 [[field.options]]
 key = "dop"
 label = "DoP"
 summary = "DSD packed into PCM words with DoP markers."
+description = "Packs DSD into PCM words with DoP markers. Works on any DAC that understands DoP, but needs a bit-perfect path: no software volume or resampling in between."
 
 [[field.options]]
 key = "pcm"
@@ -100,11 +95,6 @@ summary = "Plain PCM; used for PCM targets."
 key = "container"
 summary = "File or stream container for offline output."
 description = """
-- `dsf`: DSD Stream File. DSD only; needs a seekable output file.
-- `wav`: uncompressed PCM. Needs a seekable file.
-- `flac`: lossless compressed PCM, 16 or 24-bit. Needs a seekable file.
-- `raw`: no header. The only choice for stdout.
-
 When unset, `audigma convert` picks the container from the output file extension.
 """
 default_text = "dsf for DSD targets; wav for PCM targets"
@@ -115,11 +105,13 @@ recommended.offline-conversion = { value = "dsf", why = "for DSD targets; wav or
 key = "dsf"
 label = "DSF"
 summary = "DSD file; needs a seekable output."
+description = "DSD Stream File. DSD only; needs a seekable output file."
 
 [[field.options]]
 key = "wav"
 label = "WAV"
 summary = "PCM file; needs a seekable output."
+description = "Uncompressed PCM. Needs a seekable output file."
 
 [[field.options]]
 key = "flac"
@@ -135,11 +127,7 @@ summary = "Headerless stream; the only choice for stdout."
 key = "dop_sample_format"
 summary = "PCM word layout carrying DoP."
 description = """
-This setting only applies with `transport = "dop"`. It is the PCM word format that carries the DSD bits and markers. Pick what your DAC accepts; `s32le` is the default.
-
-- `s32le`: DoP in a 32-bit word.
-- `s24le`: DoP in a 24-bit word held in 4 bytes.
-- `s24_3le`: DoP in a 24-bit word packed into 3 bytes.
+This setting only applies with `transport = "dop"`. It is the PCM word format that carries the DSD bits and markers. Pick what your DAC accepts.
 
 Not related to `target.sample_format`, which sets PCM target output.
 """
@@ -206,11 +194,6 @@ applies_to = ["run", "play"]
 key = "volume_control"
 summary = "Where volume changes are applied."
 description = """
-- `hardware-software-fallback`: uses the DAC's analog mixer when it has one and keeps the digital stream at full scale; otherwise scales in software before the modulator.
-- `software`: always scales in floating point. Works on every DAC and is safe for DSD and DoP.
-- `hardware`: requires a DAC mixer and refuses to scale digitally.
-- `none`: fixed unity gain; volume changes are ignored.
-
 Hardware control is unavailable for pipewire and file output.
 """
 default = "hardware-software-fallback"
@@ -221,11 +204,13 @@ assist = ["alsa-detect"]
 key = "hardware-software-fallback"
 label = "Hardware, else software"
 summary = "DAC mixer when available, otherwise software scaling."
+description = "Uses the DAC's analog mixer when it has one and keeps the digital stream at full scale; otherwise scales in software before the modulator."
 
 [[field.options]]
 key = "software"
 label = "Software"
 summary = "Always scale in floating point; safe for DSD and DoP."
+description = "Always scales in floating point. Works on every DAC and is safe for DSD and DoP."
 
 [[field.options]]
 key = "hardware"
