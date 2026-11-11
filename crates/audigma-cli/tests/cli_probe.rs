@@ -52,11 +52,16 @@ fn test_cli_probe_pipewire() {
         .output()
         .expect("failed to run audigma probe --backend pipewire --json");
 
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: serde_json::Value =
-        serde_json::from_str(&stdout).expect("output must be valid JSON");
-    assert_eq!(parsed["backend"], "pipewire");
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&stdout).expect("output must be valid JSON");
+        assert!(parsed["sinks"].is_array());
+    } else {
+        // No PipeWire daemon on this machine (CI): the probe must say so, not crash.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("PipeWire probe failed"), "stderr: {stderr}");
+    }
 }
 
 #[test]

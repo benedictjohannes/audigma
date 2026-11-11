@@ -1954,6 +1954,9 @@ pub struct PipeWirePcmOutput {
     underruns: Arc<AtomicU64>,
     overruns: Arc<AtomicU64>,
     writer_thread: Arc<AtomicPtr<std::thread::Thread>>,
+    /// `true` while the pinned target sink exists; a blocked `write` gives up early when it
+    /// turns `false` (the sink was removed) instead of waiting out its timeout.
+    target_present: Option<Arc<AtomicBool>>,
 }
 
 /// Buffer capacity is not the graph's demand: only consume the requested frames.
@@ -2015,6 +2018,9 @@ impl PipeWirePcmOutput {
                 };
 
                 let mut props = properties! {
+                    // A distinct node name lets the registry (and the output-loop guard) tell
+                    // this stream apart from other audigma processes.
+                    *pipewire::keys::NODE_NAME => stream_name_owned.as_str(),
                     *pipewire::keys::MEDIA_TYPE => "Audio",
                     *pipewire::keys::MEDIA_CATEGORY => "Playback",
                     *pipewire::keys::MEDIA_ROLE => "Music",
@@ -2028,6 +2034,11 @@ impl PipeWirePcmOutput {
 
                 if let Some(target) = &target_node_owned {
                     props.insert("target.object", target.as_str());
+                    // Keep the pin: do not fall back to the default sink when the target is
+                    // missing, and do not follow later default-sink changes. The default can be
+                    // audigma's own input sink, which would loop the output back into itself.
+                    props.insert("node.dont-fallback", "true");
+                    props.insert("node.dont-move", "true");
                 }
 
                 let stream = match StreamBox::new(&core, &stream_name_owned, props) {
@@ -2169,11 +2180,19 @@ impl PipeWirePcmOutput {
             underruns,
             overruns,
             writer_thread,
+            target_present: None,
         })
     }
 }
 
 impl PipeWirePcmOutput {
+    /// Gives the output a flag that is `true` while its pinned target sink exists. When the
+    /// flag turns `false` while `write` is blocked on a full queue, `write` fails at once with
+    /// `NotConnected` rather than after the 2 s queue timeout.
+    pub fn set_target_presence(&mut self, flag: Arc<AtomicBool>) {
+        self.target_present = Some(flag);
+    }
+
     /// Blocks until the graph has consumed everything queued by `write`, so dropping the
     /// stream afterwards does not cut off the tail of a finite track.
     ///
@@ -2251,6 +2270,16 @@ impl Write for PipeWirePcmOutput {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::Interrupted,
                         "PipeWire output stopped",
+                    ));
+                }
+                if self
+                    .target_present
+                    .as_ref()
+                    .is_some_and(|p| !p.load(Ordering::Relaxed))
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::NotConnected,
+                        "PipeWire target sink removed",
                     ));
                 }
                 if start.elapsed() >= std::time::Duration::from_millis(2000) {

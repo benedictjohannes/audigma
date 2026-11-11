@@ -113,6 +113,134 @@ fn summarize(settings: &Settings) -> Result<StreamSummary, CliError> {
     })
 }
 
+/// Whether the configured output exists, for the device-wait logic.
+///
+/// ALSA outputs are present while the card is; a PipeWire output with `target_node` set is
+/// present while a node with that `node.name` is in the registry. A PipeWire output without a
+/// target (the default sink) has nothing to wait for.
+struct OutputPresence {
+    alsa_device: Option<String>,
+    #[cfg(feature = "pipewire")]
+    pipewire: Option<audigma_io::PipeWireSinkWatcher>,
+}
+
+impl OutputPresence {
+    fn new(out_cfg: &audigma_settings::OutputConfig, device: &str) -> Self {
+        #[cfg(feature = "pipewire")]
+        let pipewire = (out_cfg.backend == Some(OutputBackend::Pipewire))
+            .then(|| out_cfg.target_node.as_deref().map(str::trim))
+            .flatten()
+            .filter(|n| !n.is_empty())
+            .map(audigma_io::PipeWireSinkWatcher::start);
+        Self {
+            alsa_device: (out_cfg.backend == Some(OutputBackend::Alsa)).then(|| device.to_string()),
+            #[cfg(feature = "pipewire")]
+            pipewire,
+        }
+    }
+
+    fn is_present(&self) -> bool {
+        if let Some(device) = &self.alsa_device {
+            return is_alsa_device_present(device);
+        }
+        #[cfg(feature = "pipewire")]
+        if let Some(watcher) = &self.pipewire {
+            return watcher.is_present();
+        }
+        true
+    }
+
+    /// Blocks up to `ms` until the output is present (hotplug event for ALSA, registry event
+    /// for PipeWire). Returns whether it is present.
+    fn wait_present(&self, ms: i64, cancel: &AtomicBool) -> bool {
+        if let Some(device) = &self.alsa_device {
+            return wait_for_alsa_device(device, ms, cancel).unwrap_or(false);
+        }
+        #[cfg(feature = "pipewire")]
+        if let Some(watcher) = &self.pipewire {
+            return watcher.wait_present(Duration::from_millis(ms.max(0) as u64), cancel);
+        }
+        true
+    }
+
+    /// The pinned PipeWire sink's presence flag, for the output stream to poll.
+    fn pipewire_flag(&self) -> Option<Arc<AtomicBool>> {
+        #[cfg(feature = "pipewire")]
+        if let Some(watcher) = &self.pipewire {
+            return Some(watcher.presence_flag());
+        }
+        None
+    }
+
+    /// A PipeWire target that is pinned but absent. A streaming I/O error in this state is the
+    /// output stream starving because its sink went away, so it is handled as a device loss.
+    fn pipewire_target_missing(&self) -> bool {
+        #[cfg(feature = "pipewire")]
+        if let Some(watcher) = &self.pipewire {
+            return !watcher.is_present();
+        }
+        false
+    }
+}
+
+/// How often the output-loop guard samples the PipeWire graph.
+#[cfg(feature = "pipewire")]
+const OUTPUT_LOOP_POLL: Duration = Duration::from_secs(5);
+
+/// Starts a low-priority thread that reports when the PipeWire output stream is linked into
+/// audigma's own input sink.
+///
+/// The session manager links a stream to the default sink when its `target.object` is unset or
+/// matches no node, and the default sink can be audigma's own virtual sink. The audio then
+/// recirculates inside audigma and nothing reaches a device, so the daemon looks healthy while
+/// playing silence. The check looks at the actual links, so it also catches a stale
+/// `output.target_node` and a default sink that changes while running. It logs once when the
+/// loop appears and once when it clears.
+#[cfg(feature = "pipewire")]
+fn spawn_output_loop_guard(settings: &Settings, instance: &Instance, running: Arc<AtomicBool>) {
+    let Some(sink_node) = settings.input.as_ref().and_then(|i| i.node_name.clone()) else {
+        return;
+    };
+    let stream_node = format!("audigma_pcm_out_{}", instance.name());
+    let spawned = std::thread::Builder::new()
+        .name("audigma-loop-guard".to_string())
+        .spawn(move || {
+            let mut looped = false;
+            let mut next_poll = Instant::now() + Duration::from_secs(2);
+            while running.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(200));
+                if Instant::now() < next_poll {
+                    continue;
+                }
+                next_poll = Instant::now() + OUTPUT_LOOP_POLL;
+                let Ok(targets) = audigma_io::output_link_targets(&stream_node) else {
+                    continue;
+                };
+                let now = targets.contains(&sink_node);
+                if now && !looped {
+                    tracing::error!(
+                        target: "audigma::daemon",
+                        event = "output_loop",
+                        stream = %stream_node,
+                        sink = %sink_node,
+                        "the PipeWire output is linked to audigma's own input sink, so audio recirculates and nothing is played; set `output.target_node` to a hardware sink, or choose another default sink"
+                    );
+                } else if !now && looped {
+                    tracing::info!(
+                        target: "audigma::daemon",
+                        event = "output_loop_cleared",
+                        stream = %stream_node,
+                        "the PipeWire output is no longer linked to audigma's own sink"
+                    );
+                }
+                looped = now;
+            }
+        });
+    if let Err(e) = spawned {
+        tracing::warn!(target: "audigma::daemon", "could not start the output-loop guard: {e}");
+    }
+}
+
 pub fn run_run(args: RunArgs) -> Result<(), CliError> {
     let instance = match args.instance.instance.clone() {
         Some(name) => Instance::new(name)?,
@@ -125,6 +253,20 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
     // Take the single-instance lock before touching any device or PipeWire node, so a duplicate
     // instance fails fast without disturbing the running one.
     let instance_lock = instance.acquire_lock()?;
+
+    #[cfg(feature = "pipewire")]
+    if settings.output_backend() == Some(OutputBackend::Pipewire)
+        && settings
+            .output
+            .as_ref()
+            .is_none_or(|o| o.target_node.as_deref().is_none_or(|n| n.trim().is_empty()))
+    {
+        tracing::warn!(
+            target: "audigma::daemon",
+            event = "config_warning",
+            "`output.target_node`: unset with a PipeWire output; if audigma's own sink becomes the default sink, the output is linked back into its own input and playback is silent. Setting it is strongly recommended"
+        );
+    }
 
     let summary = summarize(&settings)?;
     let channels = settings
@@ -175,6 +317,12 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
         endpoint = %instance.display_endpoint(),
         "control socket bound"
     );
+
+    // With a PipeWire output, watch for the output stream being linked into audigma's own sink.
+    #[cfg(feature = "pipewire")]
+    if settings.output_backend() == Some(OutputBackend::Pipewire) {
+        spawn_output_loop_guard(&settings, &instance, control.running.clone());
+    }
 
     // Supervisor loop: one pipeline session per iteration; a pause parks here until resume.
     let session_result: Result<(), CliError> = loop {
@@ -319,8 +467,11 @@ fn run_session(
 
     // Helper closure to create/open output backend driver
     let create_output_driver = |out_cfg: &audigma_settings::OutputConfig,
-                                target: &TargetRateSpec|
+                                target: &TargetRateSpec,
+                                target_presence: Option<Arc<AtomicBool>>|
      -> Result<Box<dyn AudioOutput>, EngineError> {
+        #[cfg(not(feature = "pipewire"))]
+        let _ = &target_presence;
         match out_cfg.backend {
             Some(OutputBackend::Alsa) => {
                 let alsa_config =
@@ -364,7 +515,7 @@ fn run_session(
                 // Clamp between 64 and 256 tiles (~20ms to 85ms at 192kHz) to keep latency tight.
                 let tiles_per_sec = (pw_rate as f64 / 64.0).ceil() as usize;
                 let queue_depth = ((tiles_per_sec * out_buf_ms as usize) / 1000).clamp(64, 256);
-                let pw_out = PipeWirePcmOutput::new(
+                let mut pw_out = PipeWirePcmOutput::new(
                     &format!("audigma_pcm_out_{}", instance.name()),
                     target_node,
                     pw_rate,
@@ -376,6 +527,9 @@ fn run_session(
                     backend: "pipewire",
                     message: format!("failed to initialize PipeWire output: {e}"),
                 })?;
+                if let Some(flag) = target_presence {
+                    pw_out.set_target_presence(flag);
+                }
                 Ok(Box::new(pw_out))
             }
             #[cfg(not(feature = "pipewire"))]
@@ -474,10 +628,18 @@ fn run_session(
                     let mut current_target_spec = target_spec;
                     let mut generation: u64 = 1;
 
-                    let target_device = out_cfg
-                        .device
-                        .clone()
-                        .unwrap_or_else(|| "default".to_string());
+                    let target_device = match out_cfg.backend {
+                        Some(OutputBackend::Pipewire) => out_cfg
+                            .target_node
+                            .clone()
+                            .filter(|n| !n.trim().is_empty())
+                            .unwrap_or_else(|| "default".to_string()),
+                        _ => out_cfg
+                            .device
+                            .clone()
+                            .unwrap_or_else(|| "default".to_string()),
+                    };
+                    let presence = OutputPresence::new(out_cfg, &target_device);
                     let custom_mixer_control = out_cfg.mixer_control();
                     let vol_control_mode = out_cfg.volume_control();
                     let device_wait_ms = out_cfg.device_wait_ms();
@@ -547,7 +709,7 @@ fn run_session(
                     while control.is_active() {
                         // Step 1: Ensure output device is connected and opened
                         if current_output.is_none() {
-                            if out_cfg.backend == Some(OutputBackend::Alsa) && !is_alsa_device_present(&target_device) {
+                            if !presence.is_present() {
                                 if device_wait_ms == 0 {
                                     if expiry == DeviceWaitExpiry::Pause {
                                         tracing::warn!(
@@ -560,7 +722,7 @@ fn run_session(
                                         break;
                                     }
                                     return Err(EngineError::DeviceDisconnected(format!(
-                                        "target ALSA device '{target_device}' is not present at startup"
+                                        "target output '{target_device}' is not present at startup"
                                     ))
                                     .into());
                                 }
@@ -654,7 +816,7 @@ fn run_session(
                                     }
 
                                     // Wait for inotify event or slice
-                                    if wait_for_alsa_device(&target_device, 200, &control.running).unwrap_or(false)
+                                    if presence.wait_present(200, &control.running)
                                     {
                                         tracing::info!(
                                             target: "audigma::daemon",
@@ -682,7 +844,9 @@ fn run_session(
 
                                 // Re-acquire D-Bus device reservation if needed
                                 #[cfg(feature = "dbus")]
-                                if out_cfg.reserve_device.unwrap_or(true) {
+                                if out_cfg.backend == Some(OutputBackend::Alsa)
+                                    && out_cfg.reserve_device.unwrap_or(true)
+                                {
                                     let card_idx = resolve_card_index(&target_device).unwrap_or(0);
                                     match DeviceReservation::acquire(card_idx, "audigma", 100) {
                                         Ok(res) => {
@@ -711,7 +875,7 @@ fn run_session(
                             }
 
                             // Open output device
-                            match create_output_driver(out_cfg, &current_target_spec) {
+                            match create_output_driver(out_cfg, &current_target_spec, presence.pipewire_flag()) {
                                 Ok(out) => {
                                     tracing::info!(
                                         target: "audigma::alsa",
@@ -845,7 +1009,15 @@ fn run_session(
 
                                 continue;
                             }
-                            Err(EngineError::DeviceDisconnected(reason)) => {
+                            Err(e)
+                                if matches!(e, EngineError::DeviceDisconnected(_))
+                                    || (matches!(e, EngineError::Io(_))
+                                        && presence.pipewire_target_missing()) =>
+                            {
+                                let reason = match &e {
+                                    EngineError::DeviceDisconnected(r) => r.clone(),
+                                    other => other.to_string(),
+                                };
                                 tracing::warn!(
                                     target: "audigma::alsa",
                                     event = audigma_log::OUTPUT_DEVICE_DISCONNECTED,

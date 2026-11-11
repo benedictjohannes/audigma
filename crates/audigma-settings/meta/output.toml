@@ -40,9 +40,11 @@ Opens your DAC exclusively through ALSA. Audigma owns the device while running a
 key = "target_node"
 summary = "PipeWire sink to play into."
 description = """
-The name of an existing PipeWire sink, as listed by `wpctl status` (for example `alsa_output.usb-FiiO_K17-00.analog-stereo`).
+The `node.name` of an existing PipeWire sink, for example `alsa_output.usb-FiiO_K17-00.analog-stereo`. `audigma probe --backend pipewire` lists the names that exist now.
 
-It is a routing hint for the session manager (WirePlumber), not a hard link. When unset, the session manager picks the default sink.
+When the name is set, audigma asks the session manager (WirePlumber) to link its output to that sink and to keep it there: no fallback to the default sink, and no move when the default sink changes. If no sink has that name, `audigma run` waits for it the way it waits for a missing DAC (see `device_wait_ms`) instead of playing somewhere else.
+
+When the name is unset, the session manager links audigma's output to the default sink. Setting it is strongly recommended with `audigma run`. If audigma's own virtual sink is the default sink, an unset name links audigma's output back into its own input: the audio recirculates inside audigma, nothing reaches a device, and playback is silent. Sink names can change between sessions, so check the name after hardware or profile changes. `audigma play` has no virtual sink of its own, so it can leave this unset.
 """
 show_if = { key = "output.backend", eq = "pipewire" }
 assist = ["pipewire-sinks"]
@@ -217,9 +219,9 @@ assist = ["alsa-detect"]
 key = "device_wait_ms"
 summary = "How long the daemon waits for a missing output device."
 description = """
-How long the daemon keeps waiting when the DAC is absent at start or disappears (power-cycle, unplug). The process never crashes on device loss.
+How long the daemon keeps waiting when the output is absent at start or disappears (power-cycle, unplug). The process never crashes on device loss. With an exclusive ALSA output the output is the DAC. With a PipeWire output it is the sink named by `target_node`; a PipeWire output without `target_node` plays into the default sink and has nothing to wait for.
 
-- `-1`: wait forever; playback resumes when the DAC returns.
+- `-1`: wait forever; playback resumes when the output returns.
 - `0`: give up immediately (fail fast).
 - a positive number: give up after that many milliseconds.
 
@@ -256,7 +258,7 @@ description = "Tears the pipeline down and keeps the process, control socket and
 key = "keep_audio_sink_ms"
 summary = "How long the virtual sink stays alive while the device is missing."
 description = """
-While the DAC is gone, audigma keeps its PipeWire sink and silently drains audio so apps do not stall. After this many milliseconds the sink is removed, letting desktop audio fall back to other outputs such as speakers.
+While the output is gone, audigma keeps its PipeWire sink and silently drains audio so apps do not stall. After this many milliseconds the sink is removed, letting desktop audio fall back to other outputs such as speakers.
 
 - `-1`: keep the sink forever.
 - `0`: remove it at once.

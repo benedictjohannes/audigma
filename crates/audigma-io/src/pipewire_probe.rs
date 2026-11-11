@@ -161,6 +161,99 @@ pub fn probe_pipewire_sinks() -> Result<PipeWireProbeReport, String> {
     Ok(PipeWireProbeReport { sinks })
 }
 
+/// Names of the nodes that the node `stream_node` sends audio to, according to the links
+/// in the graph. `nodes` holds `(object id, node.name)` and `links` holds
+/// `(output node id, input node id)`. Sorted and de-duplicated.
+pub fn link_targets(
+    nodes: &[(u32, String)],
+    links: &[(u32, u32)],
+    stream_node: &str,
+) -> Vec<String> {
+    let name = |id: u32| {
+        nodes
+            .iter()
+            .find(|(i, _)| *i == id)
+            .map(|(_, n)| n.as_str())
+    };
+    let mut targets: Vec<String> = links
+        .iter()
+        .filter(|(out, _)| name(*out) == Some(stream_node))
+        .filter_map(|(_, inp)| name(*inp).map(str::to_string))
+        .collect();
+    targets.sort();
+    targets.dedup();
+    targets
+}
+
+/// Names of the nodes that the PipeWire node `stream_node` is currently linked to (as the
+/// producer). Empty when the node does not exist or has no links yet.
+///
+/// Uses only registry-announced properties (`node.name`, `link.output.node`,
+/// `link.input.node`), so no nodes are bound.
+pub fn output_link_targets(stream_node: &str) -> Result<Vec<String>, String> {
+    pw::init();
+    let mainloop = pw::main_loop::MainLoopRc::new(None).map_err(|e| format!("main loop: {e}"))?;
+    let context =
+        pw::context::ContextRc::new(&mainloop, None).map_err(|e| format!("context: {e}"))?;
+    let core = context
+        .connect_rc(None)
+        .map_err(|e| format!("cannot connect to the PipeWire daemon: {e}"))?;
+    let registry = core
+        .get_registry_rc()
+        .map_err(|e| format!("registry: {e}"))?;
+
+    let nodes = Rc::new(RefCell::new(Vec::<(u32, String)>::new()));
+    let links = Rc::new(RefCell::new(Vec::<(u32, u32)>::new()));
+    let done = Rc::new(std::cell::Cell::new(false));
+    let pending = core.sync(0).map_err(|e| format!("sync: {e}"))?;
+    let core_listener = core
+        .add_listener_local()
+        .done({
+            let done = done.clone();
+            let mainloop = mainloop.clone();
+            move |id, seq| {
+                if id == pw::core::PW_ID_CORE && seq == pending {
+                    done.set(true);
+                    mainloop.quit();
+                }
+            }
+        })
+        .register();
+    let registry_listener = registry
+        .add_listener_local()
+        .global({
+            let nodes = nodes.clone();
+            let links = links.clone();
+            move |global| {
+                let Some(props) = global.props else { return };
+                match global.type_ {
+                    pw::types::ObjectType::Node => {
+                        if let Some(name) = props.get("node.name") {
+                            nodes.borrow_mut().push((global.id, name.to_string()));
+                        }
+                    }
+                    pw::types::ObjectType::Link => {
+                        let id = |k: &str| props.get(k).and_then(|v| v.parse::<u32>().ok());
+                        if let (Some(out), Some(inp)) =
+                            (id("link.output.node"), id("link.input.node"))
+                        {
+                            links.borrow_mut().push((out, inp));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .register();
+    while !done.get() {
+        mainloop.run();
+    }
+    drop(registry_listener);
+    drop(core_listener);
+    let (nodes, links) = (nodes.take(), links.take());
+    Ok(link_targets(&nodes, &links, stream_node))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,5 +321,32 @@ mod tests {
             ])
             .is_none()
         );
+    }
+
+    #[test]
+    fn link_targets_follow_producer_side_only() {
+        let nodes = vec![
+            (1, "audigma_pcm_out_default".to_string()),
+            (2, "audigma_sink_default".to_string()),
+            (3, "alsa_output.x".to_string()),
+            (4, "mpd".to_string()),
+        ];
+        // out -> own sink twice (L and R); mpd -> own sink; own sink monitor -> hardware.
+        let links = vec![(1, 2), (1, 2), (4, 2), (2, 3)];
+        assert_eq!(
+            link_targets(&nodes, &links, "audigma_pcm_out_default"),
+            vec!["audigma_sink_default"]
+        );
+        assert_eq!(
+            link_targets(&nodes, &links, "mpd"),
+            vec!["audigma_sink_default"]
+        );
+        assert!(link_targets(&nodes, &links, "missing").is_empty());
+    }
+
+    #[test]
+    fn link_targets_ignore_links_to_unnamed_nodes() {
+        let nodes = vec![(1, "out".to_string())];
+        assert!(link_targets(&nodes, &[(1, 9)], "out").is_empty());
     }
 }

@@ -7,6 +7,8 @@ pub mod file;
 pub mod pipewire;
 #[cfg(feature = "pipewire")]
 pub mod pipewire_probe;
+#[cfg(feature = "pipewire")]
+pub mod pipewire_watch;
 #[cfg(target_os = "linux")]
 pub mod sched;
 pub mod stdio;
@@ -15,8 +17,12 @@ pub mod stdio;
 pub use self::pipewire::{PipeWireError, PipeWirePcmOutput, PipeWireVirtualSink};
 #[cfg(feature = "pipewire")]
 pub use self::pipewire_probe::{
-    PipeWireProbeReport, PipeWireSinkInfo, probe_pipewire_sinks, sink_from_props,
+    PipeWireProbeReport, PipeWireSinkInfo, link_targets, output_link_targets, probe_pipewire_sinks,
+    sink_from_props,
 };
+#[cfg(feature = "pipewire")]
+#[cfg(feature = "pipewire")]
+pub use self::pipewire_watch::PipeWireSinkWatcher;
 pub use alsa::{
     AlsaAudioOutput, AlsaCardReport, AlsaDeviceReport, AlsaDeviceWatcher, AlsaHardwareMixer,
     AlsaOutputConfig, AlsaOutputError, AlsaProbeReport, is_alsa_device_present, probe_alsa_devices,
