@@ -10,8 +10,8 @@ pub mod volume;
 
 use clap::Parser;
 use commands::{
-    Cli, Commands, resolve_config_path, run_benchmark, run_config, run_convert, run_pause,
-    run_play, run_probe, run_resume, run_run, run_set, run_status, run_stop,
+    Cli, Commands, resolve_config_path, run_benchmark, run_config, run_configure, run_convert,
+    run_pause, run_play, run_probe, run_resume, run_run, run_set, run_status, run_stop,
 };
 use std::process::ExitCode;
 
@@ -32,6 +32,8 @@ fn main() -> ExitCode {
     // 1. Determine command default log level: info for run, warn for short-lived commands (§6.1)
     let default_level = match &cli.command {
         Commands::Run(_) => audigma_log::LogLevel::Info,
+        // Log lines would land on the form's screen.
+        Commands::Configure(_) => audigma_log::LogLevel::Error,
         _ => audigma_log::LogLevel::Warn,
     };
 
@@ -41,6 +43,7 @@ fn main() -> ExitCode {
         Commands::Play(args) => args.config.as_deref(),
         Commands::Convert(args) => args.config.as_deref(),
         Commands::Benchmark(args) => args.config.as_deref(),
+        Commands::Configure(args) => args.config.as_deref(),
         Commands::Config(args) => match &args.command {
             commands::ConfigCommands::Explain { config, .. } => config.as_deref(),
             commands::ConfigCommands::Check { config } => config.as_deref(),
@@ -96,6 +99,7 @@ fn main() -> ExitCode {
         Commands::Convert(args) => run_convert(args),
         Commands::Benchmark(args) => run_benchmark(args),
         Commands::Config(args) => run_config(args),
+        Commands::Configure(args) => run_configure(args),
         Commands::Probe(args) => run_probe(args),
     };
 

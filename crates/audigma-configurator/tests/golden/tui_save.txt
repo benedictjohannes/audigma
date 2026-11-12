@@ -1,0 +1,24 @@
+ audigma configure  new file · use case: not set · mode: all
+┌ Save ────────────────────────────────────────────────────────────────────────┐
+│  Write to: /nonexistent/audigma/config.toml                                  │
+│    The file does not exist: it is created.                                   │
+│                                                                              │
+│  [x] Only write keys that differ from the defaults                           │
+│                                                                              │
+│  Comments:  none  [brief]  full                                              │
+│Lines starting with ## are generated and rewritten on every save. Use a single│
+│# for your own notes.                                                         │
+│                                                                              │
+│> Save                                                                        │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+ ↑↓ move · Enter/Space change · ←→ comment level · Esc back

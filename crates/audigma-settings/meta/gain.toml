@@ -31,15 +31,15 @@ default = 0.25
 show_if = { key = "target.format", eq = "dsd" }
 
 [[field.options]]
-key = "0"
-label = "0 dB"
-summary = "No extra margin; runs at the measured limit."
-
-[[field.options]]
 key = "0.25"
 label = "0.25 dB"
 summary = "Default."
 description = "One guard step below the measured limit."
+
+[[field.options]]
+key = "0"
+label = "0 dB"
+summary = "No extra margin; runs at the measured limit."
 
 [[field.options]]
 key = "0.5"

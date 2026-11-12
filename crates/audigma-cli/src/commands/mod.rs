@@ -2,6 +2,7 @@
 
 pub mod benchmark;
 pub mod config;
+pub mod configure;
 pub mod control;
 pub mod convert;
 pub mod play;
@@ -13,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 pub use benchmark::{BenchmarkArgs, run_benchmark};
 pub use config::{ConfigArgs, ConfigCommands, run_config};
+pub use configure::{ConfigureArgs, ConfigureFrontend, run_configure};
 pub use control::{
     PauseArgs, ResumeArgs, SetArgs, SetCommands, StatusArgs, StopArgs, run_pause, run_resume,
     run_set, run_status, run_stop,
@@ -86,6 +88,9 @@ pub enum Commands {
 
     /// Validate or inspect configuration files
     Config(ConfigArgs),
+
+    /// Create or edit a configuration file interactively
+    Configure(ConfigureArgs),
 
     /// Probe audio hardware endpoints and supported formats/rates
     Probe(ProbeArgs),

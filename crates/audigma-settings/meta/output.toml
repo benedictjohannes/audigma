@@ -18,6 +18,14 @@ recommended.interactive-desktop = { value = "alsa", why = "prevents audio loop."
 recommended.headless-appliance = { value = "alsa", why = "audigma owns the DAC; supports DSD." }
 
 [[field.options]]
+key = "alsa"
+label = "Exclusive ALSA"
+summary = "Open an ALSA hardware device exclusively."
+description = """
+Opens your DAC exclusively through ALSA. Audigma owns the device while running and bypasses desktop mixing, so other applications must play through audigma's virtual sink. Output is paced by the DAC's own clock, with drift correction on the input side. Required for all DSD output (native and DoP).
+"""
+
+[[field.options]]
 key = "pipewire"
 label = "PipeWire graph"
 summary = "Play into the PipeWire graph; PipeWire keeps ownership of the DAC."
@@ -26,14 +34,6 @@ Sends PCM back into the PipeWire graph, where it shares the DAC with other appli
 """
 caution = """
 Make sure the PipeWire graph does not route audigma's output back into its own virtual sink (an audio loop).
-"""
-
-[[field.options]]
-key = "alsa"
-label = "Exclusive ALSA"
-summary = "Open an ALSA hardware device exclusively."
-description = """
-Opens your DAC exclusively through ALSA. Audigma owns the device while running and bypasses desktop mixing, so other applications must play through audigma's virtual sink. Output is paced by the DAC's own clock, with drift correction on the input side. Required for all DSD output (native and DoP).
 """
 
 [[field]]

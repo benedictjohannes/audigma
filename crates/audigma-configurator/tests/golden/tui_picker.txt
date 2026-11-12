@@ -1,0 +1,24 @@
+ audigma configure  new file · use case: not set · mode: all
+┌ Settings ──────────────────────────┐┌ Help ──────────────────────────────────┐
+│ rate_mode           dynamic        ││Filter phase response.                  │
+│ allowed_rates       [44100, 48000,…││                                        │
+┌ phase ───────────────────────────────────────────────────────────────────────┐
+│Filter phase response.                                                        │
+│                                                                              │
+│Selects the phase behaviour of the interpolation filters. Both settings are   │
+│equally flat in level across the audio band.                                  │
+│──────────────────────────────────────────────────────────────────────────────│
+│  linear - Linear phase                                                       │
+│    Symmetric filter; pre- and post-ringing; no phase shift.                  │
+│> minimum - Minimum phase                                                     │
+│    No pre-ringing, lower delay; uneven phase response.                       │
+│──────────────────────────────────────────────────────────────────────────────│
+│Asymmetric impulse response. No pre-ringing from this stage; all ringing      │
+│follows the transient. Delay is about 0.1 ms, but frequencies are delayed     │
+│unevenly (phase shift, mostly towards the top of the band).                   │
+└──────────────────────────────────────────────────────────────────────────────┘
+│▾ Resampler                         ││Press a: Starting point (now: Neutral)  │
+│ phase               linear         ││                                        │
+└────────────────────────────────────┘└────────────────────────────────────────┘
+ Error in target: the configuration must specify [target]
+ Enter edit  Del reset  a assist  u use case  m mode  * hidden  r review  q quit

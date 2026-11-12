@@ -1,0 +1,24 @@
+ audigma configure  new file · use case: not set · mode: all
+┌ Settings ──────────────────────────┐┌ Help ──────────────────────────────────┐
+│▾ Input                             ││Input                                   │
+│ bac┌ What will you use audigma for? ────────────────────────────────────┐    │
+│ nod│This only highlights recommendations in the help pane and picks a   │    │
+│ sam│mode. It never changes a value and is not written to the file.      │    │
+│ rat│                                                                    │    │
+│ cha│> interactive desktop                                               │    │
+│ cha│    A daemon that stays ready on a desktop; apps, browsers and MPD  │es  │
+│ rat│    play into it.                                                   │t   │
+│ all│                                                                    │    │
+│ all│  headless appliance                                                │or  │
+│▾ Ou│    A dedicated music box with no desktop sound server.             │    │
+│?bac│                                                                    │    │
+│ vol│  offline conversion                                                │    │
+│ dev│    Converting files with audigma convert.                          │    │
+│ dev│                                                                    │    │
+│ kee│  Skip                                                              │    │
+│▾ Ta│                                                                    │    │
+│?for│                                                                    │    │
+│ rat└────────────────────────────────────────────────────────────────────┘    │
+└────────────────────────────────────┘└────────────────────────────────────────┘
+ Error in target: the configuration must specify [target]
+ Enter edit  Del reset  a assist  u use case  m mode  * hidden  r review  q quit

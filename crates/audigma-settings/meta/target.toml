@@ -141,6 +141,11 @@ default = "s32le"
 assist = ["alsa-detect"]
 
 [[field.options]]
+key = "s32le"
+label = "32-bit"
+summary = "32-bit signed integer (24-bit DACs take the top bits)."
+
+[[field.options]]
 key = "s16le"
 label = "16-bit"
 summary = "16-bit signed integer."
@@ -154,11 +159,6 @@ summary = "24-bit signed integer in a 32-bit word."
 key = "s24_3le"
 label = "24-bit packed"
 summary = "24-bit signed integer in 3 bytes."
-
-[[field.options]]
-key = "s32le"
-label = "32-bit"
-summary = "32-bit signed integer (24-bit DACs take the top bits)."
 
 [[field.options]]
 key = "f32"

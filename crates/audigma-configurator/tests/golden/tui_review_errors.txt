@@ -1,0 +1,24 @@
+ audigma configure  new file · use case: not set · mode: all
+┌ Review ──────────────────────────────────────────────────────────────────────┐
+│Problems                                                                      │
+│✗ target: the configuration must specify [target]                             │
+│                                                                              │
+│Device check                                                                  │
+│  press p to detect devices and check the configuration                       │
+│                                                                              │
+│Validate on this machine (an estimate)                                        │
+│  press b to benchmark exactly this configuration                             │
+│                                                                              │
+│Changed keys (1)                                                              │
+│  output.backend = (reset to default)                                         │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+ Error in target: the configuration must specify [target]
+ p probe · b validate · g go to error · s save · Esc back

@@ -886,6 +886,26 @@ mod tests {
     }
 
     #[test]
+    fn default_option_is_listed_first() {
+        let c = catalog();
+        for f in c.fields() {
+            let (Some(d), false) = (&f.default, f.options.is_empty()) else {
+                continue;
+            };
+            let first = &f.options[0].key;
+            let want = match d {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            assert_eq!(
+                first, &want,
+                "{}: the default option must be listed first",
+                f.path
+            );
+        }
+    }
+
+    #[test]
     fn defaults_in_metadata_match_code() {
         let c = catalog();
         let d = |p: &str| c.field(p).unwrap().default.clone();

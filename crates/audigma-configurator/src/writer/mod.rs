@@ -10,7 +10,7 @@
 //!
 //! [`render`] is pure; [`save`] adds the backup, the atomic replace and the post-condition check.
 
-mod text;
+pub(crate) mod text;
 
 use std::collections::BTreeSet;
 use std::fs;

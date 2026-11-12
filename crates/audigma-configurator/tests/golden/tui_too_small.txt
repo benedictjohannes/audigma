@@ -1,0 +1,12 @@
+Terminal too small: 60x12 (need at least 80x24).
+
+
+
+
+
+
+
+
+
+
+

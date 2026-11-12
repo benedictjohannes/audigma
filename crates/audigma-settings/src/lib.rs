@@ -933,11 +933,23 @@ impl Settings {
         Ok(settings)
     }
 
+    /// Like [`Self::from_toml_str`] but checks only the shape (known keys, value types, enum
+    /// values), not the cross-field rules. For editors that pass through states `validate()`
+    /// rejects (`backend = "alsa"` before `device` is set); call [`Self::validate`] before use.
+    pub fn from_toml_str_unvalidated(toml_str: &str) -> Result<Self, SettingsError> {
+        Ok(toml::from_str(toml_str)?)
+    }
+
     /// Builds and validates settings from an already parsed (and possibly layered) TOML table.
     pub fn from_toml_table(table: toml::Table) -> Result<Self, SettingsError> {
-        let settings: Self = toml::Value::Table(table).try_into()?;
+        let settings = Self::from_toml_table_unvalidated(table)?;
         settings.validate()?;
         Ok(settings)
+    }
+
+    /// Shape-only counterpart of [`Self::from_toml_table`]; see [`Self::from_toml_str_unvalidated`].
+    pub fn from_toml_table_unvalidated(table: toml::Table) -> Result<Self, SettingsError> {
+        Ok(toml::Value::Table(table).try_into()?)
     }
 
     /// Returns default offline conversion settings tailored for the given output container.

@@ -1,0 +1,24 @@
+ audigma configure  new file · use case: headless appliance · mode: live
+┌ Settings ──────────────────────────┐┌ Help ──────────────────────────────────┐
+│▾ Input                             ││Where processed audio goes.             │
+│ backend             pipewire       ││                                        │
+│ node_name           (auto)         ││Live output used by audigma run and     │
+│ sample_format       s16le          ││audigma play. Required for run.         │
+│ rate_hz             (auto)         ││audigma convert ignores this setting    │
+│ channels            2              ││(it writes to the -o file or stdout).   │
+│ channel_positions   (auto)         ││                                        │
+│ rate_mode           dynamic        ││Default: none.                          │
+│ allowed_rates       [44100, 48000,…││                                        │
+│ allow_dsd           false          ││Recommended for headless appliance:     │
+│▾ Output                            ││alsa. audigma owns the DAC; supports    │
+│?backend             -              ││DSD.                                    │
+│ volume_control      hardware-softw…││Used by: run, play.                     │
+│ device_wait_ms      -1             ││                                        │
+│ device_wait_expiry  exit           ││                                        │
+│ keep_audio_sink_ms  5000           ││                                        │
+│▾ Target                            ││                                        │
+│?format              -              ││                                        │
+│ rate_family         source         ││                                        │
+└────────────────────────────────────┘└────────────────────────────────────────┘
+ Error in target.dsd_rate: is required when format = "dsd"
+ Enter edit  Del reset  a assist  u use case  m mode  * hidden  r review  q quit

@@ -8,6 +8,8 @@
 pub mod assist;
 pub mod draft;
 pub mod schema;
+#[cfg(feature = "tui")]
+pub mod tui;
 pub mod writer;
 
 pub use audigma_settings::meta;

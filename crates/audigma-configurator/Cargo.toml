@@ -7,7 +7,12 @@ repository.workspace = true
 rust-version.workspace = true
 description = "Configurator core for audigma: schema pipeline, assists, draft and config writer"
 
+[features]
+default = []
+tui = ["dep:ratatui"]
+
 [dependencies]
+ratatui = { workspace = true, optional = true }
 audigma-settings = { path = "../audigma-settings", features = ["meta", "schema"] }
 audigma-dsp = { path = "../audigma-dsp" }
 audigma-engine = { path = "../audigma-engine" }

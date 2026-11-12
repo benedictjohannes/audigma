@@ -21,7 +21,21 @@ pub enum DraftError {
     Serialize(String),
 }
 
+/// A finding about the draft, attributed to a key when the settings crate knows which one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Issue {
+    /// Absolute dotted path, `None` for a finding that belongs to no single key.
+    pub path: Option<String>,
+    pub message: String,
+    /// An error blocks saving; a warning does not.
+    pub error: bool,
+}
+
 /// Settings in progress with per-key "touched" tracking.
+///
+/// Edits only have to keep the draft *well-formed* (known keys, right types and enum values);
+/// the cross-field rules are checked by [`Draft::issues`], so a form can pass through states
+/// like `backend = "alsa"` before `device` is set.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Draft {
     settings: Settings,
@@ -37,9 +51,49 @@ impl Draft {
         }
     }
 
-    /// A draft from a config file's text; nothing touched.
+    /// A draft with no sections set (a new file).
+    pub fn empty() -> Self {
+        let settings = Settings::from_toml_str_unvalidated(&format!(
+            "schema_version = {}",
+            audigma_settings::SCHEMA_VERSION_V1
+        ))
+        .expect("a bare schema_version parses");
+        Self::new(settings)
+    }
+
+    /// A draft from a config file's text, which must be valid as a whole; nothing touched.
     pub fn from_toml_str(text: &str) -> Result<Self, DraftError> {
         Ok(Self::new(Settings::from_toml_str(text)?))
+    }
+
+    /// Everything wrong with the draft right now: the first violated rule (an error), or, when
+    /// the draft is valid, the warnings. Save is allowed when no entry is an error.
+    pub fn issues(&self) -> Vec<Issue> {
+        match self.settings.validate() {
+            Err(e) => vec![Issue {
+                path: e.path().map(str::to_string),
+                message: match &e {
+                    SettingsError::Validation { message, .. } => (*message).to_string(),
+                    other => other.to_string(),
+                },
+                error: true,
+            }],
+            Ok(()) => self
+                .settings
+                .warnings()
+                .into_iter()
+                .map(|w| Issue {
+                    path: Some(w.path.to_string()),
+                    message: w.message,
+                    error: false,
+                })
+                .collect(),
+        }
+    }
+
+    /// Whether [`Draft::issues`] contains an error.
+    pub fn has_errors(&self) -> bool {
+        self.settings.validate().is_err()
     }
 
     pub fn settings(&self) -> &Settings {
@@ -101,7 +155,7 @@ impl Draft {
                 cur.remove(*leaf);
             }
         }
-        self.settings = Settings::from_toml_table(table)?;
+        self.settings = Settings::from_toml_table_unvalidated(table)?;
         self.touched.insert(path.to_string());
         Ok(())
     }
@@ -132,10 +186,27 @@ mod tests {
     }
 
     #[test]
-    fn invalid_edit_leaves_the_draft_unchanged() {
+    fn edits_may_pass_through_invalid_states() {
+        let mut d = Draft::empty();
+        assert_eq!(d.issues()[0].path.as_deref(), Some("target"));
+        d.set("target.format", &json!("pcm")).unwrap();
+        d.set("target.pcm_rate_hz", &json!(192000)).unwrap();
+        assert!(d.issues().is_empty());
+        d.set("output.backend", &json!("alsa")).unwrap();
+        let issues = d.issues();
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].error);
+        assert_eq!(issues[0].path.as_deref(), Some("output.device"));
+        assert!(d.has_errors());
+        d.set("output.device", &json!("hw:CARD=K17,DEV=0")).unwrap();
+        assert!(!d.has_errors());
+    }
+
+    #[test]
+    fn a_malformed_edit_leaves_the_draft_unchanged() {
         let mut d = base();
         let before = d.clone();
-        assert!(d.set("runtime.realtime_priority", &json!(1)).is_err());
+        assert!(d.set("output.backend", &json!("nonsense")).is_err());
         assert_eq!(d, before);
     }
 

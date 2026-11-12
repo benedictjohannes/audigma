@@ -12,7 +12,8 @@ name = "audigma"
 path = "src/main.rs"
 
 [features]
-default = ["alsa", "dbus", "pipewire"]
+default = ["alsa", "dbus", "pipewire", "tui"]
+tui = ["audigma-configurator/tui"]
 alsa = ["audigma-io/alsa"]
 dbus = ["audigma-io/dbus"]
 pipewire = ["audigma-io/pipewire"]

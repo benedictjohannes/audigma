@@ -1,0 +1,24 @@
+ audigma configure  new file · use case: not set · mode: all
+
+
+
+
+        ┌ Start ───────────────────────────────────────────────────────┐
+        │/nonexistent/audigma/config.toml does not exist yet; a new    │
+        │file will be created.                                         │
+        │                                                              │
+        │  Guided setup                                                │
+        │    Not available yet.                                        │
+        │                                                              │
+        │> Edit configuration                                          │
+        │    Every key, with its documentation.                        │
+        │                                                              │
+        │                                                              │
+        └──────────────────────────────────────────────────────────────┘
+
+
+
+
+
+ Error in target: the configuration must specify [target]
+ ↑↓ choose · Enter select · q quit

@@ -1,0 +1,24 @@
+ audigma configure  new file · use case: not set · mode: all · hidden keys shown
+┌ Settings ──────────────────────────┐┌ Help ──────────────────────────────────┐
+│ node_name           (auto)         ││Output buffer length in milliseconds.   │
+│ sample_format       s16le          ││                                        │
+│ rate_hz             (auto)         ││For alsa, the device buffer length      │
+│ channels            2              ││(minimum 5). For pipewire, it sizes the │
+│ channel_positions   (auto)         ││output queue.                           │
+│ rate_mode           dynamic        ││                                        │
+│ allowe┌ buffer_ms ───────────────────────────────────────────────────┐ing    │
+│ allow_│Range: 5 to 5000. Default: 40. Empty resets to the default.   │       │
+│ dsd   │                                                              │atency │
+│   dsd.│> 999999▏                                                     │op is  │
+│   dsd.│                                                              │ack    │
+│▾ Outpu│Must be between 5 and 5000.                                   │       │
+│?backen│                                                              │       │
+│ target└──────────────────────────────────────────────────────────────┘       │
+│ device              (hidden)       ││Used by: run, play.                     │
+│ transport           (hidden)       ││Hidden: not applicable to the current   │
+│ dop_sample_format   (hidden)       ││choices.                                │
+│ reserve_device      (hidden)       ││                                        │
+│ buffer_ms           (hidden)       ││                                        │
+└────────────────────────────────────┘└────────────────────────────────────────┘
+ Error in target: the configuration must specify [target]
+ Enter edit  Del reset  a assist  u use case  m mode  * hidden  r review  q quit

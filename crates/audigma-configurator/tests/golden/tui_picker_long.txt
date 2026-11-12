@@ -1,0 +1,24 @@
+ audigma configure  new file · use case: not set · mode: all
+┌ Settings ──────────────────────────┐┌ Help ──────────────────────────────────┐
+│▾ Input                             ││Where volume changes are applied.       │
+┌ volume_control ──────────────────────────────────────────────────────────────┐
+│Where volume changes are applied.                                             │
+│                                                                              │
+│Hardware control is unavailable for pipewire and file output.                 │
+│──────────────────────────────────────────────────────────────────────────────│
+│> hardware-software-fallback - Hardware, else software                        │
+│    DAC mixer when available, otherwise software scaling.                     │
+│  Software                                                                    │
+│    Always scale in floating point; safe for DSD and DoP.                     │
+│  hardware - Hardware only                                                    │
+│    Requires a DAC mixer; never scales digitally.                             │
+│  None                                                                        │
+│    Fixed unity gain; volume changes are ignored.                             │
+│──────────────────────────────────────────────────────────────────────────────│
+│Uses the DAC's analog mixer when it has one and keeps the digital stream at   │
+│full scale; otherwise scales in software before the modulator.                │
+└──────────────────────────────────────────────────────────────────────────────┘
+│ rate_family         source         ││                                        │
+└────────────────────────────────────┘└────────────────────────────────────────┘
+ Error in target: the configuration must specify [target]
+ Enter edit  Del reset  a assist  u use case  m mode  * hidden  r review  q quit
