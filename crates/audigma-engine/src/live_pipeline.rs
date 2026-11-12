@@ -1462,7 +1462,7 @@ impl LivePipeline {
                 // always starts before an underrun (a stop or track change mid-stream).
                 let device_low = output
                     .buffered_us()
-                    .is_some_and(|b| b <= idle_fill_margin_us);
+                    .is_some_and(|b| b <= idle_fill_margin_us + output.pull_us());
                 if total_input_frames > 0
                     && !is_idle
                     && empty_for < Duration::from_millis(100)

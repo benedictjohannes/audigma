@@ -216,7 +216,7 @@ fn test_pipewire_virtual_sink_and_pcm_output_lifecycle() {
         }
     }
 
-    match PipeWirePcmOutput::new("audigma_test_out", None, 48000, 2, 8, None) {
+    match PipeWirePcmOutput::new("audigma_test_out", None, 48000, 2, 40, None) {
         Ok(mut out) => {
             use std::io::Write;
             let silence_bytes = vec![0u8; 128];

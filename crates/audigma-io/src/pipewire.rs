@@ -21,7 +21,9 @@ use pipewire::properties::properties;
 use pipewire::stream::{StreamBox, StreamFlags};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{
+    AtomicBool, AtomicI32, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering,
+};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use thiserror::Error;
@@ -1954,6 +1956,15 @@ pub struct PipeWirePcmOutput {
     underruns: Arc<AtomicU64>,
     overruns: Arc<AtomicU64>,
     writer_thread: Arc<AtomicPtr<std::thread::Thread>>,
+    /// Bytes pushed to the queue and not yet popped by the RT callback.
+    queued_bytes: Arc<AtomicUsize>,
+    /// `write` blocks while `queued_bytes` has reached this, bounding the queued audio by time
+    /// rather than by slot count (a slot holds one engine tile, whose frame count scales with
+    /// the output rate).
+    max_queued_bytes: usize,
+    /// Largest number of frames one process callback has taken (one graph pull), 0 until the
+    /// first cycle.
+    max_pull_frames: Arc<AtomicU32>,
     /// `true` while the pinned target sink exists; a blocked `write` gives up early when it
     /// turns `false` (the sink was removed) instead of waiting out its timeout.
     target_present: Option<Arc<AtomicBool>>,
@@ -1961,6 +1972,8 @@ pub struct PipeWirePcmOutput {
     graph_rate: Arc<AtomicU32>,
     /// The rate this stream negotiated, to compare the graph's against.
     rate_hz: u32,
+    /// Channels of the f32 interleaved stream, for converting queued bytes to frames.
+    channels: u32,
     /// The last graph rate reported by `write`, so a change is logged once.
     reported_graph_rate: u32,
 }
@@ -1988,6 +2001,35 @@ fn output_buffer_bytes(capacity: usize, requested_frames: u64, stride: usize) ->
     frames * stride
 }
 
+/// Ring slots of the output queue. The audio held is bounded by `output_queue_frames`, not by
+/// this, so it only has to exceed the number of tiles that fit in that duration.
+const OUTPUT_QUEUE_SLOTS: usize = 256;
+
+/// Queued audio, in microseconds.
+fn queued_us(queued_bytes: usize, stride: usize, rate_hz: u32) -> Option<u64> {
+    if stride == 0 || rate_hz == 0 {
+        return None;
+    }
+    Some((queued_bytes / stride) as u64 * 1_000_000 / u64::from(rate_hz))
+}
+
+/// One graph pull, in microseconds: the larger of the largest pull observed and the quantum
+/// this stream requests (no cycle may have run yet).
+fn pull_us(observed_pull_frames: u32, rate_hz: u32) -> u64 {
+    if rate_hz == 0 {
+        return 0;
+    }
+    let pull = observed_pull_frames.max(quantum_frames_for_rate(rate_hz));
+    u64::from(pull) * 1_000_000 / u64::from(rate_hz)
+}
+
+/// Frames of audio the output queue may hold: `queue_ms`, but at least two PipeWire quanta so the
+/// graph never finds the queue empty between two refills.
+fn output_queue_frames(queue_ms: u32, rate_hz: u32) -> usize {
+    let by_time = (u64::from(queue_ms) * u64::from(rate_hz) / 1000) as usize;
+    by_time.max(2 * quantum_frames_for_rate(rate_hz) as usize)
+}
+
 impl PipeWirePcmOutput {
     /// Creates and connects a new output stream into the PipeWire graph.
     pub fn new(
@@ -1995,10 +2037,15 @@ impl PipeWirePcmOutput {
         target_node: Option<&str>,
         rate_hz: u32,
         channels: u32,
-        queue_depth: usize,
+        queue_ms: u32,
         placement: Option<audigma_engine::ThreadPlacement>,
     ) -> Result<Self, PipeWireError> {
-        let (producer, mut consumer) = RingBuffer::<Vec<u8>>::new(queue_depth);
+        let (producer, mut consumer) = RingBuffer::<Vec<u8>>::new(OUTPUT_QUEUE_SLOTS);
+        let queued_bytes = Arc::new(AtomicUsize::new(0));
+        let queued_bytes_cb = queued_bytes.clone();
+        let max_queued_bytes = output_queue_frames(queue_ms, rate_hz) * channels as usize * 4;
+        let max_pull_frames = Arc::new(AtomicU32::new(0));
+        let max_pull_frames_cb = max_pull_frames.clone();
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = running.clone();
         let underruns = Arc::new(AtomicU64::new(0));
@@ -2099,10 +2146,14 @@ impl PipeWirePcmOutput {
                             if let Some(slice) = data.data() {
                                 let total =
                                     output_buffer_bytes(slice.len(), requested_frames, stride);
+                                max_pull_frames_cb
+                                    .fetch_max((total / stride) as u32, Ordering::Relaxed);
                                 while bytes_written < total {
                                     if pending_buf.is_none() {
                                         match consumer.pop() {
                                             Ok(buf) => {
+                                                queued_bytes_cb
+                                                    .fetch_sub(buf.len(), Ordering::Relaxed);
                                                 pending_buf = Some(buf);
                                                 pending_offset = 0;
                                                 let ptr = writer_thread_cb.load(Ordering::Acquire);
@@ -2205,6 +2256,10 @@ impl PipeWirePcmOutput {
             underruns,
             overruns,
             writer_thread,
+            queued_bytes,
+            max_queued_bytes,
+            max_pull_frames,
+            channels,
             target_present: None,
             graph_rate,
             rate_hz,
@@ -2237,6 +2292,13 @@ impl PipeWirePcmOutput {
         // The last chunk may still be partially held by the RT callback or the graph's
         // own buffer; one extra quantum covers it.
         std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    /// True when the next chunk must wait: no free slot, or the queued audio has reached the
+    /// configured duration.
+    fn queue_full(&self) -> bool {
+        self.producer.is_full()
+            || self.queued_bytes.load(Ordering::Relaxed) >= self.max_queued_bytes
     }
 
     /// Number of output callbacks where the queued byte stream was empty.
@@ -2300,7 +2362,7 @@ impl PipeWirePcmOutput {
 impl Write for PipeWirePcmOutput {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.report_graph_rate();
-        if self.producer.is_full() {
+        if self.queue_full() {
             // Register current thread handle so PipeWire consumer can unpark us
             if self.writer_thread.load(Ordering::Relaxed).is_null() {
                 let current = Box::into_raw(Box::new(std::thread::current()));
@@ -2322,7 +2384,7 @@ impl Write for PipeWirePcmOutput {
 
             // Wait with backpressure for consumer to pop a slot
             let start = std::time::Instant::now();
-            while self.producer.is_full() {
+            while self.queue_full() {
                 if !self.running.load(Ordering::Relaxed) {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::Interrupted,
@@ -2350,10 +2412,14 @@ impl Write for PipeWirePcmOutput {
             }
         }
 
+        self.queued_bytes.fetch_add(buf.len(), Ordering::Relaxed);
         self.producer
             .push(buf.to_vec())
             .map(|_| buf.len())
-            .map_err(|_| std::io::Error::other("Failed to push to PipeWire queue"))
+            .map_err(|_| {
+                self.queued_bytes.fetch_sub(buf.len(), Ordering::Relaxed);
+                std::io::Error::other("Failed to push to PipeWire queue")
+            })
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
@@ -2369,11 +2435,38 @@ impl AudioOutput for PipeWirePcmOutput {
     fn graph_rate_hz(&self) -> Option<u32> {
         Some(self.graph_rate.load(Ordering::Relaxed)).filter(|&r| r != 0)
     }
+
+    /// Audio queued for the RT callback. The remainder of a chunk the callback already popped
+    /// is not counted, which only errs low.
+    fn buffered_us(&self) -> Option<u64> {
+        queued_us(
+            self.queued_bytes.load(Ordering::Relaxed),
+            self.channels as usize * std::mem::size_of::<f32>(),
+            self.rate_hz,
+        )
+    }
+
+    /// The graph takes a whole quantum per cycle.
+    fn pull_us(&self) -> u64 {
+        pull_us(self.max_pull_frames.load(Ordering::Relaxed), self.rate_hz)
+    }
 }
 
 #[cfg(test)]
 mod output_tests {
-    use super::{graph_rate_hz, output_buffer_bytes, quantum_frames_for_rate};
+    use super::{graph_rate_hz, output_buffer_bytes, pull_us, quantum_frames_for_rate, queued_us};
+
+    #[test]
+    fn queued_and_pull_durations() {
+        let stride = 8; // stereo f32
+        assert_eq!(queued_us(16_384 * stride, stride, 384_000), Some(42_666));
+        assert_eq!(queued_us(1, 0, 384_000), None);
+        // Before any cycle the requested quantum (8192 frames at 384 kHz) stands in.
+        assert_eq!(pull_us(0, 384_000), 21_333);
+        // A larger observed pull (graph at 352.8 kHz resampling to 384 kHz) wins.
+        assert_eq!(pull_us(8_916, 384_000), 23_218);
+        assert_eq!(pull_us(8_916, 0), 0);
+    }
 
     #[test]
     fn graph_rate_comes_from_the_clock_fraction() {
@@ -2537,6 +2630,16 @@ mod input_clock_tests {
             0
         );
         assert!(sink.decimators.is_empty());
+    }
+
+    #[test]
+    fn output_queue_frames_is_bounded_by_time_with_a_quantum_floor() {
+        // 40 ms at 352.8 kHz is 14112 frames; the floor of two 8192-frame quanta wins.
+        assert_eq!(output_queue_frames(40, 352_800), 16_384);
+        // 40 ms at 44.1 kHz is 1764 frames; two 1024-frame quanta (2048) win.
+        assert_eq!(output_queue_frames(40, 44_100), 2_048);
+        // A long configured duration is honoured.
+        assert_eq!(output_queue_frames(500, 96_000), 48_000);
     }
 
     #[test]

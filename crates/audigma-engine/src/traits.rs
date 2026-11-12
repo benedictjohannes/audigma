@@ -245,10 +245,17 @@ pub trait AudioOutput: Write + Send {
 
     /// Audio currently queued in the device (not yet played), in microseconds.
     ///
-    /// `None` when the backend cannot report it. Used only for end-to-end feed-loop
-    /// headroom diagnostics.
+    /// `None` when the backend cannot report it. Feeds the feed-loop headroom diagnostics and
+    /// ends the empty-input grace window early, so idle fill starts before the device runs dry.
     fn buffered_us(&self) -> Option<u64> {
         None
+    }
+
+    /// Audio the device takes from its buffer at once, in microseconds (PipeWire pulls a
+    /// whole quantum per graph cycle). The buffer must hold more than this, on top of the
+    /// idle-fill margin, or the next pull underruns. 0 for devices that drain continuously.
+    fn pull_us(&self) -> u64 {
+        0
     }
 
     /// The DoP word this sink was opened with, when it negotiated one with a device
@@ -286,6 +293,10 @@ impl<T: AudioOutput + ?Sized> AudioOutput for &mut T {
 
     fn buffered_us(&self) -> Option<u64> {
         (**self).buffered_us()
+    }
+
+    fn pull_us(&self) -> u64 {
+        (**self).pull_us()
     }
 
     fn dop_format(&self) -> Option<DopContainerFormat> {

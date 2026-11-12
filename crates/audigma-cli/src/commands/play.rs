@@ -386,16 +386,13 @@ fn play_pipewire(
     let out_cfg = settings.output.as_ref();
     let buffer_ms = out_cfg.and_then(|o| o.buffer_ms).unwrap_or(40) as usize;
     let target_node = out_cfg.and_then(|o| o.target_node.clone());
-    // Same queue sizing as `audigma run` (~64 frames per tile, 64..=256 tiles).
-    let tiles_per_sec = (rate.get() as f64 / 64.0).ceil() as usize;
-    let queue_depth = (tiles_per_sec * buffer_ms / 1000).clamp(64, 256);
     let placement = crate::runtime::resolve(settings, 2, true)?;
     let mut pw_out = PipeWirePcmOutput::new(
         "audigma_play",
         target_node.as_deref(),
         rate.get(),
         2,
-        queue_depth,
+        buffer_ms as u32,
         Some(placement.pipewire()),
     )
     .map_err(|e| CliError::Other(format!("failed to initialize PipeWire output: {e}")))?;
