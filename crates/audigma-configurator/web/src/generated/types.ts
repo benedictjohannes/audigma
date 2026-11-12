@@ -204,6 +204,7 @@ export type CommentLevel = ("none" | "brief" | "full")
 export interface ApiRequests {
 draft_edit: DraftEdit
 guided_answer: GuidedAnswer
+load: LoadRequest
 save: SaveRequest
 }
 export interface DraftEdit {
@@ -215,6 +216,10 @@ use_case?: (UseCase | null)
 }
 export interface GuidedAnswer {
 key: string
+}
+export interface LoadRequest {
+name?: (string | null)
+text: string
 }
 export interface SaveRequest {
 comment_level?: (CommentLevel | null)
@@ -289,6 +294,7 @@ findings: CapabilityFinding[]
 guided_active: boolean
 is_new: boolean
 issues: Issue[]
+loaded_from: (string | null)
 path: string
 touched: string[]
 use_case: (UseCase | null)

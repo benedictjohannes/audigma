@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use audigma_settings::meta::{Catalog, ConfigValue, UseCase};
+use audigma_settings::meta::{Catalog, ConfigValue, FieldKind, UseCase};
 use schemars::JsonSchema;
 use schemars::{Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
@@ -36,6 +36,8 @@ pub struct Session {
     pub draft: Draft,
     pub use_case: Option<UseCase>,
     pub guided: Option<Guided>,
+    /// The name of the file whose text replaced the draft (`POST /api/load`), if any.
+    pub loaded_from: Option<String>,
     pub probe: Option<ProbeReport>,
     pub validated: Option<Validated>,
     /// A benchmark is running; edits that would invalidate it are refused.
@@ -75,6 +77,9 @@ pub struct DraftView {
     pub is_new: bool,
     pub use_case: Option<UseCase>,
     pub guided_active: bool,
+    /// The name of an uploaded file the draft was loaded from (`POST /api/load`); guided setup
+    /// is refused after one.
+    pub loaded_from: Option<String>,
     /// The values the draft sets, as a nested object (what the file would hold).
     #[schemars(with = "ValueTree")]
     pub values: Value,
@@ -174,6 +179,16 @@ pub struct SaveRequest {
     pub comment_level: Option<CommentLevel>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct LoadRequest {
+    /// The TOML text of the file.
+    pub text: String,
+    /// The file's name, for error messages and `DraftView::loaded_from`.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// What `POST /api/save` returns.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct SaveResponse {
     pub path: String,
@@ -232,6 +247,7 @@ impl Session {
             draft,
             use_case: None,
             guided: None,
+            loaded_from: None,
             probe: None,
             validated: None,
             busy: false,
@@ -282,6 +298,7 @@ impl Session {
             is_new: !self.existed,
             use_case: self.use_case,
             guided_active: self.guided.is_some(),
+            loaded_from: self.loaded_from.clone(),
             values: self
                 .draft
                 .values()
@@ -329,6 +346,48 @@ impl Session {
         if let Some(u) = edit.use_case {
             self.use_case = u;
         }
+        Ok(())
+    }
+
+    /// Replaces the draft with uploaded TOML text. The text must be valid as a whole (the same
+    /// rule as `-c PATH`); on error nothing changes. Every key the text sets counts as touched,
+    /// so a save onto an existing file writes the uploaded values, not only later edits. The
+    /// save target and the use case are kept; guided setup is refused afterwards (Decision 27).
+    pub fn load_text(&mut self, req: &LoadRequest) -> Result<(), ApiError> {
+        if self.busy {
+            return Err(ApiError::new(
+                "a benchmark is running; cancel it before loading a file",
+            ));
+        }
+        if self.guided.is_some() {
+            return Err(ApiError::new(
+                "guided setup is running; finish or skip it before loading a file",
+            ));
+        }
+        let name = req
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .unwrap_or("uploaded file");
+        let mut draft = Draft::from_file_text(Path::new(name), &req.text)
+            .map_err(|e| ApiError::new(e.to_string()))?;
+        let values = draft
+            .values()
+            .map_err(|e| ApiError::new(draft_error_text(&e)))?;
+        let present: Vec<String> = self
+            .catalog
+            .fields()
+            .iter()
+            .filter(|f| f.kind == FieldKind::Value && lookup(&values, &f.path).is_some())
+            .map(|f| f.path.clone())
+            .collect();
+        for path in &present {
+            draft.touch(path);
+        }
+        self.draft = draft;
+        self.validated = None;
+        self.loaded_from = Some(name.to_string());
         Ok(())
     }
 
@@ -431,6 +490,11 @@ impl Session {
                 "guided setup is for new files; this file already exists",
             ));
         }
+        if self.loaded_from.is_some() {
+            return Err(ApiError::new(
+                "guided setup is for new files; a file was loaded into this draft",
+            ));
+        }
         if self.busy {
             return Err(ApiError::new("a benchmark is running"));
         }
@@ -510,6 +574,15 @@ impl Session {
             None => DiscoveryNext::Finished,
         }
     }
+}
+
+fn lookup<'a>(table: &'a toml::Table, path: &str) -> Option<&'a toml::Value> {
+    let mut parts = path.split('.');
+    let mut cur = table.get(parts.next()?)?;
+    for p in parts {
+        cur = cur.as_table()?.get(p)?;
+    }
+    Some(cur)
 }
 
 fn draft_error_text(e: &DraftError) -> String {

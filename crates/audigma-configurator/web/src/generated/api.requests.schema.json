@@ -8,6 +8,9 @@
     "guided_answer": {
       "$ref": "#/$defs/GuidedAnswer"
     },
+    "load": {
+      "$ref": "#/$defs/LoadRequest"
+    },
     "save": {
       "$ref": "#/$defs/SaveRequest"
     }
@@ -15,7 +18,8 @@
   "required": [
     "draft_edit",
     "guided_answer",
-    "save"
+    "save",
+    "load"
   ],
   "$defs": {
     "CommentLevel": {
@@ -94,6 +98,24 @@
       "additionalProperties": false,
       "required": [
         "key"
+      ]
+    },
+    "LoadRequest": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
       ]
     },
     "SaveRequest": {

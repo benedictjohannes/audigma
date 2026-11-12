@@ -779,3 +779,98 @@ fn saving_writes_exactly_the_previewed_text() {
         }
     }
 }
+
+const UPLOAD: &str = "schema_version = 1\n[target]\nformat = \"pcm\"\npcm_rate_hz = 96000\n";
+
+#[test]
+fn loading_a_file_replaces_the_draft_and_touches_its_keys() {
+    let t = T::new(new_session());
+    let r = t.post("/api/load", json!({ "text": UPLOAD, "name": "mine.toml" }));
+    assert_eq!(r.status, 200, "{}", r.body);
+    let d = r.json();
+    assert_eq!(d["loaded_from"], "mine.toml");
+    assert_eq!(d["values"]["target"]["pcm_rate_hz"], 96000);
+    // The save target is the session's, not the uploaded name; the keys count as touched.
+    assert_eq!(d["path"], NEW_PATH);
+    let touched = d["touched"].as_array().unwrap();
+    assert!(touched.contains(&json!("target.pcm_rate_hz")), "{d}");
+    assert_eq!(t.get("/api/draft").json()["loaded_from"], "mine.toml");
+}
+
+#[test]
+fn a_loaded_file_is_written_over_an_existing_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = T::new(existing_session(dir.path()));
+    assert_eq!(t.post("/api/load", json!({ "text": UPLOAD })).status, 200);
+    let p = t
+        .post("/api/preview", json!({ "comment_level": "none" }))
+        .json();
+    assert_eq!(p["unchanged"], false, "{p}");
+    assert!(p["text"].as_str().unwrap().contains("96000"), "{p}");
+}
+
+#[test]
+fn a_bad_upload_names_the_problem_and_changes_nothing() {
+    let t = T::new(new_session());
+    valid_draft(&t);
+    let r = t.post(
+        "/api/load",
+        json!({ "text": "schema_version = [", "name": "x.toml" }),
+    );
+    assert_eq!(r.status, 422, "{}", r.body);
+    assert!(
+        r.json()["error"].as_str().unwrap().contains("x.toml"),
+        "{}",
+        r.body
+    );
+    let r = t.post(
+        "/api/load",
+        json!({ "text": "schema_version = 1\n[target]\nbogus = 1\n" }),
+    );
+    assert_eq!(r.status, 422, "{}", r.body);
+    let d = t.get("/api/draft").json();
+    assert_eq!(d["values"]["target"]["pcm_rate_hz"], 96000);
+    assert_eq!(d["loaded_from"], Value::Null);
+    assert_eq!(t.post("/api/load", json!({})).status, 400);
+}
+
+#[test]
+fn loading_needs_the_token_and_the_origin_rule() {
+    let t = T::new(new_session());
+    let body = json!({ "text": UPLOAD }).to_string();
+    assert_eq!(raw(t.addr, "POST", "/api/load", &[], &body).status, 401);
+    let foreign = raw(
+        t.addr,
+        "POST",
+        "/api/load",
+        &[
+            ("Authorization", &t.auth),
+            ("Origin", "http://evil.example"),
+        ],
+        &body,
+    );
+    assert_eq!(foreign.status, 403, "{}", foreign.body);
+    assert_eq!(t.get("/api/load").status, 405);
+}
+
+#[test]
+fn loading_is_refused_during_guided_setup_and_guided_setup_after_loading() {
+    let t = T::new(new_session());
+    assert_eq!(t.post("/api/guided/start", json!({})).status, 200);
+    assert_eq!(t.post("/api/load", json!({ "text": UPLOAD })).status, 409);
+    assert_eq!(t.post("/api/guided/skip", json!({})).status, 200);
+    assert_eq!(t.post("/api/load", json!({ "text": UPLOAD })).status, 200);
+    assert_eq!(t.post("/api/guided/start", json!({})).status, 409);
+}
+
+#[test]
+fn loading_is_refused_while_a_benchmark_runs() {
+    let t = T::new(new_session());
+    valid_draft(&t);
+    let id = t.post("/api/benchmark", json!({})).json()["id"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(t.post("/api/load", json!({ "text": UPLOAD })).status, 409);
+    t.call("DELETE", &format!("/api/benchmark/{id}"), "");
+    events(&t, id);
+}

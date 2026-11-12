@@ -3,6 +3,10 @@
 //! [`handle`] is a plain function from [`Request`] to [`Response`] over [`Shared`], so the
 //! tests call it without sockets; `mod.rs` only moves bytes.
 //!
+//! `POST /api/load` takes `{text, name?}` (the text of an uploaded TOML file) and replaces the
+//! draft with it (200 with the new `DraftView`; 409 while a benchmark or guided setup runs; 422
+//! with the parse error otherwise). Guided setup is refused after a load.
+//!
 //! `POST /api/preview` takes the body of `POST /api/save` and answers with the file text a save
 //! would write (`path`, `exists`, `existing`, `text`, `unchanged`, `filename`), going through the
 //! same prepare step as the save, but writing nothing, not stopping the server and not marking
@@ -20,8 +24,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use super::http::{Request, Response};
 use super::jobs::{self, Job, JobKind};
 use super::session::{
-    ApiError, DraftEdit, DraftView, GuidedNext, GuidedState, PreviewResponse, SaveRequest,
-    SaveResponse, Session,
+    ApiError, DraftEdit, DraftView, GuidedNext, GuidedState, LoadRequest, PreviewResponse,
+    SaveRequest, SaveResponse, Session,
 };
 use super::{EndReason, Shared};
 use crate::assist::capability::CapabilityFinding;
@@ -142,6 +146,7 @@ pub struct ApiRequests {
     pub draft_edit: DraftEdit,
     pub guided_answer: GuidedAnswer,
     pub save: SaveRequest,
+    pub load: LoadRequest,
 }
 
 /// Every response body the API gives, plus the benchmark event stream: the source of
@@ -233,6 +238,7 @@ fn route(sh: &Arc<Shared>, req: &Request) -> Response {
         ("POST", ["api", "guided", "answer"]) => guided_answer(sh, req),
         ("POST", ["api", "guided", "back"]) => guided_move(sh, Session::guided_back),
         ("POST", ["api", "guided", "skip"]) => guided_move(sh, Session::guided_skip),
+        ("POST", ["api", "load"]) => load(sh, req),
         ("POST", ["api", "save"]) => save(sh, req),
         ("POST", ["api", "preview"]) => preview(sh, req),
         ("POST", ["api", "quit"]) => {
@@ -262,6 +268,7 @@ fn is_known(path: &str) -> bool {
             | "/api/guided/answer"
             | "/api/guided/back"
             | "/api/guided/skip"
+            | "/api/load"
             | "/api/save"
             | "/api/preview"
             | "/api/quit"
@@ -423,6 +430,22 @@ fn guided_answer(sh: &Arc<Shared>, req: &Request) -> Response {
             let next = sh.session().after_done();
             guided_response(sh, next, None, true)
         }
+    }
+}
+
+/// Replaces the draft with uploaded TOML text. 409 while a job or guided setup runs, 422 when
+/// the text is not a valid config (the message carries the line and column or the key).
+fn load(sh: &Shared, req: &Request) -> Response {
+    let body: LoadRequest = match parse(req) {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    let mut s = sh.session();
+    let busy = s.busy || s.guided.is_some();
+    match s.load_text(&body) {
+        Ok(()) => ok(&s.draft_view()),
+        Err(e) if busy => conflict(e),
+        Err(e) => json_err(422, &e),
     }
 }
 

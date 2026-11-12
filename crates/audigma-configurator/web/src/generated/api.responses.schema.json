@@ -565,6 +565,12 @@
             "$ref": "#/$defs/Issue"
           }
         },
+        "loaded_from": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "path": {
           "type": "string"
         },
@@ -604,6 +610,7 @@
         "is_new",
         "use_case",
         "guided_active",
+        "loaded_from",
         "values",
         "touched",
         "issues",

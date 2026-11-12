@@ -89,6 +89,7 @@ test("a draft carries scalar and list values", () => {
     is_new: true,
     use_case: null,
     guided_active: false,
+    loaded_from: null,
     values: {
       schema_version: 1,
       input: { allowed_rates: [44100, 48000], allow_dsd: true },
