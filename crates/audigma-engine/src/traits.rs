@@ -236,6 +236,13 @@ pub trait AudioOutput: Write + Send {
         0
     }
 
+    /// The clock rate of the graph this output plays into, when the backend runs inside one
+    /// (PipeWire) and a cycle has been seen. A rate other than the output's own means the
+    /// graph resamples the stream.
+    fn graph_rate_hz(&self) -> Option<u32> {
+        None
+    }
+
     /// Audio currently queued in the device (not yet played), in microseconds.
     ///
     /// `None` when the backend cannot report it. Used only for end-to-end feed-loop
@@ -271,6 +278,10 @@ impl<T: AudioOutput + ?Sized> AudioOutput for &mut T {
 
     fn xrun_count(&self) -> u64 {
         (**self).xrun_count()
+    }
+
+    fn graph_rate_hz(&self) -> Option<u32> {
+        (**self).graph_rate_hz()
     }
 
     fn buffered_us(&self) -> Option<u64> {

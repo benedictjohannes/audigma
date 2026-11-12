@@ -1957,6 +1957,18 @@ pub struct PipeWirePcmOutput {
     /// `true` while the pinned target sink exists; a blocked `write` gives up early when it
     /// turns `false` (the sink was removed) instead of waiting out its timeout.
     target_present: Option<Arc<AtomicBool>>,
+    /// The graph clock rate seen by the process callback (`1/rate`), 0 until first cycle.
+    graph_rate: Arc<AtomicU32>,
+    /// The rate this stream negotiated, to compare the graph's against.
+    rate_hz: u32,
+    /// The last graph rate reported by `write`, so a change is logged once.
+    reported_graph_rate: u32,
+}
+
+/// The graph clock rate in Hz from a `pw_time.rate` fraction (`num/denom`, usually `1/rate`);
+/// 0 when unset.
+fn graph_rate_hz(num: u32, denom: u32) -> u32 {
+    denom.checked_div(num).unwrap_or(0)
 }
 
 /// Buffer capacity is not the graph's demand: only consume the requested frames.
@@ -1995,6 +2007,8 @@ impl PipeWirePcmOutput {
         let writer_thread: Arc<AtomicPtr<std::thread::Thread>> =
             Arc::new(AtomicPtr::new(std::ptr::null_mut()));
         let writer_thread_cb = writer_thread.clone();
+        let graph_rate = Arc::new(AtomicU32::new(0));
+        let graph_rate_cb = graph_rate.clone();
 
         let stream_name_owned = stream_name.to_string();
         let target_node_owned = target_node.map(|s| s.to_string());
@@ -2064,6 +2078,11 @@ impl PipeWirePcmOutput {
                     .process(move |stream, _| {
                         if !run_cb.load(Ordering::Relaxed) {
                             return;
+                        }
+
+                        if let Ok(time) = stream.time() {
+                            let r = time.rate();
+                            graph_rate_cb.store(graph_rate_hz(r.num, r.denom), Ordering::Relaxed);
                         }
 
                         if let Some(mut buffer) = stream.dequeue_buffer() {
@@ -2187,6 +2206,9 @@ impl PipeWirePcmOutput {
             overruns,
             writer_thread,
             target_present: None,
+            graph_rate,
+            rate_hz,
+            reported_graph_rate: 0,
         })
     }
 }
@@ -2247,8 +2269,37 @@ impl Drop for PipeWirePcmOutput {
     }
 }
 
+impl PipeWirePcmOutput {
+    /// Logs once whenever the graph's clock rate changes: a warning while it differs from the
+    /// stream's rate (PipeWire's adapter is then resampling the output), an info when it matches.
+    fn report_graph_rate(&mut self) {
+        let graph = self.graph_rate.load(Ordering::Relaxed);
+        if graph == 0 || graph == self.reported_graph_rate {
+            return;
+        }
+        self.reported_graph_rate = graph;
+        if graph == self.rate_hz {
+            tracing::info!(
+                event = "pipewire_graph_rate",
+                graph_rate_hz = graph,
+                "PipeWire graph runs at the output rate"
+            );
+        } else {
+            tracing::warn!(
+                event = "pipewire_graph_rate_mismatch",
+                graph_rate_hz = graph,
+                output_rate_hz = self.rate_hz,
+                "PipeWire is resampling the output: graph at {graph} Hz, output {} Hz \
+                 (another stream holds the graph rate, or the rate is not in clock.allowed-rates)",
+                self.rate_hz
+            );
+        }
+    }
+}
+
 impl Write for PipeWirePcmOutput {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.report_graph_rate();
         if self.producer.is_full() {
             // Register current thread handle so PipeWire consumer can unpark us
             if self.writer_thread.load(Ordering::Relaxed).is_null() {
@@ -2314,11 +2365,22 @@ impl AudioOutput for PipeWirePcmOutput {
     fn xrun_count(&self) -> u64 {
         self.underrun_count() + self.overrun_count()
     }
+
+    fn graph_rate_hz(&self) -> Option<u32> {
+        Some(self.graph_rate.load(Ordering::Relaxed)).filter(|&r| r != 0)
+    }
 }
 
 #[cfg(test)]
 mod output_tests {
-    use super::{output_buffer_bytes, quantum_frames_for_rate};
+    use super::{graph_rate_hz, output_buffer_bytes, quantum_frames_for_rate};
+
+    #[test]
+    fn graph_rate_comes_from_the_clock_fraction() {
+        assert_eq!(graph_rate_hz(1, 352_800), 352_800);
+        assert_eq!(graph_rate_hz(1, 44_100), 44_100);
+        assert_eq!(graph_rate_hz(0, 44_100), 0, "unset fraction");
+    }
 
     #[test]
     fn requested_output_quantum_matches_native_dsd_buffer_duration() {

@@ -116,6 +116,16 @@ fn print_telemetry(telem: &audigma_engine::DaemonTelemetry) {
         "  Output Target:       {} @ {} Hz",
         telem.output_format, telem.output_rate_hz
     );
+    if let Some(graph) = telem.graph_rate_hz {
+        if graph == telem.output_rate_hz {
+            println!("  PipeWire Graph:      {graph} Hz");
+        } else {
+            println!(
+                "  PipeWire Graph:      {graph} Hz [RESAMPLING: output is {} Hz]",
+                telem.output_rate_hz
+            );
+        }
+    }
     println!("  Filter:              {}", telem.filter);
     let vol_pct = telem.volume_percent;
     let mute_str = if telem.is_muted { " [MUTED]" } else { "" };
@@ -159,7 +169,7 @@ fn print_telemetry(telem: &audigma_engine::DaemonTelemetry) {
         telem.max_dsp_tile_us, telem.late_dsp_tiles
     );
     println!("  Overload Events:     {}", telem.overload_count);
-    println!("  ALSA XRuns:          {}", telem.xrun_count);
+    println!("  Output XRuns:        {}", telem.xrun_count);
     if telem.rate_switch_count > 0 {
         println!("  Rate Switches:       {}", telem.rate_switch_count);
     }

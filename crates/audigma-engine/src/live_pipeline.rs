@@ -276,6 +276,10 @@ pub struct DaemonTelemetry {
     pub asrc_fault_active: bool,
     #[serde(default)]
     pub rate_switch_count: u64,
+    /// PipeWire graph clock rate seen by the output stream; `None` off PipeWire or before the
+    /// first cycle. Differs from `output_rate_hz` when PipeWire resamples the output.
+    #[serde(default)]
+    pub graph_rate_hz: Option<u32>,
     #[serde(default)]
     pub max_dsp_tile_us: u64,
     #[serde(default)]
@@ -320,6 +324,8 @@ struct TelemetryState {
     asrc_overruns: AtomicU64,
     asrc_fault_active: AtomicBool,
     rate_switch_count: AtomicU64,
+    /// 0 encodes "unknown".
+    graph_rate_hz: AtomicU32,
     max_dsp_tile_us: AtomicU64,
     late_dsp_tiles: AtomicU64,
 }
@@ -413,6 +419,7 @@ impl DaemonControlHandle {
             asrc_overruns: AtomicU64::new(0),
             asrc_fault_active: AtomicBool::new(false),
             rate_switch_count: AtomicU64::new(0),
+            graph_rate_hz: AtomicU32::new(0),
             max_dsp_tile_us: AtomicU64::new(0),
             late_dsp_tiles: AtomicU64::new(0),
         };
@@ -719,6 +726,8 @@ impl DaemonControlHandle {
             asrc_overruns: self.telemetry.asrc_overruns.load(Ordering::Relaxed),
             asrc_fault_active: self.telemetry.asrc_fault_active.load(Ordering::Relaxed),
             rate_switch_count: self.telemetry.rate_switch_count.load(Ordering::Relaxed),
+            graph_rate_hz: Some(self.telemetry.graph_rate_hz.load(Ordering::Relaxed))
+                .filter(|&r| r != 0),
             max_dsp_tile_us: self.telemetry.max_dsp_tile_us.load(Ordering::Relaxed),
             late_dsp_tiles: self.telemetry.late_dsp_tiles.load(Ordering::Relaxed),
         }
@@ -778,6 +787,14 @@ impl DaemonControlHandle {
         self.telemetry
             .rate_switch_count
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Publishes the output's graph clock rate (`None` clears it).
+    #[inline]
+    pub fn set_output_graph_rate(&self, rate_hz: Option<u32>) {
+        self.telemetry
+            .graph_rate_hz
+            .store(rate_hz.unwrap_or(0), Ordering::Relaxed);
     }
 
     /// Updates runtime counters without taking any locks.
@@ -1276,6 +1293,7 @@ impl LivePipeline {
                         processor.total_late_tiles(),
                         start_time.elapsed().as_secs(),
                     );
+                    control.set_output_graph_rate(output.graph_rate_hz());
                 }
             };
         }
