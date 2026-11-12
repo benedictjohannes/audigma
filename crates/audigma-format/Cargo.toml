@@ -13,7 +13,7 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 symphonia = { workspace = true }
 hound = { workspace = true }
-audigma-flac = { workspace = true }
+rusty_flac = { workspace = true }
 tracing = { workspace = true }
 schemars = { workspace = true, optional = true }
 

@@ -2,7 +2,6 @@
 resolver = "2"
 members = [
     "crates/audigma-dsp",
-    "crates/audigma-flac",
     "crates/audigma-format",
     "crates/audigma-settings",
     "crates/audigma-configurator",
@@ -32,7 +31,7 @@ clap_complete = "=4.5.61"
 clap_mangen = "=0.2.31"
 symphonia = { version = "0.6", default-features = false, features = ["wav", "flac", "pcm", "opt-simd"] }
 hound = "3.5"
-audigma-flac = { path = "crates/audigma-flac" }
+rusty_flac = "0.4.0"
 alsa = "0.12"
 rtrb = "0.4.0"
 smallvec = "1.16"

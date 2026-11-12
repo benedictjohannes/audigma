@@ -1,4 +1,4 @@
-//! Lossless `.flac` file encoder using the vendored `audigma-flac` (`Design.md §5`).
+//! Lossless `.flac` file encoder using the `rusty_flac` crate (`Design.md §5`).
 //!
 //! Writes 16, 24 or 32-bit integer PCM with the full encoder (LPC, stereo decorrelation, exact
 //! predictor search at 32 bit). Sample rates
@@ -136,7 +136,7 @@ mod tests {
         (l, r)
     }
 
-    /// Encode, then decode with the vendored decoder and compare against the quantizer output
+    /// Encode, then decode with the `rusty_flac` decoder and compare against the quantizer output
     /// bit for bit, for every supported depth with dither off and on.
     #[test]
     fn roundtrip_matches_quantizer_at_16_24_32_bit() {
