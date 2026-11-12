@@ -25,7 +25,7 @@ use audigma_settings::Settings;
 use serde_json::Value;
 
 pub use http::{Body, Request, Response};
-pub use session::{SaveResponse, Session};
+pub use session::{PreviewResponse, SaveResponse, Session};
 
 use crate::assist::benchmark::{self, BenchmarkHandle, BenchmarkRequest};
 use jobs::Job;

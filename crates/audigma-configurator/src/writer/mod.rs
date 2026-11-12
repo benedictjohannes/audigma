@@ -160,13 +160,27 @@ pub fn verify(draft: &Draft, text: &str) -> Result<Settings, WriteError> {
     Ok(written)
 }
 
-/// Renders, verifies and writes the draft to `path`.
-///
-/// An existing file is updated in place and a timestamped (UTC) backup
-/// `<file>.bak-YYYYMMDD-HHMMSS` is made first; the new text goes to a temporary file in the same
-/// directory that then replaces the target atomically. A save that changes nothing writes
-/// nothing. Parent directories are created.
-pub fn save(draft: &Draft, path: &Path, opts: &WriteOptions) -> Result<SaveReport, WriteError> {
+/// A rendered and verified save, not yet written: what [`save`] writes and what a preview shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Prepared {
+    /// The file the text would replace (symlinks resolved).
+    pub target: PathBuf,
+    /// The target's current text, `None` when it does not exist.
+    pub existing: Option<String>,
+    /// The full new text, already checked by [`verify`].
+    pub text: String,
+}
+
+impl Prepared {
+    /// The text equals the file's, so a save writes nothing.
+    pub fn unchanged(&self) -> bool {
+        self.existing.as_deref() == Some(self.text.as_str())
+    }
+}
+
+/// Reads the target (if any), renders the draft and checks the post-condition. Writes nothing.
+/// [`save`] and previews both go through this, so a preview is exactly what a save writes.
+pub fn prepare(draft: &Draft, path: &Path, opts: &WriteOptions) -> Result<Prepared, WriteError> {
     // Write through a symlink instead of replacing it.
     let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let existing = match fs::read_to_string(&target) {
@@ -174,10 +188,29 @@ pub fn save(draft: &Draft, path: &Path, opts: &WriteOptions) -> Result<SaveRepor
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(io_err(&target)(e)),
     };
-    let out = render(draft, existing.as_deref(), opts)?;
-    verify(draft, &out)?;
-    let created = existing.is_none();
-    if existing.as_deref() == Some(out.as_str()) {
+    let text = render(draft, existing.as_deref(), opts)?;
+    verify(draft, &text)?;
+    Ok(Prepared {
+        target,
+        existing,
+        text,
+    })
+}
+
+/// Renders, verifies and writes the draft to `path`.
+///
+/// An existing file is updated in place and a timestamped (UTC) backup
+/// `<file>.bak-YYYYMMDD-HHMMSS` is made first; the new text goes to a temporary file in the same
+/// directory that then replaces the target atomically. A save that changes nothing writes
+/// nothing. Parent directories are created.
+pub fn save(draft: &Draft, path: &Path, opts: &WriteOptions) -> Result<SaveReport, WriteError> {
+    let prepared = prepare(draft, path, opts)?;
+    let created = prepared.existing.is_none();
+    let unchanged = prepared.unchanged();
+    let Prepared {
+        target, text: out, ..
+    } = prepared;
+    if unchanged {
         return Ok(SaveReport {
             path: target,
             created,

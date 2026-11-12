@@ -18,7 +18,7 @@ use crate::assist::capability::{self, CapabilityFinding};
 use crate::assist::probe::ProbeReport;
 use crate::draft::{Draft, DraftError, Issue, LoadError};
 use crate::guided::{DiscoveryNext, Guided, Outcome, StepView, TierState};
-use crate::writer::{CommentLevel, WriteOptions, save};
+use crate::writer::{CommentLevel, WriteOptions, prepare, save};
 
 /// A "validate on this machine" result and the draft it measured.
 #[derive(Debug, Clone)]
@@ -162,7 +162,7 @@ where
     Ok(Some(Option::deserialize(d)?))
 }
 
-/// Body of `POST /api/save`.
+/// Body of `POST /api/save` and `POST /api/preview`.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SaveRequest {
@@ -182,6 +182,23 @@ pub struct SaveResponse {
     pub backup: Option<String>,
     /// Commands to try next, with the saved path filled in.
     pub next: Vec<String>,
+}
+
+/// What `POST /api/preview` returns: what a save with the same options would write.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct PreviewResponse {
+    /// The resolved target, as a save reports it.
+    pub path: String,
+    /// The target exists right now.
+    pub exists: bool,
+    /// The target's current text; null when it does not exist.
+    pub existing: Option<String>,
+    /// The full file text a save would write.
+    pub text: String,
+    /// `text` equals `existing`, so a save would write nothing.
+    pub unchanged: bool,
+    /// The file name of `path`, for a client-side download.
+    pub filename: String,
 }
 
 /// A request the session cannot honour; `path` names the field when there is one.
@@ -317,7 +334,7 @@ impl Session {
 
     // ---- save --------------------------------------------------------------------------
 
-    pub fn save(&self, req: &SaveRequest) -> Result<SaveResponse, ApiError> {
+    fn target_and_options(&self, req: &SaveRequest) -> Result<(PathBuf, WriteOptions), ApiError> {
         if self.draft.has_errors() {
             return Err(ApiError::new("fix the errors before saving"));
         }
@@ -330,6 +347,28 @@ impl Session {
             only_changed: req.only_changed.unwrap_or(defaults.only_changed),
             comment_level: req.comment_level.unwrap_or(defaults.comment_level),
         };
+        Ok((path, opts))
+    }
+
+    /// Renders and verifies exactly as [`Session::save`] does, and writes nothing.
+    pub fn preview(&self, req: &SaveRequest) -> Result<PreviewResponse, ApiError> {
+        let (path, opts) = self.target_and_options(req)?;
+        let p = prepare(&self.draft, &path, &opts).map_err(|e| ApiError::new(e.to_string()))?;
+        Ok(PreviewResponse {
+            filename: path.file_name().map_or_else(
+                || "config.toml".into(),
+                |n| n.to_string_lossy().into_owned(),
+            ),
+            path: path.display().to_string(),
+            exists: p.existing.is_some(),
+            unchanged: p.unchanged(),
+            existing: p.existing,
+            text: p.text,
+        })
+    }
+
+    pub fn save(&self, req: &SaveRequest) -> Result<SaveResponse, ApiError> {
+        let (path, opts) = self.target_and_options(req)?;
         let report = save(&self.draft, &path, &opts).map_err(|e| ApiError::new(e.to_string()))?;
         let shown = path.display().to_string();
         Ok(SaveResponse {

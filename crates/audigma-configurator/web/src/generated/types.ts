@@ -277,6 +277,7 @@ guided_state: GuidedState
 job_event: JobEvent
 job_started: JobStarted
 job_status: JobStatus
+preview: PreviewResponse
 probe_alsa: AlsaProbeResponse
 probe_pipewire: PipeWireProbeResponse
 save: SaveResponse
@@ -388,6 +389,14 @@ done: boolean
 id: number
 kind: JobKind
 last: (JobEvent | null)
+}
+export interface PreviewResponse {
+existing: (string | null)
+exists: boolean
+filename: string
+path: string
+text: string
+unchanged: boolean
 }
 export interface AlsaProbeResponse {
 error: (string | null)

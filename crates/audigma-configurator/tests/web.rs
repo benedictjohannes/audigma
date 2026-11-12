@@ -592,3 +592,190 @@ fn the_server_binds_loopback_by_default() {
     t.server.stop();
     assert!(matches!(t.server.wait(), EndReason::Quit));
 }
+
+fn dir_names(dir: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    v.sort();
+    v
+}
+
+fn valid_draft(t: &T) {
+    let r = t.put_draft(json!({ "set": { "target.format": "pcm", "target.pcm_rate_hz": 96000 } }));
+    assert_eq!(r.status, 200, "{}", r.body);
+}
+
+#[test]
+fn previewing_needs_the_token_and_the_origin_rule() {
+    let t = T::new(new_session());
+    let none = raw(t.addr, "POST", "/api/preview", &[], "{}");
+    assert_eq!(none.status, 401);
+    let cross = raw(
+        t.addr,
+        "POST",
+        "/api/preview",
+        &[
+            ("Authorization", &t.auth),
+            ("Origin", "https://evil.example"),
+        ],
+        "{}",
+    );
+    assert_eq!(cross.status, 403);
+    assert_eq!(t.get("/api/preview").status, 405);
+}
+
+#[test]
+fn previewing_is_refused_with_the_same_error_as_saving() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("out.toml");
+    let t = T::new(new_session());
+    let body = json!({ "path": path.display().to_string() });
+    let p = t.post("/api/preview", body.clone());
+    let s = t.post("/api/save", body);
+    assert_eq!(p.status, 422);
+    assert_eq!((p.status, p.json()), (s.status, s.json()));
+    assert!(dir_names(dir.path()).is_empty());
+}
+
+#[test]
+fn previewing_writes_nothing_and_keeps_the_server_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = T::new(existing_session(dir.path()));
+    let before = dir_names(dir.path());
+    let file = std::fs::read(dir.path().join("config.toml")).unwrap();
+    t.put_draft(json!({ "set": { "target.pcm_rate_hz": 96000 } }));
+    for _ in 0..2 {
+        let r = t.post("/api/preview", json!({}));
+        assert_eq!(r.status, 200, "{}", r.body);
+    }
+    // A new-file target in a directory that does not exist is not created either.
+    let missing = dir.path().join("nope").join("x.toml");
+    let r = t.post(
+        "/api/preview",
+        json!({ "path": missing.display().to_string() }),
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(!dir.path().join("nope").exists());
+    assert_eq!(dir_names(dir.path()), before);
+    assert_eq!(std::fs::read(dir.path().join("config.toml")).unwrap(), file);
+    // Still serving, not saved, still savable.
+    assert_eq!(t.get("/api/draft").status, 200);
+    t.post("/api/quit", json!({}));
+    assert!(matches!(t.server.wait(), EndReason::Quit));
+}
+
+#[test]
+fn a_preview_reports_existing_text_and_whether_it_changes_anything() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = T::new(existing_session(dir.path()));
+    let path = dir.path().join("config.toml");
+    let p = t.post("/api/preview", json!({})).json();
+    assert_eq!(p["exists"], true);
+    assert_eq!(p["existing"], PCM_FILE);
+    assert_eq!(p["filename"], "config.toml");
+    assert_eq!(p["path"], path.display().to_string());
+    // The default level adds the generated comments, so the file would change.
+    assert_eq!(p["unchanged"], false);
+    let p = t
+        .post("/api/preview", json!({ "comment_level": "none" }))
+        .json();
+    assert_eq!(p["unchanged"], true, "{p}");
+    assert_eq!(p["text"], p["existing"]);
+
+    t.put_draft(json!({ "set": { "target.pcm_rate_hz": 96000 } }));
+    let p = t.post("/api/preview", json!({})).json();
+    assert_eq!(p["unchanged"], false);
+    assert_eq!(p["existing"], PCM_FILE);
+    assert!(p["text"].as_str().unwrap().contains("96000"), "{p}");
+
+    // A target that does not exist: null, and the default path is the session's.
+    let new = T::new(new_session());
+    valid_draft(&new);
+    let p = new.post("/api/preview", json!({})).json();
+    assert_eq!(p["exists"], false);
+    assert_eq!(p["existing"], Value::Null);
+    assert_eq!(p["path"], NEW_PATH);
+    assert_eq!(p["filename"], "config.toml");
+    assert_eq!(p["unchanged"], false);
+}
+
+#[test]
+fn an_unreadable_target_is_an_error_not_a_null() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = T::new(new_session());
+    valid_draft(&t);
+    // A directory cannot be read as text.
+    let r = t.post(
+        "/api/preview",
+        json!({ "path": dir.path().display().to_string() }),
+    );
+    assert_eq!(r.status, 422, "{}", r.body);
+    assert!(r.json()["error"].is_string());
+    // So is a file that is not UTF-8.
+    let bin = dir.path().join("bin.toml");
+    std::fs::write(&bin, [0xff, 0xfe, 0x00]).unwrap();
+    let r = t.post("/api/preview", json!({ "path": bin.display().to_string() }));
+    assert_eq!(r.status, 422, "{}", r.body);
+}
+
+#[test]
+fn a_preview_is_allowed_while_a_benchmark_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = T::new(existing_session(dir.path()));
+    let id = t.post("/api/benchmark", json!({})).json()["id"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(t.post("/api/preview", json!({})).status, 200);
+    // Saving would end the server mid-run, so it stays refused.
+    assert_eq!(t.post("/api/save", json!({})).status, 409);
+    events(&t, id);
+}
+
+#[test]
+fn saving_writes_exactly_the_previewed_text() {
+    let dir = tempfile::tempdir().unwrap();
+    for (level, only_changed) in [("none", true), ("brief", true), ("full", false)] {
+        // Update in place, with user comments the update must keep.
+        let user = "# my notes\nschema_version = 1\n\n# keep this\n[target]\nformat = \"pcm\"\n\
+                    pcm_rate_hz = 88200 # inline\n";
+        let existing = dir.path().join(format!("in-place-{level}.toml"));
+        std::fs::write(&existing, user).unwrap();
+        let new_file = dir.path().join(format!("new-{level}.toml"));
+        for (path, edit) in [
+            (&existing, json!({ "set": { "target.pcm_rate_hz": 96000 } })),
+            (
+                &new_file,
+                json!({ "set": { "target.format": "pcm", "target.pcm_rate_hz": 96000 } }),
+            ),
+        ] {
+            let t = T::new(Session::open(&existing).unwrap());
+            assert_eq!(t.put_draft(edit).status, 200);
+            let opts = json!({
+                "path": path.display().to_string(),
+                "comment_level": level,
+                "only_changed": only_changed,
+            });
+            let before = std::fs::read(path).ok();
+            let p = t.post("/api/preview", opts.clone());
+            assert_eq!(p.status, 200, "{}", p.body);
+            let p = p.json();
+            assert_eq!(std::fs::read(path).ok(), before, "preview wrote");
+            let s = t.post("/api/save", opts);
+            assert_eq!(s.status, 200, "{}", s.body);
+            assert!(matches!(t.server.wait(), EndReason::Saved(_)));
+            let saved = std::fs::read_to_string(path).unwrap();
+            assert_eq!(saved, p["text"].as_str().unwrap(), "{level}");
+            if path == &existing {
+                assert_eq!(p["existing"], user);
+                assert!(
+                    saved.contains("# my notes") && saved.contains("# keep this"),
+                    "{saved}"
+                );
+            } else {
+                assert_eq!(p["exists"], false);
+            }
+        }
+    }
+}

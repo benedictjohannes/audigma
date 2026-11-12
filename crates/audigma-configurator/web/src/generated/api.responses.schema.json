@@ -23,6 +23,9 @@
     "job_status": {
       "$ref": "#/$defs/JobStatus"
     },
+    "preview": {
+      "$ref": "#/$defs/PreviewResponse"
+    },
     "probe_alsa": {
       "$ref": "#/$defs/AlsaProbeResponse"
     },
@@ -47,6 +50,7 @@
     "guided_state",
     "guided",
     "save",
+    "preview",
     "error"
   ],
   "$defs": {
@@ -1010,6 +1014,40 @@
         "alsa_card",
         "alsa_card_name",
         "alsa_path"
+      ]
+    },
+    "PreviewResponse": {
+      "type": "object",
+      "properties": {
+        "existing": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "exists": {
+          "type": "boolean"
+        },
+        "filename": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "unchanged": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "exists",
+        "existing",
+        "text",
+        "unchanged",
+        "filename"
       ]
     },
     "SaveResponse": {

@@ -2,6 +2,12 @@
 //!
 //! [`handle`] is a plain function from [`Request`] to [`Response`] over [`Shared`], so the
 //! tests call it without sockets; `mod.rs` only moves bytes.
+//!
+//! `POST /api/preview` takes the body of `POST /api/save` and answers with the file text a save
+//! would write (`path`, `exists`, `existing`, `text`, `unchanged`, `filename`), going through the
+//! same prepare step as the save, but writing nothing, not stopping the server and not marking
+//! the session saved. It is allowed while a benchmark runs (the draft cannot change then and
+//! nothing is ended); errors come back exactly as from save (422 with `error`/`path`).
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -14,7 +20,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use super::http::{Request, Response};
 use super::jobs::{self, Job, JobKind};
 use super::session::{
-    ApiError, DraftEdit, DraftView, GuidedNext, GuidedState, SaveRequest, SaveResponse, Session,
+    ApiError, DraftEdit, DraftView, GuidedNext, GuidedState, PreviewResponse, SaveRequest,
+    SaveResponse, Session,
 };
 use super::{EndReason, Shared};
 use crate::assist::capability::CapabilityFinding;
@@ -151,6 +158,7 @@ pub struct ApiResponses {
     pub guided_state: GuidedState,
     pub guided: GuidedResponse,
     pub save: SaveResponse,
+    pub preview: PreviewResponse,
     pub error: ApiError,
 }
 
@@ -226,6 +234,7 @@ fn route(sh: &Arc<Shared>, req: &Request) -> Response {
         ("POST", ["api", "guided", "back"]) => guided_move(sh, Session::guided_back),
         ("POST", ["api", "guided", "skip"]) => guided_move(sh, Session::guided_skip),
         ("POST", ["api", "save"]) => save(sh, req),
+        ("POST", ["api", "preview"]) => preview(sh, req),
         ("POST", ["api", "quit"]) => {
             sh.finish(EndReason::Quit);
             let mut r = Response::empty(202);
@@ -254,6 +263,7 @@ fn is_known(path: &str) -> bool {
             | "/api/guided/back"
             | "/api/guided/skip"
             | "/api/save"
+            | "/api/preview"
             | "/api/quit"
     ) || p.starts_with("/api/probe/")
         || p.starts_with("/api/benchmark/")
@@ -413,6 +423,20 @@ fn guided_answer(sh: &Arc<Shared>, req: &Request) -> Response {
             let next = sh.session().after_done();
             guided_response(sh, next, None, true)
         }
+    }
+}
+
+/// Read-only: no `busy` check (a running benchmark cannot change the draft, and nothing is
+/// written or ended), no write, no shutdown, the session is not marked saved.
+fn preview(sh: &Shared, req: &Request) -> Response {
+    let body: SaveRequest = match parse(req) {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    let previewed: Result<PreviewResponse, ApiError> = sh.session().preview(&body);
+    match previewed {
+        Ok(p) => ok(&p),
+        Err(e) => json_err(422, &e),
     }
 }
 
