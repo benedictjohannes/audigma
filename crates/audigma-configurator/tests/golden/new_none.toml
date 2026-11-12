@@ -1,0 +1,21 @@
+schema_version = 1
+
+[input]
+channel_positions = ["FR", "FL"]
+
+[input.dsd]
+gain_db = -1.0
+
+[target]
+format = "pcm"
+pcm_rate_hz = 192000
+
+[gain]
+preamp_db = -3.0
+
+[resampler]
+phase = "minimum"
+apodization = 18000
+
+[runtime]
+dsp_threads = 4
