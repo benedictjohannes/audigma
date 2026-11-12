@@ -1,0 +1,329 @@
+# Guided setup flow (Session 6). Shape: see `GuidedDef` in src/guided.rs.
+#
+# A step is skipped when `skip_if` holds. A `choice` step that has exactly one visible choice
+# is answered by that choice without asking. `show_if` and `skip_if` are structured conditions
+# over the draft's resolved values plus these keys the engine supplies:
+#   use_case            the chosen use case (unset until the first step is answered)
+#   device.native_dsd   whether the picked ALSA device supports native DSD (unset if unknown)
+#   device.dop          whether the picked ALSA device supports DoP (unset if unknown)
+# `sets` / `unsets` are absolute config paths. Text follows the prose rules of the metadata
+# files: plain, mechanical, no unmeasured claims.
+
+[[step]]
+id = "use-case"
+title = "Use case"
+prompt = """
+What will you use audigma for?
+
+The answer picks the recommended value for every setting the next steps do not ask about. It is not written to the file.
+"""
+
+[[step.choices]]
+key = "interactive-desktop"
+use_case = "interactive-desktop"
+label = "Interactive desktop"
+summary = "A daemon that stays ready on a desktop; apps, browsers and MPD play into it."
+
+[[step.choices]]
+key = "headless-appliance"
+use_case = "headless-appliance"
+label = "Headless appliance"
+summary = "A dedicated music box with no desktop sound server."
+
+[[step.choices]]
+key = "offline-conversion"
+use_case = "offline-conversion"
+label = "Offline conversion"
+summary = "Converting files with `audigma convert`."
+
+[[step]]
+id = "output-path"
+title = "Output"
+skip_if = { key = "use_case", eq = "offline-conversion" }
+prompt = """
+Where should audigma send its output?
+"""
+
+[[step.choices]]
+key = "alsa"
+label = "ALSA, directly to the DAC"
+summary = "Opens the DAC over ALSA. Supports PCM, native DSD and DoP."
+sets = { "output.backend" = "alsa" }
+unsets = ["output.target_node"]
+
+[[step.choices]]
+key = "pipewire"
+label = "PipeWire sink"
+summary = "Plays into a PipeWire sink. PCM only; the sound server keeps control of the device."
+sets = { "output.backend" = "pipewire" }
+unsets = ["output.device", "output.transport"]
+
+[[step]]
+id = "alsa-device"
+kind = "alsa-device"
+title = "DAC"
+skip_if = { any = [
+  { key = "use_case", eq = "offline-conversion" },
+  { key = "output.backend", neq = "alsa" },
+] }
+prompt = """
+Which ALSA device is your DAC?
+
+A `hw:` device gives audigma the DAC directly. The list is read from the machine now; a device another program holds open is marked busy and its capabilities are unknown.
+"""
+empty = "The probe found no ALSA devices."
+
+[[step.choices]]
+key = "later"
+label = "Choose in the form"
+summary = "Leave `output.device` unset for now. The review page reports it as missing."
+
+[[step]]
+id = "pipewire-sink"
+kind = "pipewire-sink"
+title = "Sink"
+skip_if = { any = [
+  { key = "use_case", eq = "offline-conversion" },
+  { key = "output.backend", neq = "pipewire" },
+] }
+prompt = """
+Which PipeWire sink should audigma play into?
+
+The name is read from the machine now and can change after hardware or profile changes.
+"""
+empty = "The probe found no PipeWire sinks."
+
+[[step.choices]]
+key = "default"
+label = "The default sink"
+summary = "Leave `output.target_node` unset."
+caution = "If audigma's own virtual sink is the default, its output loops back into its input and playback is silent."
+unsets = ["output.target_node"]
+
+[[step]]
+id = "format"
+title = "Format"
+skip_if = { key = "use_case", eq = "offline-conversion" }
+prompt = """
+Which format should audigma send to the DAC?
+"""
+
+[[step.choices]]
+key = "pcm"
+label = "PCM"
+summary = "Resample to a PCM rate."
+sets = { "target.format" = "pcm" }
+unsets = ["output.transport"]
+
+[[step.choices]]
+key = "dsd-native"
+label = "DSD, native"
+summary = "Modulate to DSD and send it as raw DSD."
+show_if = { all = [
+  { key = "output.backend", eq = "alsa" },
+  { key = "device.native_dsd", neq = false },
+] }
+sets = { "target.format" = "dsd", "output.transport" = "native" }
+
+[[step.choices]]
+key = "dsd-dop"
+label = "DSD over PCM (DoP)"
+summary = "Modulate to DSD and wrap it in PCM frames."
+show_if = { all = [
+  { key = "output.backend", eq = "alsa" },
+  { key = "device.dop", neq = false },
+] }
+sets = { "target.format" = "dsd", "output.transport" = "dop" }
+
+[[step]]
+id = "offline-format"
+title = "Format"
+skip_if = { key = "use_case", neq = "offline-conversion" }
+prompt = """
+Which format should the converted files have?
+
+This and the rate are all the form needs to be complete. The next screen is the form, where the remaining settings take their defaults.
+"""
+
+[[step.choices]]
+key = "pcm"
+label = "PCM"
+summary = "Resample to a PCM rate."
+sets = { "target.format" = "pcm" }
+
+[[step.choices]]
+key = "dsd"
+label = "DSD"
+summary = "Modulate to DSD."
+sets = { "target.format" = "dsd" }
+
+[[step]]
+id = "quality"
+title = "Quality"
+kind = "presets"
+presets = "quality-starting-point"
+skip_if = { key = "use_case", eq = "offline-conversion" }
+prompt = """
+Pick a starting point for the resampler. Each one sets the filter phase, the apodization and, for DSD, the modulator order. All three stay editable in the form.
+"""
+
+[[step]]
+id = "rate-policy"
+title = "Rate policy"
+skip_if = { key = "use_case", eq = "offline-conversion" }
+prompt = """
+How should the output clock follow the source?
+
+Sample rates come in a 44.1 kHz family and a 48 kHz family. A DAC relocks its clock when the family changes.
+"""
+
+[[step.choices]]
+key = "source"
+label = "Follow the source"
+summary = "Use the family of each track. The DAC relocks when the family changes."
+sets = { "target.rate_family" = "source" }
+
+[[step.choices]]
+key = "44100"
+label = "Pin the 44.1 kHz family"
+summary = "The DAC never relocks. Tracks in the 48 kHz family are resampled by a rational factor."
+sets = { "target.rate_family" = "44100" }
+
+[[step.choices]]
+key = "48000"
+label = "Pin the 48 kHz family"
+summary = "The DAC never relocks. Tracks in the 44.1 kHz family are resampled by a rational factor."
+sets = { "target.rate_family" = "48000" }
+
+[[step]]
+id = "discover"
+kind = "discover"
+title = "Compute capability"
+skip_if = { key = "use_case", eq = "offline-conversion" }
+prompt = """
+Measure which rate tiers this computer can process?
+
+Audigma runs a short benchmark for each tier the device supports, with the quality settings and rate policy you just chose, starting at the lowest tier and stopping at the first one that fails. Nothing is played. The benchmark uses all CPU cores while it runs.
+
+The numbers are an estimate: live playback has costs the benchmark does not measure. The results are marked out of date if you change the quality settings afterwards.
+"""
+
+[[step.choices]]
+key = "run"
+label = "Run the benchmark"
+summary = "Test the supported tiers now."
+
+[[step.choices]]
+key = "skip"
+label = "Skip"
+summary = "Choose a tier without measurements."
+
+[[step]]
+id = "rate"
+kind = "tiers"
+title = "Rate"
+prompt = """
+Which output rate tier?
+
+A tier names a rate in both families; the family chosen by the rate policy decides which one is used. Higher tiers cost proportionally more CPU and must be supported by the DAC.
+"""
+
+[[step.choices]]
+key = "44100"
+label = "44.1 / 48 kHz"
+summary = "Same rate as CD-rate sources."
+show_if = { key = "target.format", eq = "pcm" }
+sets = { "target.pcm_rate_hz" = 44100 }
+
+[[step.choices]]
+key = "88200"
+label = "88.2 / 96 kHz"
+summary = "Twice the base rate."
+show_if = { key = "target.format", eq = "pcm" }
+sets = { "target.pcm_rate_hz" = 88200 }
+
+[[step.choices]]
+key = "176400"
+label = "176.4 / 192 kHz"
+summary = "Four times the base rate."
+show_if = { key = "target.format", eq = "pcm" }
+sets = { "target.pcm_rate_hz" = 176400 }
+
+[[step.choices]]
+key = "352800"
+label = "352.8 / 384 kHz"
+summary = "Eight times the base rate."
+show_if = { key = "target.format", eq = "pcm" }
+sets = { "target.pcm_rate_hz" = 352800 }
+
+[[step.choices]]
+key = "705600"
+label = "705.6 / 768 kHz"
+summary = "Sixteen times the base rate."
+show_if = { key = "target.format", eq = "pcm" }
+sets = { "target.pcm_rate_hz" = 705600 }
+
+[[step.choices]]
+key = "dsd64"
+label = "DSD64"
+summary = "2.8224 MHz / 3.072 MHz."
+show_if = { key = "target.format", eq = "dsd" }
+sets = { "target.dsd_rate" = "dsd64" }
+
+[[step.choices]]
+key = "dsd128"
+label = "DSD128"
+summary = "5.6448 MHz / 6.144 MHz."
+show_if = { key = "target.format", eq = "dsd" }
+sets = { "target.dsd_rate" = "dsd128" }
+
+[[step.choices]]
+key = "dsd256"
+label = "DSD256"
+summary = "11.2896 MHz / 12.288 MHz."
+show_if = { key = "target.format", eq = "dsd" }
+sets = { "target.dsd_rate" = "dsd256" }
+
+[[step.choices]]
+key = "dsd512"
+label = "DSD512"
+summary = "22.5792 MHz / 24.576 MHz."
+show_if = { key = "target.format", eq = "dsd" }
+sets = { "target.dsd_rate" = "dsd512" }
+
+[[step]]
+id = "volume"
+title = "Volume"
+skip_if = { any = [
+  { key = "use_case", eq = "offline-conversion" },
+  { key = "output.backend", eq = "pipewire" },
+] }
+prompt = """
+How should the volume be controlled?
+
+Software volume scales the signal inside audigma. Hardware volume uses the DAC's analog mixer, if it has one.
+"""
+
+[[step.choices]]
+key = "hardware-software-fallback"
+label = "Hardware, else software"
+summary = "Use the DAC's mixer when it has one, otherwise audigma's own volume."
+sets = { "output.volume_control" = "hardware-software-fallback" }
+
+[[step.choices]]
+key = "software"
+label = "Software"
+summary = "Always scale in floating point; safe for DSD and DoP."
+sets = { "output.volume_control" = "software" }
+
+[[step.choices]]
+key = "hardware"
+label = "Hardware only"
+summary = "Requires a DAC mixer; never scales digitally."
+sets = { "output.volume_control" = "hardware" }
+
+[[step.choices]]
+key = "none"
+label = "None"
+summary = "Fixed unity gain; volume changes are ignored."
+sets = { "output.volume_control" = "none" }

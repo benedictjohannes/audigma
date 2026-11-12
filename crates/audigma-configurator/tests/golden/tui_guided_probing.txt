@@ -1,0 +1,24 @@
+ audigma configure  new file · use case: interactive desktop · mode: live
+┌ Guided setup · step 3 of 9 · DAC ────────────────────────────────────────────┐
+│Which ALSA device is your DAC?                                                │
+│                                                                              │
+│A hw: device gives audigma the DAC directly. The list is read from the        │
+│machine now; a device another program holds open is marked busy and its       │
+│capabilities are unknown.                                                     │
+│                                                                              │
+│Probing the machine...                                                        │
+│> Choose in the form                                                          │
+│    Leave output.device unset for now. The review page reports it as missing. │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+ ↑↓ choose · Enter select · Backspace back · r rescan · Esc to form · q quit

@@ -1,0 +1,24 @@
+ audigma configure  new file · use case: interactive desktop · mode: live
+┌ Guided setup · step 7 of 9 · Compute capability ─────────────────────────────┐
+│Measure which rate tiers this computer can process?                           │
+│                                                                              │
+│Audigma runs a short benchmark for each tier the device supports, with the    │
+│quality settings and rate policy you just chose, starting at the lowest tier  │
+│and stopping at the first one that fails. Nothing is played. The benchmark    │
+│uses all CPU cores while it runs.                                             │
+│                                                                              │
+│The numbers are an estimate: live playback has costs the benchmark does not   │
+│measure. The results are marked out of date if you change the quality         │
+│settings afterwards.                                                          │
+│                                                                              │
+│                                                                              │
+│Results (estimates)                                                           │
+│ !  DSD64           not measured: no benchmark in tests                       │
+│    DSD128          not run                                                   │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+ Enter continue · r run again · Backspace back · Esc to form

@@ -39,29 +39,13 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Res
             }
             return Ok(());
         }
+        let mut effects = Vec::new();
         if event::poll(Duration::from_millis(80))? {
             if let Event::Key(key) = event::read()? {
-                for effect in app.handle_key(key) {
-                    match effect {
-                        Effect::Probe => {
-                            let (tx, rx) = channel();
-                            std::thread::spawn(move || {
-                                let _ = tx.send(probe_all());
-                            });
-                            probe_rx = Some(rx);
-                        }
-                        Effect::StartBenchmark(settings) => {
-                            bench = Some(benchmark::start(BenchmarkRequest::new(*settings)));
-                        }
-                        Effect::CancelBenchmark => {
-                            if let Some(b) = &bench {
-                                b.cancel();
-                            }
-                        }
-                    }
-                }
+                effects.extend(app.handle_key(key));
             }
         }
+        perform(effects, &mut probe_rx, &mut bench);
         if let Some(rx) = &probe_rx {
             if let Ok(report) = rx.try_recv() {
                 app.on_probe(report);
@@ -70,13 +54,42 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Res
         }
         if let Some(b) = &bench {
             let mut finished = false;
+            let mut effects = Vec::new();
             while let Ok(ev) = b.events.try_recv() {
                 finished |= !matches!(ev, benchmark::BenchmarkEvent::Progress { .. });
-                app.on_bench(ev);
+                effects.extend(app.on_bench(ev));
             }
             if finished {
                 if let Some(b) = bench.take() {
                     let _ = b.wait();
+                }
+            }
+            perform(effects, &mut probe_rx, &mut bench);
+        }
+    }
+}
+
+/// Runs the work the app asked for.
+fn perform(
+    effects: Vec<Effect>,
+    probe_rx: &mut Option<Receiver<ProbeReport>>,
+    bench: &mut Option<BenchmarkHandle>,
+) {
+    for effect in effects {
+        match effect {
+            Effect::Probe => {
+                let (tx, rx) = channel();
+                std::thread::spawn(move || {
+                    let _ = tx.send(probe_all());
+                });
+                *probe_rx = Some(rx);
+            }
+            Effect::StartBenchmark(settings) => {
+                *bench = Some(benchmark::start(BenchmarkRequest::new(*settings)));
+            }
+            Effect::CancelBenchmark => {
+                if let Some(b) = bench {
+                    b.cancel();
                 }
             }
         }

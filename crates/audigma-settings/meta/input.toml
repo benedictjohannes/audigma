@@ -140,9 +140,9 @@ When enabled, the PipeWire sink also advertises DSD input capability. An incomin
 
 When disabled, either PipeWire or the source may convert DSD to PCM, which lowers quality, or a source configured never to resample may stall with no audio.
 
-Suited to dedicated music boxes with DSD players such as MPD; usually left off on desktop PCs where other apps need to share the sink.
+On by default so DSD players such as MPD work out of the box. Turn it off on desktop PCs where other apps need to keep sharing the sink.
 """
-default = false
+default = true
 applies_to = ["run"]
 recommended.headless-appliance = { value = true, why = "you have DSD sources and DSD-transport-capable players (like MPD)." }
 recommended.interactive-desktop = { value = false, why = "keeps PipeWire's mixer always available; no DSD stream takes the sink exclusively." }

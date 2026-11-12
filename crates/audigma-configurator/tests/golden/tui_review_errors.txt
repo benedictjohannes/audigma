@@ -21,4 +21,4 @@
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
  Error in target: the configuration must specify [target]
- p probe · b validate · g go to error · s save · Esc back
+ f form · p probe · b validate · g go to error · s save · ↑↓ scroll

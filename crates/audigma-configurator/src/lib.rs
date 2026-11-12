@@ -7,6 +7,7 @@
 
 pub mod assist;
 pub mod draft;
+pub mod guided;
 pub mod schema;
 #[cfg(feature = "tui")]
 pub mod tui;

@@ -379,7 +379,7 @@ impl DsdInputConfig {
 
 /// `[input]` section (`Design.md §6.2`).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InputConfig {
     pub backend: Option<InputBackend>,
@@ -457,9 +457,9 @@ impl InputConfig {
         self.rate_mode.unwrap_or_default()
     }
 
-    /// Returns whether DSD format ingestion is allowed (defaults to false).
+    /// Returns whether DSD format ingestion is allowed (defaults to true).
     pub fn allow_dsd(&self) -> bool {
-        self.allow_dsd.unwrap_or(false)
+        self.allow_dsd.unwrap_or(true)
     }
 
     /// Returns the configured maximum intermediate PCM rate for DSD decimation, if set.

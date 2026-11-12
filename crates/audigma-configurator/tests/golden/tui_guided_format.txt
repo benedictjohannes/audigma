@@ -1,0 +1,24 @@
+ audigma configure  new file · use case: interactive desktop · mode: live
+┌ Guided setup · step 4 of 9 · Format ─────────────────────────────────────────┐
+│Which format should audigma send to the DAC?                                  │
+│                                                                              │
+│  PCM                                                                         │
+│    Resample to a PCM rate.                                                   │
+│> DSD, native (recommended for interactive desktop)                           │
+│    Modulate to DSD and send it as raw DSD.                                   │
+│    Recommended: if the DAC supports it; fall back to dop otherwise.          │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+ ↑↓ choose · Enter select · Backspace back · Esc to form · q quit

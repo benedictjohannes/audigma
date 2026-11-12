@@ -1,0 +1,24 @@
+ audigma configure  new file · use case: interactive desktop · mode: live
+┌ Guided setup · step 8 of 9 · Rate ───────────────────────────────────────────┐
+│Which output rate tier?                                                       │
+│                                                                              │
+│A tier names a rate in both families; the family chosen by the rate policy    │
+│decides which one is used. Higher tiers cost proportionally more CPU and must │
+│be supported by the DAC.                                                      │
+│                                                                              │
+│> DSD64                                                                       │
+│    2.8224 MHz / 3.072 MHz.                                                   │
+│    not measured: no benchmark in tests                                       │
+│  DSD128                                                                      │
+│    5.6448 MHz / 6.144 MHz.                                                   │
+│  DSD256                                                                      │
+│    11.2896 MHz / 12.288 MHz.                                                 │
+│    The device does not offer native dsd256: 44.1 kHz family needs 352800 Hz; │
+│    48 kHz family needs 384000 Hz.                                            │
+│  DSD512                                                                      │
+│    22.5792 MHz / 24.576 MHz.                                                 │
+│    The device does not offer native dsd512: 44.1 kHz family needs 705600 Hz; │
+│    48 kHz family needs 768000 Hz.                                            │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+ ↑↓ choose · Enter select · Backspace back · Esc to form · q quit

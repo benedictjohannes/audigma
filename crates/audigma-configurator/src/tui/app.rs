@@ -14,6 +14,7 @@ use crate::assist::benchmark::{BenchmarkEvent, BenchmarkResult, Stage};
 use crate::assist::capability::{self, CapabilityFinding};
 use crate::assist::probe::ProbeReport;
 use crate::draft::{Draft, Issue};
+use crate::guided::{DiscoveryNext, Guided, Outcome, StepKind, StepView};
 use crate::writer::text::{option_text, show_value};
 use crate::writer::{CommentLevel, SaveReport, WriteOptions, save};
 
@@ -29,7 +30,10 @@ pub enum Effect {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
+    /// New file: guided setup or direct editing.
     Start,
+    /// Guided setup, for a new file.
+    Guided,
     Form,
     Review,
     Save,
@@ -157,6 +161,8 @@ pub enum Popup {
         integer_only: bool,
     },
     ConfirmQuit,
+    /// Leave guided setup for the form.
+    ConfirmSkip,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -205,7 +211,18 @@ pub struct App {
     pub cursor: usize,
     /// Lines the help pane is scrolled down.
     pub help_scroll: u16,
+    /// The start screen's cursor: 0 guided setup, 1 edit directly.
     pub start_sel: usize,
+    /// The review page says the values come from guided setup.
+    pub review_banner: bool,
+    /// Lines the review page is scrolled down.
+    pub review_scroll: u16,
+    /// Largest useful `review_scroll`, set by the view each frame (0 when everything fits).
+    pub review_max_scroll: std::cell::Cell<u16>,
+    /// Guided setup in progress (a new file only).
+    pub guided: Option<Guided>,
+    /// The choice the guided cursor is on.
+    pub guided_sel: usize,
     pub notice: Option<String>,
     pub probe: Option<ProbeReport>,
     pub probe_running: bool,
@@ -275,7 +292,11 @@ impl App {
             draft,
             path: path.to_path_buf(),
             is_new: existing.is_none(),
-            screen: Screen::Start,
+            screen: if existing.is_none() {
+                Screen::Start
+            } else {
+                Screen::Form
+            },
             popup: None,
             use_case: None,
             mode: Mode::All,
@@ -283,7 +304,12 @@ impl App {
             folded,
             cursor: 0,
             help_scroll: 0,
-            start_sel: 1,
+            start_sel: 0,
+            review_banner: false,
+            review_scroll: 0,
+            review_max_scroll: std::cell::Cell::new(0),
+            guided: None,
+            guided_sel: 0,
             notice: None,
             probe: None,
             probe_running: false,
@@ -459,6 +485,7 @@ impl App {
     /// Moves the cursor to `path`, unfolding its section and showing hidden keys if needed.
     pub fn goto_field(&mut self, path: &str) {
         self.screen = Screen::Form;
+        self.review_banner = false;
         let section = path.split('.').next().unwrap_or("").to_string();
         self.folded.remove(&section);
         // An issue about a whole section (`target`) lands on the section row.
@@ -719,12 +746,157 @@ impl App {
         })
     }
 
+    // ---- guided setup -------------------------------------------------------------------
+
+    /// The current guided step, ready to draw.
+    pub fn guided_view(&self) -> Option<StepView> {
+        let g = self.guided.as_ref()?;
+        Some(g.view(&self.catalog, &self.draft, self.probe.as_ref()))
+    }
+
+    /// Puts the guided cursor on the step's preselected choice.
+    fn guided_sync(&mut self) {
+        if let Some(v) = self.guided_view() {
+            self.guided_sel = v.selected;
+        }
+    }
+
+    /// Whether a guided benchmark sweep is running.
+    pub fn discovering(&self) -> bool {
+        self.guided.as_ref().is_some_and(|g| g.discovery.active)
+    }
+
+    fn guided_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+        let Some(view) = self.guided_view() else {
+            self.screen = Screen::Form;
+            return Vec::new();
+        };
+        let discovering = self.discovering();
+        let has_results = view.kind == StepKind::Discover
+            && self
+                .guided
+                .as_ref()
+                .is_some_and(|g| !g.discovery.is_empty());
+        let last = view.choices.len().saturating_sub(1);
+        match key.code {
+            KeyCode::Char('q') if !discovering => return self.request_quit(),
+            KeyCode::Esc => {
+                if discovering {
+                    return vec![Effect::CancelBenchmark];
+                }
+                self.popup = Some(Popup::ConfirmSkip);
+            }
+            KeyCode::Up | KeyCode::Char('k') => self.guided_sel = self.guided_sel.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => self.guided_sel = (self.guided_sel + 1).min(last),
+            KeyCode::Backspace | KeyCode::Char('b') if !discovering => {
+                if let Some(g) = self.guided.as_mut() {
+                    if g.back(&mut self.draft) {
+                        self.refresh();
+                        self.sync_use_case();
+                        self.guided_sync();
+                    }
+                }
+            }
+            KeyCode::Char('r') if !discovering => {
+                if has_results {
+                    return self.guided_answer("run");
+                }
+                if matches!(view.kind, StepKind::AlsaDevice | StepKind::PipewireSink) {
+                    return self.guided_probe();
+                }
+            }
+            KeyCode::Enter if !discovering && !view.waiting_for_probe => {
+                if has_results {
+                    return self.guided_answer("continue");
+                }
+                let Some(c) = view.choices.get(self.guided_sel) else {
+                    return Vec::new();
+                };
+                if let Some(why) = &c.disabled {
+                    self.notice = Some(why.clone());
+                } else {
+                    return self.guided_answer(&c.key.clone());
+                }
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    fn guided_probe(&mut self) -> Vec<Effect> {
+        self.probe = None;
+        if self.probe_running {
+            return Vec::new();
+        }
+        self.probe_running = true;
+        vec![Effect::Probe]
+    }
+
+    fn guided_answer(&mut self, key: &str) -> Vec<Effect> {
+        let Some(g) = self.guided.as_mut() else {
+            return Vec::new();
+        };
+        let result = g.answer(&self.catalog, &mut self.draft, self.probe.as_ref(), key);
+        self.refresh();
+        self.sync_use_case();
+        match result {
+            Err(e) => {
+                self.notice = Some(e);
+                Vec::new()
+            }
+            Ok(Outcome::Next) => {
+                self.guided_sync();
+                Vec::new()
+            }
+            Ok(Outcome::NeedsProbe) => {
+                self.guided_sel = 0;
+                self.guided_probe()
+            }
+            Ok(Outcome::StartBenchmark(s)) => vec![Effect::StartBenchmark(s)],
+            Ok(Outcome::Done) => {
+                self.leave_guided(true);
+                Vec::new()
+            }
+        }
+    }
+
+    /// Takes the guided use case into the form's mode.
+    fn sync_use_case(&mut self) {
+        if let Some(g) = &self.guided {
+            let u = g.use_case;
+            if u != self.use_case {
+                self.set_use_case(u);
+            }
+        }
+    }
+
+    /// Ends guided setup. `done`: the flow ran to the end (recommendations are in the draft).
+    fn leave_guided(&mut self, done: bool) {
+        self.guided = None;
+        self.refresh();
+        self.clamp();
+        if done && self.use_case == Some(UseCase::OfflineConversion) {
+            self.goto_field("offline");
+            self.notice = Some("Guided setup done. The rest takes its defaults.".into());
+        } else if done {
+            self.screen = Screen::Review;
+            self.review_scroll = 0;
+            self.review_banner = true;
+        } else {
+            self.screen = Screen::Form;
+        }
+    }
+
     // ---- runner callbacks ---------------------------------------------------------------
 
     pub fn on_probe(&mut self, report: ProbeReport) {
         self.probe_running = false;
         self.probe = Some(report);
         self.notice = Some("Device probe finished.".into());
+        if self.guided.is_some() {
+            self.notice = None;
+            self.guided_sync();
+        }
         // Open the assist that asked for this probe, if the user is still on that key.
         if let Some((id, path)) = self.pending_assist.take() {
             let still_there =
@@ -740,13 +912,25 @@ impl App {
         }
     }
 
-    pub fn on_bench(&mut self, ev: BenchmarkEvent) {
+    /// Feeds a benchmark event. A guided sweep may ask for the next tier's benchmark.
+    pub fn on_bench(&mut self, ev: BenchmarkEvent) -> Vec<Effect> {
+        if let Some(g) = self.guided.as_mut().filter(|g| g.discovery.active) {
+            return match g.on_discovery(&self.catalog, &self.draft, self.probe.as_ref(), &ev) {
+                DiscoveryNext::StartBenchmark(s) => vec![Effect::StartBenchmark(s)],
+                DiscoveryNext::Nothing => Vec::new(),
+                DiscoveryNext::Finished => {
+                    self.guided_sync();
+                    Vec::new()
+                }
+            };
+        }
         self.bench = match ev {
             BenchmarkEvent::Progress { stage, fraction } => Bench::Running { stage, fraction },
             BenchmarkEvent::Finished(r) => Bench::Done(r),
             BenchmarkEvent::Failed(m) => Bench::Failed(m),
             BenchmarkEvent::Cancelled => Bench::Cancelled,
         };
+        Vec::new()
     }
 
     // ---- keys ---------------------------------------------------------------------------
@@ -764,6 +948,7 @@ impl App {
         }
         match self.screen {
             Screen::Start => self.start_key(key),
+            Screen::Guided => self.guided_key(key),
             Screen::Form => self.form_key(key),
             Screen::Review => self.review_key(key),
             Screen::Save => self.save_key(key),
@@ -772,7 +957,7 @@ impl App {
 
     fn request_quit(&mut self) -> Vec<Effect> {
         let mut effects = Vec::new();
-        if matches!(self.bench, Bench::Running { .. }) {
+        if matches!(self.bench, Bench::Running { .. }) || self.discovering() {
             effects.push(Effect::CancelBenchmark);
         }
         if self.dirty() && !self.saved() {
@@ -794,12 +979,12 @@ impl App {
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             KeyCode::Enter => {
                 if self.start_sel == 0 {
-                    self.notice = Some("Guided setup is not available yet.".into());
+                    self.guided = Some(Guided::new());
+                    self.screen = Screen::Guided;
+                    self.guided_sync();
                 } else {
                     self.screen = Screen::Form;
-                    if self.is_new {
-                        self.popup = Some(Popup::UseCase { sel: 0 });
-                    }
+                    self.popup = Some(Popup::UseCase { sel: 0 });
                 }
             }
             _ => {}
@@ -865,7 +1050,10 @@ impl App {
                 self.show_all = !self.show_all;
                 self.clamp();
             }
-            KeyCode::Char('r') | KeyCode::F(2) => self.screen = Screen::Review,
+            KeyCode::Char('r') | KeyCode::F(2) => {
+                self.screen = Screen::Review;
+                self.review_scroll = 0;
+            }
             KeyCode::Char('q') | KeyCode::Esc => return self.request_quit(),
             _ => {}
         }
@@ -888,6 +1076,7 @@ impl App {
                     return vec![Effect::CancelBenchmark];
                 }
                 self.screen = Screen::Form;
+                self.review_banner = false;
             }
             KeyCode::Char('g') => {
                 if let Some(path) = self.issues().into_iter().find_map(|i| i.path) {
@@ -927,10 +1116,22 @@ impl App {
                     self.save.exists = Path::new(&self.save.path).exists();
                 }
             }
+            KeyCode::Down => self.scroll_review(1),
+            KeyCode::Up => self.scroll_review(-1),
+            KeyCode::PageDown => self.scroll_review(10),
+            KeyCode::PageUp => self.scroll_review(-10),
+            KeyCode::Home => self.review_scroll = 0,
+            KeyCode::End => self.review_scroll = self.review_max_scroll.get(),
             KeyCode::Char('q') => return self.request_quit(),
             _ => {}
         }
         Vec::new()
+    }
+
+    fn scroll_review(&mut self, delta: i32) {
+        let max = i32::from(self.review_max_scroll.get());
+        let next = (i32::from(self.review_scroll) + delta).clamp(0, max);
+        self.review_scroll = next as u16;
     }
 
     fn save_key(&mut self, key: KeyEvent) -> Vec<Effect> {
@@ -999,6 +1200,12 @@ impl App {
                 match key.code {
                     KeyCode::Char('y') | KeyCode::Enter => self.quit = true,
                     _ => {}
+                }
+                Vec::new()
+            }
+            Popup::ConfirmSkip => {
+                if matches!(key.code, KeyCode::Char('y') | KeyCode::Enter) {
+                    self.leave_guided(false);
                 }
                 Vec::new()
             }

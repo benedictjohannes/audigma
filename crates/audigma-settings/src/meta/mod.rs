@@ -911,7 +911,7 @@ mod tests {
         let d = |p: &str| c.field(p).unwrap().default.clone();
         assert_eq!(d("input.channels"), Some(json!(2)));
         assert_eq!(d("input.rate_mode"), Some(json!("dynamic")));
-        assert_eq!(d("input.allow_dsd"), Some(json!(false)));
+        assert_eq!(d("input.allow_dsd"), Some(json!(true)));
         assert_eq!(d("input.dsd.gain_db"), Some(json!(6.0)));
         assert_eq!(d("output.buffer_ms"), Some(json!(40)));
         assert_eq!(d("output.period_ms"), Some(json!(5)));

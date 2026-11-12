@@ -1,0 +1,24 @@
+ audigma configure  new file · use case: not set · mode: all
+┌ Guided setup · step 1 of 9 · Use case ───────────────────────────────────────┐
+│What will you use audigma for?                                                │
+│                                                                              │
+│The answer picks the recommended value for every setting the next steps do    │
+│not ask about. It is not written to the file.                                 │
+│                                                                              │
+│> Interactive desktop                                                         │
+│    A daemon that stays ready on a desktop; apps, browsers and MPD play into  │
+│    it.                                                                       │
+│  Headless appliance                                                          │
+│    A dedicated music box with no desktop sound server.                       │
+│  Offline conversion                                                          │
+│    Converting files with audigma convert.                                    │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+ ↑↓ choose · Enter select · Esc to form · q quit

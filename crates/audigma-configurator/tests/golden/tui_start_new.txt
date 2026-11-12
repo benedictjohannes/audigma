@@ -3,14 +3,14 @@
 
 
 
-        ┌ Start ───────────────────────────────────────────────────────┐
+        ┌ New file ────────────────────────────────────────────────────┐
         │/nonexistent/audigma/config.toml does not exist yet; a new    │
         │file will be created.                                         │
         │                                                              │
-        │  Guided setup                                                │
-        │    Not available yet.                                        │
+        │> Guided setup                                                │
+        │    A few questions; the rest takes recommended values.       │
         │                                                              │
-        │> Edit configuration                                          │
+        │  Edit configuration                                          │
         │    Every key, with its documentation.                        │
         │                                                              │
         │                                                              │
@@ -20,5 +20,5 @@
 
 
 
- Error in target: the configuration must specify [target]
+
  ↑↓ choose · Enter select · q quit

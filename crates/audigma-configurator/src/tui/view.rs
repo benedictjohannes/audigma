@@ -40,6 +40,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
     match app.screen {
         Screen::Start => draw_start(f, app, area),
+        Screen::Guided => draw_guided(f, app, area),
         Screen::Form => draw_form(f, app, area),
         Screen::Review => draw_review(f, app, area),
         Screen::Save => draw_save(f, app, area),
@@ -129,24 +130,18 @@ fn draw_start(f: &mut Frame, app: &App, area: Rect) {
     .split(area);
     f.render_widget(Paragraph::new(header(app)), rows[0]);
     let boxed = centered(rows[1], 64, 12);
-    let block = Block::default().borders(Borders::ALL).title(" Start ");
+    let block = Block::default().borders(Borders::ALL).title(" New file ");
     let inner = block.inner(boxed);
     f.render_widget(block, boxed);
-    let what = if app.is_new {
-        format!(
-            "{} does not exist yet; a new file will be created.",
-            app.path.display()
-        )
-    } else {
-        format!("{} will be updated in place.", app.path.display())
-    };
-    let item = |i: usize, label: &str, sub: &str, enabled: bool| {
+    let what = format!(
+        "{} does not exist yet; a new file will be created.",
+        app.path.display()
+    );
+    let item = |i: usize, label: &str, sub: &str| {
         let st = if i == app.start_sel {
             selected()
-        } else if enabled {
-            Style::default()
         } else {
-            DIM
+            Style::default()
         };
         vec![
             Line::from(vec![
@@ -158,17 +153,223 @@ fn draw_start(f: &mut Frame, app: &App, area: Rect) {
     };
     let mut lines = render(&what, inner.width, Style::default());
     lines.push(Line::default());
-    lines.extend(item(0, "Guided setup", "Not available yet.", false));
+    lines.extend(item(
+        0,
+        "Guided setup",
+        "A few questions; the rest takes recommended values.",
+    ));
     lines.push(Line::default());
     lines.extend(item(
         1,
         "Edit configuration",
         "Every key, with its documentation.",
-        true,
     ));
     f.render_widget(Paragraph::new(lines), inner);
-    status_line(f, app, rows[2]);
+    if let Some(n) = &app.notice {
+        f.render_widget(Paragraph::new(Line::styled(format!(" {n}"), WARN)), rows[2]);
+    }
     f.render_widget(hints("↑↓ choose · Enter select · q quit"), rows[3]);
+}
+
+// ---- guided --------------------------------------------------------------------------------
+
+fn progress_bar(fraction: f64, width: usize) -> String {
+    let done = ((fraction.clamp(0.0, 1.0)) * width as f64).round() as usize;
+    format!(
+        "[{}{}] {:>3.0}%",
+        "#".repeat(done),
+        "-".repeat(width - done),
+        fraction * 100.0
+    )
+}
+
+fn indent(lines: Vec<Line<'static>>, by: &str) -> Vec<Line<'static>> {
+    lines
+        .into_iter()
+        .map(|l| {
+            let mut spans = vec![Span::raw(by.to_string())];
+            spans.extend(l.spans);
+            Line::from(spans)
+        })
+        .collect()
+}
+
+fn draw_guided(f: &mut Frame, app: &App, area: Rect) {
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(area);
+    f.render_widget(Paragraph::new(header(app)), rows[0]);
+    let Some(view) = app.guided_view() else {
+        return;
+    };
+    let block = Block::default().borders(Borders::ALL).title(format!(
+        " Guided setup · step {} of {} · {} ",
+        view.number, view.total, view.title
+    ));
+    let inner = block.inner(rows[1]);
+    f.render_widget(block, rows[1]);
+    let w = inner.width.saturating_sub(1);
+    let discovering = app.discovering();
+
+    let mut lines = render(&view.prompt, w, Style::default());
+    lines.push(Line::default());
+    if view.waiting_for_probe {
+        lines.push(Line::styled("Probing the machine...", WARN));
+    }
+    if let Some(p) = &view.problem {
+        lines.push(Line::styled(p.clone(), WARN));
+        lines.push(Line::default());
+    }
+    // The line range of the selected choice, to keep it on screen.
+    let mut sel_range = (0, 0);
+    // Once the sweep has run, its results replace the run/skip choices.
+    let hide_choices = view.kind == crate::guided::StepKind::Discover
+        && app.guided.as_ref().is_some_and(|g| !g.discovery.is_empty());
+    for (i, c) in view.choices.iter().enumerate().filter(|_| !hide_choices) {
+        let on = i == app.guided_sel && !discovering;
+        let start = lines.len();
+        let style = if c.disabled.is_some() {
+            DIM
+        } else if on {
+            selected()
+        } else {
+            Style::default()
+        };
+        let mut head = vec![
+            Span::raw(if on { "> " } else { "  " }),
+            Span::styled(c.label.clone(), style),
+        ];
+        if let (Some(_), Some(u)) = (&c.recommendation, app.use_case) {
+            head.push(Span::styled(
+                format!(" (recommended for {})", super::app::use_case_label(u)),
+                OK,
+            ));
+        }
+        lines.push(Line::from(head));
+        lines.extend(indent(render(&c.summary, w.saturating_sub(4), DIM), "    "));
+        if let Some(n) = &c.note {
+            lines.extend(indent(render(n, w.saturating_sub(4), WARN), "    "));
+        }
+        if let Some(d) = &c.disabled {
+            lines.extend(indent(render(d, w.saturating_sub(4), ERR), "    "));
+        }
+        if on {
+            if let Some(why) = &c.recommendation {
+                lines.extend(indent(
+                    render(&format!("Recommended: {why}"), w.saturating_sub(4), OK),
+                    "    ",
+                ));
+            }
+            if let Some(d) = &c.description {
+                lines.extend(indent(
+                    render(d, w.saturating_sub(4), Style::default()),
+                    "    ",
+                ));
+            }
+            if let Some(ca) = &c.caution {
+                lines.extend(indent(
+                    render(&format!("Caution: {ca}"), w.saturating_sub(4), WARN),
+                    "    ",
+                ));
+            }
+        }
+        sel_range = if on { (start, lines.len()) } else { sel_range };
+    }
+    if let Some(g) = app
+        .guided
+        .as_ref()
+        .filter(|_| matches!(view.id.as_str(), "discover" | "rate"))
+    {
+        if !g.discovery.is_empty() {
+            lines.push(Line::default());
+            lines.push(Line::styled("Results (estimates)", BOLD));
+            for (key, state) in &g.discovery.tiers {
+                use crate::guided::TierState as T;
+                let (mark, text, st) = match state {
+                    T::Untested => ("  ", "not run".to_string(), DIM),
+                    T::Running => (
+                        "> ",
+                        format!("measuring {}", progress_bar(g.discovery.progress, 20)),
+                        WARN,
+                    ),
+                    T::Passed {
+                        throughput_x,
+                        p999_percent,
+                    } => (
+                        "ok",
+                        format!(
+                            "{throughput_x:.1}x real time, p99.9 at {p999_percent:.0}% of the block budget"
+                        ),
+                        OK,
+                    ),
+                    T::Failed {
+                        throughput_x,
+                        p999_percent,
+                    } => (
+                        "x ",
+                        format!(
+                            "fails the gates: {throughput_x:.1}x real time, p99.9 at {p999_percent:.0}%"
+                        ),
+                        ERR,
+                    ),
+                    T::Error(m) => ("! ", format!("not measured: {m}"), ERR),
+                    T::Cancelled => ("  ", "cancelled".to_string(), DIM),
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(format!(" {mark} "), st),
+                    Span::raw(format!("{:<16}", g.tier_label(key))),
+                    Span::styled(text, st),
+                ]));
+            }
+            if app
+                .guided
+                .as_ref()
+                .is_some_and(|g| g.discovery_stale(&app.draft))
+            {
+                lines.push(Line::styled(
+                    "The quality settings changed since: these results are out of date.",
+                    WARN,
+                ));
+            }
+        }
+    }
+    let height = inner.height as usize;
+    let scroll = if sel_range.1 > height {
+        (sel_range.1 - height).min(sel_range.0)
+    } else {
+        0
+    };
+    f.render_widget(Paragraph::new(lines).scroll((scroll as u16, 0)), inner);
+    if let Some(n) = &app.notice {
+        f.render_widget(Paragraph::new(Line::styled(format!(" {n}"), WARN)), rows[2]);
+    }
+    let has_results = app
+        .guided
+        .as_ref()
+        .is_some_and(|g| !g.discovery.is_empty() && view.id == "discover");
+    let text = if discovering {
+        "Esc cancel the benchmark".to_string()
+    } else if has_results {
+        "Enter continue · r run again · Backspace back · Esc to form".to_string()
+    } else {
+        let mut t = String::from("↑↓ choose · Enter select");
+        if app.guided.as_ref().is_some_and(|g| g.can_go_back()) {
+            t.push_str(" · Backspace back");
+        }
+        if matches!(
+            view.kind,
+            crate::guided::StepKind::AlsaDevice | crate::guided::StepKind::PipewireSink
+        ) {
+            t.push_str(" · r rescan");
+        }
+        t.push_str(" · Esc to form · q quit");
+        t
+    };
+    f.render_widget(hints(&text), rows[3]);
 }
 
 fn status_line(f: &mut Frame, app: &App, area: Rect) {
@@ -482,6 +683,23 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_popup(f: &mut Frame, app: &App, p: &Popup, area: Rect) {
     match p {
+        Popup::ConfirmSkip => {
+            let r = centered(area, 56, 6);
+            f.render_widget(Clear, r);
+            let b = Block::default()
+                .borders(Borders::ALL)
+                .title(" Skip to the form ");
+            let inner = b.inner(r);
+            f.render_widget(b, r);
+            f.render_widget(
+                Paragraph::new(vec![
+                    Line::from("Leave guided setup and keep the answers so far?"),
+                    Line::from("The use-case recommendations are not applied."),
+                    Line::styled("y / Enter skip · any other key stays", DIM),
+                ]),
+                inner,
+            );
+        }
         Popup::ConfirmQuit => {
             let r = centered(area, 46, 5);
             f.render_widget(Clear, r);
@@ -678,6 +896,14 @@ fn draw_review(f: &mut Frame, app: &App, area: Rect) {
     let w = inner.width;
     let mut lines: Vec<Line> = Vec::new();
 
+    if app.review_banner {
+        lines.extend(render(
+            "These are the values guided setup chose. Press f to edit any of them in the form.",
+            w,
+            OK,
+        ));
+        lines.push(Line::default());
+    }
     lines.push(Line::styled("Problems", BOLD));
     let issues = app.issues();
     if issues.is_empty() {
@@ -779,24 +1005,29 @@ fn draw_review(f: &mut Frame, app: &App, area: Rect) {
         format!("Changed keys ({})", touched.len()),
         BOLD,
     ));
-    let room = usize::from(inner.height).saturating_sub(lines.len());
-    for (n, p) in touched.iter().enumerate() {
-        if n + 1 >= room && touched.len() > room {
-            lines.push(Line::styled(
-                format!("  ... and {} more", touched.len() - n),
-                DIM,
-            ));
-            break;
-        }
+    for p in &touched {
         let v = app
             .set_value(p)
             .map_or_else(|| "(reset to default)".to_string(), show_value);
         lines.push(Line::from(format!("  {p} = {v}")));
     }
-    f.render_widget(Paragraph::new(lines), inner);
+    let total = lines.len() as u16;
+    let max = total.saturating_sub(inner.height);
+    app.review_max_scroll.set(max);
+    let scroll = app.review_scroll.min(max);
+    f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
+    if max > 0 {
+        let more = if scroll < max { "↓" } else { " " };
+        let less = if scroll > 0 { "↑" } else { " " };
+        let r = Rect::new(rows[1].right().saturating_sub(5), rows[1].y, 4, 1);
+        f.render_widget(
+            Paragraph::new(Span::styled(format!(" {less}{more} "), DIM)),
+            r,
+        );
+    }
     status_line(f, app, rows[2]);
     f.render_widget(
-        hints("p probe · b validate · g go to error · s save · Esc back"),
+        hints("f form · p probe · b validate · g go to error · s save · ↑↓ scroll"),
         rows[3],
     );
 }

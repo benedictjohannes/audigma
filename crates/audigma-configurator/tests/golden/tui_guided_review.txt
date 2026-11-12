@@ -1,0 +1,24 @@
+ audigma configure  new file · use case: interactive desktop · mode: live
+┌ Review ──────────────────────────────────────────────────────────────────  ↓ ┐
+│These are the values guided setup chose. Press f to edit any of them in the   │
+│form.                                                                         │
+│                                                                              │
+│Problems                                                                      │
+│  none                                                                        │
+│                                                                              │
+│Device check                                                                  │
+│ALSA probe failed: none                                                       │
+│                                                                              │
+│Validate on this machine (an estimate)                                        │
+│  press b to benchmark exactly this configuration                             │
+│                                                                              │
+│Changed keys (10)                                                             │
+│  input.allow_dsd = false                                                     │
+│  output.backend = pipewire                                                   │
+│  output.device_wait_expiry = pause                                           │
+│  output.device_wait_ms = -1                                                  │
+│  output.keep_audio_sink_ms = 2000                                            │
+│  resampler.apodization = off                                                 │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+ f form · p probe · b validate · g go to error · s save · ↑↓ scroll

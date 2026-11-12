@@ -68,11 +68,12 @@ fn load_settings(config_path: &std::path::Path, instance: &Instance) -> Result<S
 
     // An explicit input node name wins; otherwise derive one from the instance so that
     // concurrent instances never create identically named virtual sinks.
-    if let Some(input) = settings.input.as_mut()
-        && input
-            .node_name
-            .as_deref()
-            .is_none_or(|n| n.trim().is_empty())
+    // `[input]` is optional (every key defaults), so a config without it still runs.
+    let input = settings.input.get_or_insert_with(Default::default);
+    if input
+        .node_name
+        .as_deref()
+        .is_none_or(|n| n.trim().is_empty())
     {
         input.node_name = Some(format!("audigma_sink_{}", instance.name()));
     }

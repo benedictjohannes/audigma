@@ -1,7 +1,7 @@
  audigma configure  new file · use case: not set · mode: all
 ┌ Settings ──────────────────────────┐┌ Help ──────────────────────────────────┐
-│ rate_mode           dynamic        ││Filter phase response.                  │
-│ allowed_rates       [44100, 48000,…││                                        │
+│ dsd                                ││Filter phase response.                  │
+│   dsd.max_intermed… (auto)         ││                                        │
 ┌ phase ───────────────────────────────────────────────────────────────────────┐
 │Filter phase response.                                                        │
 │                                                                              │
