@@ -133,9 +133,9 @@ impl DeviceReservation {
         };
 
         let conn = zbus::block_on(async {
-            Builder::session()
-                .name(well_known_name.as_str())
-                .serve_at(object_path.as_str(), iface)
+            Builder::session()?
+                .name(well_known_name.as_str())?
+                .serve_at(object_path.as_str(), iface)?
                 .build()
                 .await
         })?;

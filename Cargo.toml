@@ -34,7 +34,7 @@ audigma-flac = { path = "crates/audigma-flac" }
 alsa = "0.12"
 rtrb = "0.4.0"
 smallvec = "1.16"
-zbus = "6.0.0"
+zbus = "5"
 pipewire = "0.10.1"
 libspa = "0.10.1"
 libc = "0.2"
