@@ -2032,6 +2032,12 @@ impl PipeWirePcmOutput {
                     *pipewire::keys::NODE_LATENCY => format!("{}/{rate_hz}", quantum_frames_for_rate(rate_hz)),
                 };
 
+                // Ask the graph to run at the output rate. Without this, a graph clocked at another
+                // rate (e.g. 44.1 kHz) makes PipeWire's adapter resample the stream to it, undoing the
+                // upsampling. It is a request, not an override: `clock.allowed-rates` must include the
+                // rate, and a graph already held at another rate by a different stream keeps it.
+                props.insert("node.rate", format!("1/{rate_hz}"));
+
                 if let Some(target) = &target_node_owned {
                     props.insert("target.object", target.as_str());
                     // Keep the pin: do not fall back to the default sink when the target is
