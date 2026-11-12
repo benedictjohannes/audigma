@@ -10,8 +10,9 @@ pub mod volume;
 
 use clap::Parser;
 use commands::{
-    Cli, Commands, resolve_config_path, run_benchmark, run_config, run_configure, run_convert,
-    run_pause, run_play, run_probe, run_resume, run_run, run_set, run_status, run_stop,
+    Cli, Commands, resolve_config_path, run_benchmark, run_completions, run_config, run_configure,
+    run_convert, run_man, run_pause, run_play, run_probe, run_resume, run_run, run_set, run_status,
+    run_stop,
 };
 use std::process::ExitCode;
 
@@ -101,6 +102,8 @@ fn main() -> ExitCode {
         Commands::Config(args) => run_config(args),
         Commands::Configure(args) => run_configure(args),
         Commands::Probe(args) => run_probe(args),
+        Commands::Completions(args) => run_completions(args),
+        Commands::Man(args) => run_man(args),
     };
 
     // 6. Return ExitCode; destructors (including _guard drop and log flush) execute cleanly

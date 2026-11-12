@@ -28,6 +28,8 @@ toml = "0.8"
 toml_edit = "0.22"
 thiserror = "2.0"
 clap = { version = "=4.5.53", features = ["derive", "env"] }
+clap_complete = "=4.5.61"
+clap_mangen = "=0.2.31"
 symphonia = { version = "0.6", default-features = false, features = ["wav", "flac", "pcm", "opt-simd"] }
 hound = "3.5"
 audigma-flac = { path = "crates/audigma-flac" }

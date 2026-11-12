@@ -490,7 +490,8 @@ audigma convert -i INPUT -o OUTPUT [-c CONFIG]
 audigma benchmark [-i INPUT] [-c CONFIG] [--json]
 audigma probe [--backend alsa|pipewire] [--json]
 audigma configure [tui|web] [-c PATH]
-audigma completions SHELL        # planned (Session 9)
+audigma completions SHELL        # bash|zsh|fish|elvish|powershell, script to stdout
+audigma man [--out DIR]          # roff manpage to stdout, or one page per command into DIR
 audigma config check [-c CONFIG]
 audigma config explain [-c CONFIG] [--input-rate HZ] [--json]
 audigma status [--watch] [--json]

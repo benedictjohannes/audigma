@@ -5,6 +5,7 @@ pub mod config;
 pub mod configure;
 pub mod control;
 pub mod convert;
+pub mod docs;
 pub mod play;
 pub mod probe;
 pub mod run;
@@ -20,6 +21,7 @@ pub use control::{
     run_set, run_status, run_stop,
 };
 pub use convert::{ConvertArgs, run_convert};
+pub use docs::{CompletionsArgs, ManArgs, run_completions, run_man};
 pub use play::{PlayArgs, run_play};
 pub use probe::{ProbeArgs, print_alsa_probe_report, run_probe};
 pub use run::{RunArgs, run_run};
@@ -31,7 +33,8 @@ pub use crate::volume::parse_volume_to_db;
     name = "audigma",
     version,
     about = "High-precision PCM resampling and PCM-to-1-bit Delta-Sigma Modulation (DSD) engine",
-    long_about = "audigma is a high-precision Rust audio engine, CLI, and Linux audio service for high-precision PCM resampling and PCM-to-1-bit Delta-Sigma Modulation (DSD)."
+    long_about = "audigma is a high-precision Rust audio engine, CLI, and Linux audio service for high-precision PCM resampling and PCM-to-1-bit Delta-Sigma Modulation (DSD).",
+    after_long_help = "Configuration file: -c/--config, else $AUDIGMA_CONFIG, else $XDG_CONFIG_HOME/audigma/config.toml, else ~/.config/audigma/config.toml."
 )]
 pub struct Cli {
     /// Log renderer format ("text", "json", "auto")
@@ -94,6 +97,12 @@ pub enum Commands {
 
     /// Probe audio hardware endpoints and supported formats/rates
     Probe(ProbeArgs),
+
+    /// Print a shell completion script to stdout
+    Completions(CompletionsArgs),
+
+    /// Print the manpage (roff) to stdout, or write one page per command with --out DIR
+    Man(ManArgs),
 }
 
 /// Resolves the configuration path: `-c` / `--out` (`explicit`), then `$AUDIGMA_CONFIG`, then

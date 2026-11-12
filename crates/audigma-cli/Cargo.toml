@@ -30,6 +30,8 @@ audigma-log = { path = "../audigma-log" }
 tracing = { workspace = true }
 libc = { workspace = true }
 clap = { workspace = true }
+clap_complete = { workspace = true }
+clap_mangen = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
