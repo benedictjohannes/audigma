@@ -1457,9 +1457,16 @@ impl Settings {
                         .corresponding_rate_in_family(family)
                         .ok_or(SettingsError::UnresolvedTargetRate(input_rate))?
                 };
+                // The PipeWire graph carries unquantized f32, so the output backend decides the
+                // word and `target.sample_format` is ignored (it only warns, see `warnings`).
+                let sample_format = if self.output_backend() == Some(OutputBackend::Pipewire) {
+                    SampleFormat::F32
+                } else {
+                    target.sample_format.unwrap_or(SampleFormat::S32Le)
+                };
                 TargetRateSpec::Pcm {
                     rate,
-                    sample_format: target.sample_format.unwrap_or(SampleFormat::S32Le),
+                    sample_format,
                 }
             }
             TargetFormat::Dsd => {
@@ -2761,6 +2768,45 @@ pcm_rate_hz = 192000
                 sample_format: SampleFormat::S32Le,
             }
         );
+    }
+
+    #[test]
+    fn pipewire_output_always_plans_f32_whatever_sample_format_says() {
+        for fmt in [
+            "",
+            "sample_format = \"s16le\"\n",
+            "sample_format = \"f32\"\n",
+        ] {
+            let toml = format!(
+                "schema_version = 1\n[output]\nbackend = \"pipewire\"\n\
+                 [target]\nformat = \"pcm\"\n{fmt}pcm_rate_hz = 96000\n"
+            );
+            let s = Settings::from_toml_str(&toml).unwrap();
+            let plan = s.explain_for_input_rate(PcmRateHz::PCM_48000).unwrap();
+            assert!(
+                matches!(
+                    plan.stream_spec.target,
+                    TargetRateSpec::Pcm {
+                        sample_format: SampleFormat::F32,
+                        ..
+                    }
+                ),
+                "{fmt:?}"
+            );
+        }
+        let alsa = Settings::from_toml_str(
+            "schema_version = 1\n[output]\nbackend = \"alsa\"\ndevice = \"hw:0\"\n\
+             [target]\nformat = \"pcm\"\npcm_rate_hz = 96000\n",
+        )
+        .unwrap();
+        let plan = alsa.explain_for_input_rate(PcmRateHz::PCM_48000).unwrap();
+        assert!(matches!(
+            plan.stream_spec.target,
+            TargetRateSpec::Pcm {
+                sample_format: SampleFormat::S32Le,
+                ..
+            }
+        ));
     }
 
     #[test]
