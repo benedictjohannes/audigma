@@ -162,12 +162,19 @@ pub fn spawn(
     first: Settings,
 ) {
     let name = format!("audigma-job-{}", job.id);
+    let (job_t, session_t) = (Arc::clone(&job), Arc::clone(&session));
     let spawned = std::thread::Builder::new()
         .name(name)
-        .spawn(move || pump(&job, &session, backend.as_ref(), first));
-    if spawned.is_err() {
-        // The caller already marked the session busy; the job's reader sees no events, so
-        // the API layer treats a failed spawn like any start failure.
+        .spawn(move || pump(&job_t, &session_t, backend.as_ref(), first));
+    if let Err(e) = spawned {
+        // No thread will ever publish a terminal event: do it here, which also clears `busy`.
+        finish(
+            &job,
+            &session,
+            JobEvent::Failed {
+                message: format!("could not start the benchmark thread: {e}"),
+            },
+        );
     }
 }
 
