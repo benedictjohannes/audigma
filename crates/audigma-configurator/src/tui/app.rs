@@ -5,14 +5,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use audigma_settings::Settings;
 use audigma_settings::meta::{AssistKind, Catalog, Command, Field, FieldKind, UseCase};
-use audigma_settings::{Settings, SettingsError};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use serde_json::Value;
 
 use crate::assist::benchmark::{BenchmarkEvent, BenchmarkResult, Stage};
 use crate::assist::capability::{self, CapabilityFinding};
 use crate::assist::probe::ProbeReport;
+pub use crate::draft::LoadError;
 use crate::draft::{Draft, Issue};
 use crate::guided::{DiscoveryNext, Guided, Outcome, StepKind, StepView};
 use crate::writer::text::{option_text, show_value};
@@ -186,17 +187,6 @@ pub struct SaveState {
     pub outcome: Option<Result<SaveReport, String>>,
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum LoadError {
-    #[error("cannot read {path}: {source}")]
-    Read {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    #[error("{path}: {message}")]
-    Invalid { path: PathBuf, message: String },
-}
-
 pub struct App {
     pub catalog: Catalog,
     pub draft: Draft,
@@ -270,15 +260,7 @@ impl App {
     pub fn new(path: &Path, existing: Option<&str>) -> Result<Self, LoadError> {
         let catalog = Catalog::load().expect("the metadata catalog is valid");
         let draft = match existing {
-            Some(text) => Draft::from_toml_str(text).map_err(|e| LoadError::Invalid {
-                path: path.to_path_buf(),
-                message: match &e {
-                    crate::draft::DraftError::Settings(SettingsError::TomlParse(t)) => {
-                        t.to_string().trim_end().to_string()
-                    }
-                    other => other.to_string(),
-                },
-            })?,
+            Some(text) => Draft::from_file_text(path, text)?,
             None => Draft::empty(),
         };
         let folded = catalog

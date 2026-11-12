@@ -17,7 +17,7 @@ audigma-settings = { path = "../audigma-settings", features = ["meta", "schema"]
 audigma-dsp = { path = "../audigma-dsp" }
 audigma-engine = { path = "../audigma-engine" }
 audigma-format = { path = "../audigma-format" }
-audigma-io = { path = "../audigma-io" }
+audigma-io = { path = "../audigma-io", features = ["schema"] }
 schemars = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }

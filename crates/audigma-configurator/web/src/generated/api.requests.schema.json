@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "draft_edit": {
+      "$ref": "#/$defs/DraftEdit"
+    },
+    "guided_answer": {
+      "$ref": "#/$defs/GuidedAnswer"
+    },
+    "save": {
+      "$ref": "#/$defs/SaveRequest"
+    }
+  },
+  "required": [
+    "draft_edit",
+    "guided_answer",
+    "save"
+  ],
+  "$defs": {
+    "CommentLevel": {
+      "type": "string",
+      "enum": [
+        "none",
+        "brief",
+        "full"
+      ]
+    },
+    "ConfigScalar": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "number",
+          "format": "double"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "ConfigValue": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ConfigScalar"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ConfigScalar"
+          }
+        }
+      ]
+    },
+    "DraftEdit": {
+      "type": "object",
+      "properties": {
+        "set": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ConfigValue"
+          },
+          "default": {}
+        },
+        "unset": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "use_case": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UseCase"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "GuidedAnswer": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "key"
+      ]
+    },
+    "SaveRequest": {
+      "type": "object",
+      "properties": {
+        "comment_level": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CommentLevel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "only_changed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "UseCase": {
+      "type": "string",
+      "enum": [
+        "interactive-desktop",
+        "headless-appliance",
+        "offline-conversion"
+      ]
+    }
+  }
+}

@@ -1,0 +1,1355 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "draft": {
+      "$ref": "#/$defs/DraftView"
+    },
+    "error": {
+      "$ref": "#/$defs/ApiError"
+    },
+    "guided": {
+      "$ref": "#/$defs/GuidedResponse"
+    },
+    "guided_state": {
+      "$ref": "#/$defs/GuidedState"
+    },
+    "job_event": {
+      "$ref": "#/$defs/JobEvent"
+    },
+    "job_started": {
+      "$ref": "#/$defs/JobStarted"
+    },
+    "job_status": {
+      "$ref": "#/$defs/JobStatus"
+    },
+    "probe_alsa": {
+      "$ref": "#/$defs/AlsaProbeResponse"
+    },
+    "probe_pipewire": {
+      "$ref": "#/$defs/PipeWireProbeResponse"
+    },
+    "save": {
+      "$ref": "#/$defs/SaveResponse"
+    },
+    "validate": {
+      "$ref": "#/$defs/ValidateResponse"
+    }
+  },
+  "required": [
+    "draft",
+    "validate",
+    "probe_alsa",
+    "probe_pipewire",
+    "job_started",
+    "job_status",
+    "job_event",
+    "guided_state",
+    "guided",
+    "save",
+    "error"
+  ],
+  "$defs": {
+    "ActiveStreamStatus": {
+      "type": "object",
+      "properties": {
+        "buffer_size": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "channels": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "format": {
+          "type": "string"
+        },
+        "period_size": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "rate_hz": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "state",
+        "format",
+        "rate_hz",
+        "channels",
+        "period_size",
+        "buffer_size"
+      ]
+    },
+    "AlsaCardReport": {
+      "type": "object",
+      "properties": {
+        "devices": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AlsaDeviceReport"
+          }
+        },
+        "id": {
+          "type": "string"
+        },
+        "index": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "longname": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "usb_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "index",
+        "id",
+        "name",
+        "longname",
+        "devices"
+      ]
+    },
+    "AlsaDeviceReport": {
+      "type": "object",
+      "properties": {
+        "active_status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ActiveStreamStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "capabilities": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeviceCapabilities"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "card_index": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "device_index": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "device_path": {
+          "type": "string"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "is_busy": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "card_index",
+        "device_index",
+        "id",
+        "name",
+        "device_path",
+        "is_busy"
+      ]
+    },
+    "AlsaProbeReport": {
+      "type": "object",
+      "properties": {
+        "cards": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AlsaCardReport"
+          }
+        }
+      },
+      "required": [
+        "cards"
+      ]
+    },
+    "AlsaProbeResponse": {
+      "type": "object",
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "report": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlsaProbeReport"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "report",
+        "error"
+      ]
+    },
+    "ApiError": {
+      "type": "object",
+      "properties": {
+        "error": {
+          "type": "string"
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "error",
+        "path"
+      ]
+    },
+    "BenchmarkResult": {
+      "type": "object",
+      "properties": {
+        "audio_duration_sec": {
+          "type": "number",
+          "format": "double"
+        },
+        "avg_block_micros": {
+          "type": "number",
+          "format": "double"
+        },
+        "block_budget_micros": {
+          "type": "number",
+          "format": "double"
+        },
+        "block_frames": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "end_to_end_throughput_x": {
+          "type": "number",
+          "format": "double"
+        },
+        "filter": {
+          "type": "string"
+        },
+        "gates": {
+          "$ref": "#/$defs/Gates"
+        },
+        "input_rate_hz": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "p50_block_micros": {
+          "type": "number",
+          "format": "double"
+        },
+        "p999_block_micros": {
+          "type": "number",
+          "format": "double"
+        },
+        "p999_budget_percent": {
+          "type": "number",
+          "format": "double"
+        },
+        "p99_block_micros": {
+          "type": "number",
+          "format": "double"
+        },
+        "parallel_efficiency_percent": {
+          "type": "number",
+          "format": "double"
+        },
+        "sequential_throughput_x": {
+          "type": "number",
+          "format": "double"
+        },
+        "speedup_factor": {
+          "type": "number",
+          "format": "double"
+        },
+        "target_format": {
+          "type": "string"
+        },
+        "tier": {
+          "$ref": "#/$defs/Tier"
+        },
+        "worker_throughput_x": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "filter",
+        "input_rate_hz",
+        "target_format",
+        "worker_throughput_x",
+        "sequential_throughput_x",
+        "speedup_factor",
+        "parallel_efficiency_percent",
+        "tier",
+        "end_to_end_throughput_x",
+        "audio_duration_sec",
+        "block_frames",
+        "block_budget_micros",
+        "avg_block_micros",
+        "p50_block_micros",
+        "p99_block_micros",
+        "p999_block_micros",
+        "p999_budget_percent",
+        "gates"
+      ]
+    },
+    "CapabilityFinding": {
+      "type": "object",
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "severity": {
+          "$ref": "#/$defs/Severity"
+        }
+      },
+      "required": [
+        "path",
+        "severity",
+        "message"
+      ]
+    },
+    "ChoiceView": {
+      "type": "object",
+      "properties": {
+        "caution": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "disabled": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "key": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recommendation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "label",
+        "summary",
+        "description",
+        "caution",
+        "recommendation",
+        "note",
+        "disabled"
+      ]
+    },
+    "ConfigScalar": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "number",
+          "format": "double"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "ConfigValue": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ConfigScalar"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ConfigScalar"
+          }
+        }
+      ]
+    },
+    "DeviceCapabilities": {
+      "type": "object",
+      "properties": {
+        "dop": {
+          "$ref": "#/$defs/DopSupport"
+        },
+        "formats": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "max_channels": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "min_channels": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "native_dsd": {
+          "$ref": "#/$defs/NativeDsdSupport"
+        },
+        "rates_hz": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "usb_altsets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UsbAltsetInfo"
+          }
+        }
+      },
+      "required": [
+        "formats",
+        "rates_hz",
+        "min_channels",
+        "max_channels",
+        "native_dsd",
+        "dop"
+      ]
+    },
+    "DiscoveryView": {
+      "type": "object",
+      "properties": {
+        "active": {
+          "type": "boolean"
+        },
+        "progress": {
+          "type": "number",
+          "format": "double"
+        },
+        "stale": {
+          "type": "boolean"
+        },
+        "tiers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TierView"
+          }
+        }
+      },
+      "required": [
+        "tiers",
+        "progress",
+        "active",
+        "stale"
+      ]
+    },
+    "DopSupport": {
+      "type": "object",
+      "properties": {
+        "max_dop_tier": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "supported": {
+          "type": "boolean"
+        },
+        "supported_containers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "supported",
+        "supported_containers"
+      ]
+    },
+    "DraftView": {
+      "type": "object",
+      "properties": {
+        "exists": {
+          "type": "boolean"
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CapabilityFinding"
+          }
+        },
+        "guided_active": {
+          "type": "boolean"
+        },
+        "is_new": {
+          "type": "boolean"
+        },
+        "issues": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Issue"
+          }
+        },
+        "path": {
+          "type": "string"
+        },
+        "touched": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "use_case": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UseCase"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "validation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ValidationView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "values": {
+          "$ref": "#/$defs/ValueTree"
+        }
+      },
+      "required": [
+        "path",
+        "exists",
+        "is_new",
+        "use_case",
+        "guided_active",
+        "values",
+        "touched",
+        "issues",
+        "findings",
+        "validation"
+      ]
+    },
+    "Gates": {
+      "type": "object",
+      "properties": {
+        "p999": {
+          "type": "boolean"
+        },
+        "throughput": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "throughput",
+        "p999"
+      ]
+    },
+    "GuidedNext": {
+      "type": "string",
+      "enum": [
+        "step",
+        "probed",
+        "benchmark",
+        "review",
+        "form_offline"
+      ]
+    },
+    "GuidedResponse": {
+      "type": "object",
+      "properties": {
+        "benchmark_id": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "draft": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DraftView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "next": {
+          "$ref": "#/$defs/GuidedNext"
+        },
+        "state": {
+          "$ref": "#/$defs/GuidedState"
+        }
+      },
+      "required": [
+        "next",
+        "benchmark_id",
+        "state",
+        "draft"
+      ]
+    },
+    "GuidedState": {
+      "type": "object",
+      "properties": {
+        "active": {
+          "type": "boolean"
+        },
+        "can_go_back": {
+          "type": "boolean"
+        },
+        "discovery": {
+          "$ref": "#/$defs/DiscoveryView"
+        },
+        "step": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StepView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "use_case": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UseCase"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "active",
+        "step",
+        "can_go_back",
+        "use_case",
+        "discovery"
+      ]
+    },
+    "Issue": {
+      "type": "object",
+      "properties": {
+        "error": {
+          "type": "boolean"
+        },
+        "message": {
+          "type": "string"
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "message",
+        "error"
+      ]
+    },
+    "JobEvent": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "fraction": {
+              "type": "number",
+              "format": "double"
+            },
+            "stage": {
+              "$ref": "#/$defs/Stage"
+            },
+            "tier": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "progress"
+            }
+          },
+          "required": [
+            "type",
+            "stage",
+            "fraction",
+            "tier"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "discovery": {
+              "$ref": "#/$defs/DiscoveryView"
+            },
+            "type": {
+              "type": "string",
+              "const": "discovery"
+            }
+          },
+          "required": [
+            "type",
+            "discovery"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "result": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BenchmarkResult"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "finished"
+            }
+          },
+          "required": [
+            "type",
+            "result"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "failed"
+            }
+          },
+          "required": [
+            "type",
+            "message"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "cancelled"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "JobKind": {
+      "type": "string",
+      "enum": [
+        "validate",
+        "discover"
+      ]
+    },
+    "JobStarted": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "id"
+      ]
+    },
+    "JobStatus": {
+      "type": "object",
+      "properties": {
+        "done": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "kind": {
+          "$ref": "#/$defs/JobKind"
+        },
+        "last": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JobEvent"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "done",
+        "last"
+      ]
+    },
+    "NativeDsdSupport": {
+      "type": "object",
+      "properties": {
+        "dsd_raw": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "formats": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "max_dsd_tier": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_frame_rate_hz": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "supported": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "supported",
+        "formats"
+      ]
+    },
+    "PipeWireProbeReport": {
+      "type": "object",
+      "properties": {
+        "sinks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PipeWireSinkInfo"
+          }
+        }
+      },
+      "required": [
+        "sinks"
+      ]
+    },
+    "PipeWireProbeResponse": {
+      "type": "object",
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "report": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PipeWireProbeReport"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "report",
+        "error"
+      ]
+    },
+    "PipeWireSinkInfo": {
+      "type": "object",
+      "properties": {
+        "alsa_card": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "alsa_card_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "alsa_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "device_api": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "node_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "node_name",
+        "description",
+        "device_api",
+        "alsa_card",
+        "alsa_card_name",
+        "alsa_path"
+      ]
+    },
+    "SaveResponse": {
+      "type": "object",
+      "properties": {
+        "backup": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created": {
+          "type": "boolean"
+        },
+        "next": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "path": {
+          "type": "string"
+        },
+        "unchanged": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "created",
+        "unchanged",
+        "backup",
+        "next"
+      ]
+    },
+    "Severity": {
+      "type": "string",
+      "enum": [
+        "error",
+        "warning",
+        "info"
+      ]
+    },
+    "Stage": {
+      "type": "string",
+      "enum": [
+        "end_to_end",
+        "sequential",
+        "workers"
+      ]
+    },
+    "StepKind": {
+      "type": "string",
+      "enum": [
+        "choice",
+        "alsa-device",
+        "pipewire-sink",
+        "presets",
+        "discover",
+        "tiers"
+      ]
+    },
+    "StepView": {
+      "type": "object",
+      "properties": {
+        "choices": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChoiceView"
+          }
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/StepKind"
+        },
+        "number": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "problem": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "selected": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "title": {
+          "type": "string"
+        },
+        "total": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "waiting_for_probe": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "prompt",
+        "kind",
+        "choices",
+        "selected",
+        "number",
+        "total",
+        "waiting_for_probe",
+        "problem"
+      ]
+    },
+    "Tier": {
+      "type": "string",
+      "enum": [
+        "optimal",
+        "capable",
+        "constrained"
+      ]
+    },
+    "TierView": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "untested"
+            }
+          },
+          "required": [
+            "state"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "running"
+            }
+          },
+          "required": [
+            "state"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "p999_percent": {
+              "type": "number",
+              "format": "double"
+            },
+            "state": {
+              "type": "string",
+              "const": "passed"
+            },
+            "throughput_x": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "required": [
+            "state",
+            "throughput_x",
+            "p999_percent"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "p999_percent": {
+              "type": "number",
+              "format": "double"
+            },
+            "state": {
+              "type": "string",
+              "const": "failed"
+            },
+            "throughput_x": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "required": [
+            "state",
+            "throughput_x",
+            "p999_percent"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string",
+              "const": "error"
+            }
+          },
+          "required": [
+            "state",
+            "message"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "cancelled"
+            }
+          },
+          "required": [
+            "state"
+          ]
+        }
+      ],
+      "required": [
+        "key",
+        "label"
+      ]
+    },
+    "UsbAltsetInfo": {
+      "type": "object",
+      "properties": {
+        "altset": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "channels": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "dsd_raw": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "format": {
+          "type": "string"
+        },
+        "rates_hz": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        }
+      },
+      "required": [
+        "altset",
+        "format",
+        "channels",
+        "rates_hz"
+      ]
+    },
+    "UseCase": {
+      "type": "string",
+      "enum": [
+        "interactive-desktop",
+        "headless-appliance",
+        "offline-conversion"
+      ]
+    },
+    "ValidateResponse": {
+      "type": "object",
+      "properties": {
+        "findings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CapabilityFinding"
+          }
+        },
+        "issues": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Issue"
+          }
+        },
+        "ok": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ok",
+        "issues",
+        "findings"
+      ]
+    },
+    "ValidationView": {
+      "type": "object",
+      "properties": {
+        "result": {
+          "$ref": "#/$defs/BenchmarkResult"
+        },
+        "stale": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "result",
+        "stale"
+      ]
+    },
+    "ValueTree": {
+      "type": "object",
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ConfigValue"
+          },
+          {
+            "$ref": "#/$defs/ValueTree"
+          }
+        ]
+      }
+    }
+  }
+}

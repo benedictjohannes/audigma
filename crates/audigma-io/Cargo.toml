@@ -12,6 +12,8 @@ default = ["alsa", "dbus", "pipewire"]
 alsa = ["dep:alsa"]
 dbus = ["dep:zbus"]
 pipewire = ["dep:pipewire", "dep:libspa"]
+# `JsonSchema` derives for the probe reports (configurator schema pipeline).
+schema = ["dep:schemars"]
 
 [dependencies]
 audigma-dsp = { path = "../audigma-dsp" }
@@ -26,6 +28,7 @@ serde_json = { workspace = true }
 rtrb = { workspace = true }
 alsa = { workspace = true, optional = true }
 libc = { workspace = true }
+schemars = { workspace = true, optional = true }
 
 
 zbus = { workspace = true, optional = true }

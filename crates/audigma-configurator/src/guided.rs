@@ -22,7 +22,8 @@ use std::collections::BTreeMap;
 
 use audigma_settings::Settings;
 use audigma_settings::meta::{Catalog, Condition, UseCase};
-use serde::Deserialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::assist::benchmark::{BenchmarkEvent, BenchmarkResult};
@@ -36,7 +37,7 @@ const SOURCE: &str = include_str!("../guided.toml");
 pub const PSEUDO_KEYS: [&str; 3] = ["use_case", "device.native_dsd", "device.dop"];
 
 /// What kind of input a step takes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum StepKind {
     /// Static choices from the file.
@@ -110,7 +111,7 @@ impl GuidedDef {
 }
 
 /// One choice as a frontend shows it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct ChoiceView {
     pub key: String,
     pub label: String,
@@ -126,7 +127,7 @@ pub struct ChoiceView {
 }
 
 /// A step as a frontend shows it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct StepView {
     pub id: String,
     pub title: String,
@@ -166,7 +167,8 @@ pub enum DiscoveryNext {
 }
 
 /// Result of one tier in the sweep.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(tag = "state", rename_all = "snake_case")]
 pub enum TierState {
     Untested,
     Running,
@@ -178,7 +180,9 @@ pub enum TierState {
         throughput_x: f64,
         p999_percent: f64,
     },
-    Error(String),
+    Error {
+        message: String,
+    },
     Cancelled,
 }
 
@@ -457,7 +461,7 @@ impl Guided {
             } => format!(
                 "fails the gates: {throughput_x:.1}x real time, p99.9 at {p999_percent:.0}% of the block budget"
             ),
-            TierState::Error(m) => format!("not measured: {m}"),
+            TierState::Error { message: m } => format!("not measured: {m}"),
             TierState::Cancelled => "not measured (cancelled)".to_string(),
         })
     }
@@ -843,8 +847,9 @@ impl Guided {
                             return DiscoveryNext::StartBenchmark(Box::new(s));
                         }
                         None => {
-                            self.discovery.tiers[i + 1].1 =
-                                TierState::Error("cannot be applied to the draft".into());
+                            self.discovery.tiers[i + 1].1 = TierState::Error {
+                                message: "cannot be applied to the draft".into(),
+                            };
                         }
                     }
                 }
@@ -852,7 +857,7 @@ impl Guided {
                 DiscoveryNext::Finished
             }
             BenchmarkEvent::Failed(m) => {
-                self.discovery.tiers[i].1 = TierState::Error(m.clone());
+                self.discovery.tiers[i].1 = TierState::Error { message: m.clone() };
                 self.discovery.active = false;
                 DiscoveryNext::Finished
             }

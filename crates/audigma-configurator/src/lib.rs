@@ -11,6 +11,7 @@ pub mod guided;
 pub mod schema;
 #[cfg(feature = "tui")]
 pub mod tui;
+pub mod web;
 pub mod writer;
 
 pub use audigma_settings::meta;

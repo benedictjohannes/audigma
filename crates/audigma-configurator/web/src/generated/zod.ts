@@ -3,4 +3,200 @@ import { z } from "zod";
 
 export const SettingsSchema = z.object({ "gain": z.union([z.object({ "dsd_safety_margin_db": z.number().default(0.25), "overload_policy": z.enum(["mute-recover","error"]).optional(), "peak_analysis": z.enum(["single-pass","two-pass"]).optional(), "preamp_db": z.number().default(0) }).strict(), z.null()]).optional(), "input": z.union([z.object({ "allow_dsd": z.union([z.boolean(), z.null()]).optional(), "allowed_rates": z.union([z.array(z.number().int().gte(0)), z.null()]).optional(), "backend": z.union([z.literal("pipewire"), z.null()]).optional(), "channel_positions": z.union([z.array(z.string()), z.null()]).optional(), "channels": z.union([z.number().int().gte(0).lte(255), z.null()]).optional(), "dsd": z.union([z.object({ "gain_db": z.union([z.number(), z.null()]).optional(), "max_intermediate_rate_hz": z.union([z.number().int().gte(0), z.null()]).optional() }).strict(), z.null()]).optional(), "node_name": z.union([z.string(), z.null()]).optional(), "rate_hz": z.union([z.number().int().gte(0), z.null()]).optional(), "rate_mode": z.union([z.enum(["dynamic","fixed"]), z.null()]).optional(), "sample_format": z.union([z.enum(["s16le","s24le","s24_3le","s32le","f32","f64","dsd_u32_be","dsd_u32_le"]), z.null()]).optional() }).strict(), z.null()]).optional(), "logging": z.union([z.object({ "format": z.union([z.string(), z.null()]).optional(), "level": z.union([z.string(), z.null()]).optional(), "rt_report_interval_ms": z.union([z.number().int().gte(0), z.null()]).optional() }).strict(), z.null()]).optional(), "offline": z.union([z.object({ "dsf_pad_mode": z.enum(["spec-zero","dsd-silence"]).optional(), "tail_policy": z.union([z.enum(["trim-to-duration","preserve-tail"]), z.null()]).optional(), "write_report": z.union([z.boolean(), z.null()]).optional() }).strict(), z.null()]).optional(), "output": z.union([z.object({ "backend": z.union([z.enum(["pipewire","alsa"]), z.null()]).optional(), "buffer_ms": z.union([z.number().int().gte(0), z.null()]).optional(), "device": z.union([z.string(), z.null()]).optional(), "device_wait_expiry": z.union([z.enum(["exit","pause"]), z.null()]).optional(), "device_wait_ms": z.union([z.number().int(), z.null()]).optional(), "dop_sample_format": z.union([z.enum(["auto","s32le","s24le","s24_3le"]), z.null()]).optional(), "keep_audio_sink_ms": z.union([z.number().int(), z.null()]).optional(), "mixer_control": z.union([z.string(), z.null()]).optional(), "period_ms": z.union([z.number().int().gte(0), z.null()]).optional(), "reserve_device": z.union([z.boolean(), z.null()]).optional(), "target_node": z.union([z.string(), z.null()]).optional(), "transport": z.union([z.enum(["pcm","native","dop"]), z.null()]).optional(), "volume_control": z.union([z.enum(["hardware-software-fallback","software","hardware","none"]), z.null()]).optional() }).strict(), z.null()]).optional(), "resampler": z.union([z.object({ "apodization": z.union([z.literal("off"), z.literal("gentle"), z.literal(18000), z.literal(18500), z.literal(19000), z.literal(20000)]).optional(), "drift_correction": z.enum(["off","auto","on"]).optional(), "max_clock_drift_ppm": z.union([z.number().int().gte(0), z.null()]).optional(), "modulator_order": z.number().int().gte(0).lte(255).default(5), "phase": z.enum(["linear","minimum"]).optional() }).strict(), z.null()]).optional(), "runtime": z.union([z.object({ "core_selection": z.enum(["performance","efficient","os"]).optional(), "dsp_cpus": z.union([z.array(z.number().int().gte(0)), z.null()]).optional(), "dsp_threads": z.union([z.enum(["auto","inline"]), z.number().int().gte(1)]).optional(), "loop_cpu": z.union([z.number().int().gte(0), z.null()]).optional(), "realtime": z.enum(["auto","required","off"]).optional(), "realtime_priority": z.number().int().gte(0).lte(255).default(20), "smt_siblings": z.enum(["avoid","never"]).optional(), "systray": z.enum(["off","auto","required"]).optional() }).strict(), z.null()]).optional(), "schema_version": z.number().int().gte(0), "target": z.union([z.object({ "dither": z.union([z.enum(["none","tpdf"]), z.null()]).optional(), "dither_tpdf_seed": z.union([z.number().int().gte(0), z.null()]).optional(), "dsd_rate": z.union([z.enum(["dsd64","dsd128","dsd256","dsd512"]), z.null()]).optional(), "format": z.enum(["pcm","dsd"]), "pcm_rate_hz": z.union([z.number().int().gte(0), z.null()]).optional(), "rate_family": z.enum(["source","44100","48000"]).optional(), "sample_format": z.union([z.enum(["s16le","s24le","s24_3le","s32le","f32","f64","dsd_u32_be","dsd_u32_le"]), z.null()]).optional() }).strict(), z.null()]).optional() }).strict();
 
-export const MetaBundleSchema = z.object({ "assists": z.array(z.object({ "fills": z.array(z.string()).default([]), "id": z.string(), "kind": z.enum(["probe","benchmark","check","preset"]), "label": z.string(), "presets": z.array(z.object({ "key": z.string(), "label": z.string(), "summary": z.string(), "values": z.record(z.string(), z.any()) }).strict()).default([]) }).strict()), "sections": z.array(z.object({ "advanced": z.boolean().default(false), "applies_to": z.array(z.enum(["run","play","convert"])).default([]), "description": z.string().default(""), "fields": z.array(z.object({ "also_integer": z.union([z.object({ "description": z.string().default(""), "label": z.string(), "range": z.array(z.number().int()).min(2).max(2), "summary": z.string() }).strict(), z.null()]).default(null), "applies_to": z.array(z.enum(["run","play","convert"])).default([]), "assist": z.array(z.string()).default([]), "default": z.any().default(null), "default_text": z.union([z.string(), z.null()]).default(null), "description": z.string().default(""), "key": z.string(), "kind": z.enum(["value","group"]), "options": z.array(z.object({ "caution": z.union([z.string(), z.null()]).default(null), "description": z.string().default(""), "key": z.string(), "label": z.string(), "show_if": z.union([z.union([z.object({ "eq": z.any(), "key": z.string() }), z.object({ "key": z.string(), "neq": z.any() }), z.object({ "in": z.array(z.any()), "key": z.string() }), z.object({ "all": z.array(z.any()) }), z.object({ "any": z.array(z.any()) })]), z.null()]).default(null), "summary": z.string() }).strict()).default([]), "path": z.string().default("").readonly(), "range": z.union([z.array(z.number()).min(2).max(2), z.null()]).default(null), "recommended": z.object({ "headless-appliance": z.object({ "value": z.any(), "why": z.string() }).strict().optional(), "interactive-desktop": z.object({ "value": z.any(), "why": z.string() }).strict().optional(), "offline-conversion": z.object({ "value": z.any(), "why": z.string() }).strict().optional() }).strict().default({}), "required_for": z.array(z.enum(["run","play","convert"])).default([]), "required_if": z.union([z.union([z.object({ "eq": z.any(), "key": z.string() }), z.object({ "key": z.string(), "neq": z.any() }), z.object({ "in": z.array(z.any()), "key": z.string() }), z.object({ "all": z.array(z.any()) }), z.object({ "any": z.array(z.any()) })]), z.null()]).default(null), "show_if": z.union([z.union([z.object({ "eq": z.any(), "key": z.string() }), z.object({ "key": z.string(), "neq": z.any() }), z.object({ "in": z.array(z.any()), "key": z.string() }), z.object({ "all": z.array(z.any()) }), z.object({ "any": z.array(z.any()) })]), z.null()]).default(null), "summary": z.string() }).strict()), "name": z.string().default("").readonly(), "summary": z.string(), "title": z.string() })) });
+export const MetaBundleSchema = z.object({ "assists": z.array(z.object({ "fills": z.array(z.string()).default([]), "id": z.string(), "kind": z.enum(["probe","benchmark","check","preset"]), "label": z.string(), "presets": z.array(z.object({ "key": z.string(), "label": z.string(), "summary": z.string(), "values": z.record(z.string(), z.union([z.union([z.boolean(), z.number(), z.string()]), z.array(z.union([z.boolean(), z.number(), z.string()]))])) }).strict()).default([]) }).strict()), "sections": z.array(z.object({ "advanced": z.boolean().default(false), "applies_to": z.array(z.enum(["run","play","convert"])).default([]), "description": z.string().default(""), "fields": z.array(z.object({ "also_integer": z.union([z.object({ "description": z.string().default(""), "label": z.string(), "range": z.array(z.number().int()).min(2).max(2), "summary": z.string() }).strict(), z.null()]).default(null), "applies_to": z.array(z.enum(["run","play","convert"])).default([]), "assist": z.array(z.string()).default([]), "default": z.union([z.union([z.union([z.boolean(), z.number(), z.string()]), z.array(z.union([z.boolean(), z.number(), z.string()]))]), z.null()]).default(null), "default_text": z.union([z.string(), z.null()]).default(null), "description": z.string().default(""), "key": z.string(), "kind": z.enum(["value","group"]), "options": z.array(z.object({ "caution": z.union([z.string(), z.null()]).default(null), "description": z.string().default(""), "key": z.string(), "label": z.string(), "show_if": z.union([z.union([z.object({ "eq": z.union([z.union([z.boolean(), z.number(), z.string()]), z.array(z.union([z.boolean(), z.number(), z.string()]))]), "key": z.string() }), z.object({ "key": z.string(), "neq": z.union([z.union([z.boolean(), z.number(), z.string()]), z.array(z.union([z.boolean(), z.number(), z.string()]))]) }), z.object({ "in": z.array(z.union([z.union([z.boolean(), z.number(), z.string()]), z.array(z.union([z.boolean(), z.number(), z.string()]))])), "key": z.string() }), z.object({ "all": z.array(z.any()) }), z.object({ "any": z.array(z.any()) })]), z.null()]).default(null), "summary": z.string() }).strict()).default([]), "path": z.string().default("").readonly(), "range": z.union([z.array(z.number()).min(2).max(2), z.null()]).default(null), "recommended": z.object({ "headless-appliance": z.object({ "value": z.union([z.union([z.boolean(), z.number(), z.string()]), z.array(z.union([z.boolean(), z.number(), z.string()]))]), "why": z.string() }).strict().optional(), "interactive-desktop": z.object({ "value": z.union([z.union([z.boolean(), z.number(), z.string()]), z.array(z.union([z.boolean(), z.number(), z.string()]))]), "why": z.string() }).strict().optional(), "offline-conversion": z.object({ "value": z.union([z.union([z.boolean(), z.number(), z.string()]), z.array(z.union([z.boolean(), z.number(), z.string()]))]), "why": z.string() }).strict().optional() }).strict().default({}), "required_for": z.array(z.enum(["run","play","convert"])).default([]), "required_if": z.union([z.union([z.object({ "eq": z.union([z.union([z.boolean(), z.number(), z.string()]), z.array(z.union([z.boolean(), z.number(), z.string()]))]), "key": z.string() }), z.object({ "key": z.string(), "neq": z.union([z.union([z.boolean(), z.number(), z.string()]), z.array(z.union([z.boolean(), z.number(), z.string()]))]) }), z.object({ "in": z.array(z.union([z.union([z.boolean(), z.number(), z.string()]), z.array(z.union([z.boolean(), z.number(), z.string()]))])), "key": z.string() }), z.object({ "all": z.array(z.any()) }), z.object({ "any": z.array(z.any()) })]), z.null()]).default(null), "show_if": z.union([z.union([z.object({ "eq": z.union([z.union([z.boolean(), z.number(), z.string()]), z.array(z.union([z.boolean(), z.number(), z.string()]))]), "key": z.string() }), z.object({ "key": z.string(), "neq": z.union([z.union([z.boolean(), z.number(), z.string()]), z.array(z.union([z.boolean(), z.number(), z.string()]))]) }), z.object({ "in": z.array(z.union([z.union([z.boolean(), z.number(), z.string()]), z.array(z.union([z.boolean(), z.number(), z.string()]))])), "key": z.string() }), z.object({ "all": z.array(z.any()) }), z.object({ "any": z.array(z.any()) })]), z.null()]).default(null), "summary": z.string() }).strict()), "name": z.string().default("").readonly(), "summary": z.string(), "title": z.string() })) });
+
+export const ApiRequestsSchema = z.object({ "draft_edit": z.object({ "set": z.record(z.string(), z.union([z.union([z.boolean(), z.number(), z.string()]), z.array(z.union([z.boolean(), z.number(), z.string()]))])).default({}), "unset": z.array(z.string()).default([]), "use_case": z.union([z.enum(["interactive-desktop","headless-appliance","offline-conversion"]), z.null()]).default(null) }).strict(), "guided_answer": z.object({ "key": z.string() }).strict(), "save": z.object({ "comment_level": z.union([z.enum(["none","brief","full"]), z.null()]).optional(), "only_changed": z.union([z.boolean(), z.null()]).optional(), "path": z.union([z.string(), z.null()]).optional() }).strict() });
+
+export const ApiResponsesSchema = z.object({ "draft": z.object({ "exists": z.boolean(), "findings": z.array(z.object({ "message": z.string(), "path": z.string(), "severity": z.enum(["error","warning","info"]) })), "guided_active": z.boolean(), "is_new": z.boolean(), "issues": z.array(z.object({ "error": z.boolean(), "message": z.string(), "path": z.union([z.string(), z.null()]) })), "path": z.string(), "touched": z.array(z.string()), "use_case": z.union([z.enum(["interactive-desktop","headless-appliance","offline-conversion"]), z.null()]), "validation": z.union([z.object({ "result": z.object({ "audio_duration_sec": z.number(), "avg_block_micros": z.number(), "block_budget_micros": z.number(), "block_frames": z.number().int().gte(0), "end_to_end_throughput_x": z.number(), "filter": z.string(), "gates": z.object({ "p999": z.boolean(), "throughput": z.boolean() }), "input_rate_hz": z.number().int().gte(0), "p50_block_micros": z.number(), "p999_block_micros": z.number(), "p999_budget_percent": z.number(), "p99_block_micros": z.number(), "parallel_efficiency_percent": z.number(), "sequential_throughput_x": z.number(), "speedup_factor": z.number(), "target_format": z.string(), "tier": z.enum(["optimal","capable","constrained"]), "worker_throughput_x": z.number() }), "stale": z.boolean() }), z.null()]), "values": z.record(z.string(), z.union([z.union([z.union([z.boolean(), z.number(), z.string()]), z.array(z.union([z.boolean(), z.number(), z.string()]))]), z.any()])) }), "error": z.object({ "error": z.string(), "path": z.union([z.string(), z.null()]) }), "guided": z.object({ "benchmark_id": z.union([z.number().int().gte(0), z.null()]), "draft": z.union([z.object({ "exists": z.boolean(), "findings": z.array(z.object({ "message": z.string(), "path": z.string(), "severity": z.enum(["error","warning","info"]) })), "guided_active": z.boolean(), "is_new": z.boolean(), "issues": z.array(z.object({ "error": z.boolean(), "message": z.string(), "path": z.union([z.string(), z.null()]) })), "path": z.string(), "touched": z.array(z.string()), "use_case": z.union([z.enum(["interactive-desktop","headless-appliance","offline-conversion"]), z.null()]), "validation": z.union([z.object({ "result": z.object({ "audio_duration_sec": z.number(), "avg_block_micros": z.number(), "block_budget_micros": z.number(), "block_frames": z.number().int().gte(0), "end_to_end_throughput_x": z.number(), "filter": z.string(), "gates": z.object({ "p999": z.boolean(), "throughput": z.boolean() }), "input_rate_hz": z.number().int().gte(0), "p50_block_micros": z.number(), "p999_block_micros": z.number(), "p999_budget_percent": z.number(), "p99_block_micros": z.number(), "parallel_efficiency_percent": z.number(), "sequential_throughput_x": z.number(), "speedup_factor": z.number(), "target_format": z.string(), "tier": z.enum(["optimal","capable","constrained"]), "worker_throughput_x": z.number() }), "stale": z.boolean() }), z.null()]), "values": z.record(z.string(), z.union([z.union([z.union([z.boolean(), z.number(), z.string()]), z.array(z.union([z.boolean(), z.number(), z.string()]))]), z.any()])) }), z.null()]), "next": z.enum(["step","probed","benchmark","review","form_offline"]), "state": z.object({ "active": z.boolean(), "can_go_back": z.boolean(), "discovery": z.object({ "active": z.boolean(), "progress": z.number(), "stale": z.boolean(), "tiers": z.array(z.object({ "key": z.string(), "label": z.string() }).and(z.any().superRefine((x, ctx) => {
+    const schemas = [z.object({ "state": z.literal("untested") }), z.object({ "state": z.literal("running") }), z.object({ "p999_percent": z.number(), "state": z.literal("passed"), "throughput_x": z.number() }), z.object({ "p999_percent": z.number(), "state": z.literal("failed"), "throughput_x": z.number() }), z.object({ "message": z.string(), "state": z.literal("error") }), z.object({ "state": z.literal("cancelled") })];
+    const { errors, failed } = schemas.reduce<{
+      errors: z.core.$ZodIssue[];
+      failed: number;
+    }>(
+      ({ errors, failed }, schema) =>
+        ((result) =>
+          result.error
+            ? {
+                errors: [...errors, ...result.error.issues],
+                failed: failed + 1,
+              }
+            : { errors, failed })(
+          schema.safeParse(x),
+        ),
+      { errors: [], failed: 0 },
+    );
+    const passed = schemas.length - failed;
+    if (passed !== 1) {
+      ctx.addIssue(errors.length ? {
+        path: [],
+        code: "invalid_union",
+        errors: [errors],
+        message: "Invalid input: Should pass single schema. Passed " + passed,
+      } : {
+        path: [],
+        code: "custom",
+        errors: [errors],
+        message: "Invalid input: Should pass single schema. Passed " + passed,
+      });
+    }
+  }))) }), "step": z.union([z.object({ "choices": z.array(z.object({ "caution": z.union([z.string(), z.null()]), "description": z.union([z.string(), z.null()]), "disabled": z.union([z.string(), z.null()]), "key": z.string(), "label": z.string(), "note": z.union([z.string(), z.null()]), "recommendation": z.union([z.string(), z.null()]), "summary": z.string() })), "id": z.string(), "kind": z.enum(["choice","alsa-device","pipewire-sink","presets","discover","tiers"]), "number": z.number().int().gte(0), "problem": z.union([z.string(), z.null()]), "prompt": z.string(), "selected": z.number().int().gte(0), "title": z.string(), "total": z.number().int().gte(0), "waiting_for_probe": z.boolean() }), z.null()]), "use_case": z.union([z.enum(["interactive-desktop","headless-appliance","offline-conversion"]), z.null()]) }) }), "guided_state": z.object({ "active": z.boolean(), "can_go_back": z.boolean(), "discovery": z.object({ "active": z.boolean(), "progress": z.number(), "stale": z.boolean(), "tiers": z.array(z.object({ "key": z.string(), "label": z.string() }).and(z.any().superRefine((x, ctx) => {
+    const schemas = [z.object({ "state": z.literal("untested") }), z.object({ "state": z.literal("running") }), z.object({ "p999_percent": z.number(), "state": z.literal("passed"), "throughput_x": z.number() }), z.object({ "p999_percent": z.number(), "state": z.literal("failed"), "throughput_x": z.number() }), z.object({ "message": z.string(), "state": z.literal("error") }), z.object({ "state": z.literal("cancelled") })];
+    const { errors, failed } = schemas.reduce<{
+      errors: z.core.$ZodIssue[];
+      failed: number;
+    }>(
+      ({ errors, failed }, schema) =>
+        ((result) =>
+          result.error
+            ? {
+                errors: [...errors, ...result.error.issues],
+                failed: failed + 1,
+              }
+            : { errors, failed })(
+          schema.safeParse(x),
+        ),
+      { errors: [], failed: 0 },
+    );
+    const passed = schemas.length - failed;
+    if (passed !== 1) {
+      ctx.addIssue(errors.length ? {
+        path: [],
+        code: "invalid_union",
+        errors: [errors],
+        message: "Invalid input: Should pass single schema. Passed " + passed,
+      } : {
+        path: [],
+        code: "custom",
+        errors: [errors],
+        message: "Invalid input: Should pass single schema. Passed " + passed,
+      });
+    }
+  }))) }), "step": z.union([z.object({ "choices": z.array(z.object({ "caution": z.union([z.string(), z.null()]), "description": z.union([z.string(), z.null()]), "disabled": z.union([z.string(), z.null()]), "key": z.string(), "label": z.string(), "note": z.union([z.string(), z.null()]), "recommendation": z.union([z.string(), z.null()]), "summary": z.string() })), "id": z.string(), "kind": z.enum(["choice","alsa-device","pipewire-sink","presets","discover","tiers"]), "number": z.number().int().gte(0), "problem": z.union([z.string(), z.null()]), "prompt": z.string(), "selected": z.number().int().gte(0), "title": z.string(), "total": z.number().int().gte(0), "waiting_for_probe": z.boolean() }), z.null()]), "use_case": z.union([z.enum(["interactive-desktop","headless-appliance","offline-conversion"]), z.null()]) }), "job_event": z.any().superRefine((x, ctx) => {
+    const schemas = [z.object({ "fraction": z.number(), "stage": z.enum(["end_to_end","sequential","workers"]), "tier": z.union([z.string(), z.null()]), "type": z.literal("progress") }), z.object({ "discovery": z.object({ "active": z.boolean(), "progress": z.number(), "stale": z.boolean(), "tiers": z.array(z.object({ "key": z.string(), "label": z.string() }).and(z.any().superRefine((x, ctx) => {
+    const schemas = [z.object({ "state": z.literal("untested") }), z.object({ "state": z.literal("running") }), z.object({ "p999_percent": z.number(), "state": z.literal("passed"), "throughput_x": z.number() }), z.object({ "p999_percent": z.number(), "state": z.literal("failed"), "throughput_x": z.number() }), z.object({ "message": z.string(), "state": z.literal("error") }), z.object({ "state": z.literal("cancelled") })];
+    const { errors, failed } = schemas.reduce<{
+      errors: z.core.$ZodIssue[];
+      failed: number;
+    }>(
+      ({ errors, failed }, schema) =>
+        ((result) =>
+          result.error
+            ? {
+                errors: [...errors, ...result.error.issues],
+                failed: failed + 1,
+              }
+            : { errors, failed })(
+          schema.safeParse(x),
+        ),
+      { errors: [], failed: 0 },
+    );
+    const passed = schemas.length - failed;
+    if (passed !== 1) {
+      ctx.addIssue(errors.length ? {
+        path: [],
+        code: "invalid_union",
+        errors: [errors],
+        message: "Invalid input: Should pass single schema. Passed " + passed,
+      } : {
+        path: [],
+        code: "custom",
+        errors: [errors],
+        message: "Invalid input: Should pass single schema. Passed " + passed,
+      });
+    }
+  }))) }), "type": z.literal("discovery") }), z.object({ "result": z.union([z.object({ "audio_duration_sec": z.number(), "avg_block_micros": z.number(), "block_budget_micros": z.number(), "block_frames": z.number().int().gte(0), "end_to_end_throughput_x": z.number(), "filter": z.string(), "gates": z.object({ "p999": z.boolean(), "throughput": z.boolean() }), "input_rate_hz": z.number().int().gte(0), "p50_block_micros": z.number(), "p999_block_micros": z.number(), "p999_budget_percent": z.number(), "p99_block_micros": z.number(), "parallel_efficiency_percent": z.number(), "sequential_throughput_x": z.number(), "speedup_factor": z.number(), "target_format": z.string(), "tier": z.enum(["optimal","capable","constrained"]), "worker_throughput_x": z.number() }), z.null()]), "type": z.literal("finished") }), z.object({ "message": z.string(), "type": z.literal("failed") }), z.object({ "type": z.literal("cancelled") })];
+    const { errors, failed } = schemas.reduce<{
+      errors: z.core.$ZodIssue[];
+      failed: number;
+    }>(
+      ({ errors, failed }, schema) =>
+        ((result) =>
+          result.error
+            ? {
+                errors: [...errors, ...result.error.issues],
+                failed: failed + 1,
+              }
+            : { errors, failed })(
+          schema.safeParse(x),
+        ),
+      { errors: [], failed: 0 },
+    );
+    const passed = schemas.length - failed;
+    if (passed !== 1) {
+      ctx.addIssue(errors.length ? {
+        path: [],
+        code: "invalid_union",
+        errors: [errors],
+        message: "Invalid input: Should pass single schema. Passed " + passed,
+      } : {
+        path: [],
+        code: "custom",
+        errors: [errors],
+        message: "Invalid input: Should pass single schema. Passed " + passed,
+      });
+    }
+  }), "job_started": z.object({ "id": z.number().int().gte(0) }), "job_status": z.object({ "done": z.boolean(), "id": z.number().int().gte(0), "kind": z.enum(["validate","discover"]), "last": z.union([z.any().superRefine((x, ctx) => {
+    const schemas = [z.object({ "fraction": z.number(), "stage": z.enum(["end_to_end","sequential","workers"]), "tier": z.union([z.string(), z.null()]), "type": z.literal("progress") }), z.object({ "discovery": z.object({ "active": z.boolean(), "progress": z.number(), "stale": z.boolean(), "tiers": z.array(z.object({ "key": z.string(), "label": z.string() }).and(z.any().superRefine((x, ctx) => {
+    const schemas = [z.object({ "state": z.literal("untested") }), z.object({ "state": z.literal("running") }), z.object({ "p999_percent": z.number(), "state": z.literal("passed"), "throughput_x": z.number() }), z.object({ "p999_percent": z.number(), "state": z.literal("failed"), "throughput_x": z.number() }), z.object({ "message": z.string(), "state": z.literal("error") }), z.object({ "state": z.literal("cancelled") })];
+    const { errors, failed } = schemas.reduce<{
+      errors: z.core.$ZodIssue[];
+      failed: number;
+    }>(
+      ({ errors, failed }, schema) =>
+        ((result) =>
+          result.error
+            ? {
+                errors: [...errors, ...result.error.issues],
+                failed: failed + 1,
+              }
+            : { errors, failed })(
+          schema.safeParse(x),
+        ),
+      { errors: [], failed: 0 },
+    );
+    const passed = schemas.length - failed;
+    if (passed !== 1) {
+      ctx.addIssue(errors.length ? {
+        path: [],
+        code: "invalid_union",
+        errors: [errors],
+        message: "Invalid input: Should pass single schema. Passed " + passed,
+      } : {
+        path: [],
+        code: "custom",
+        errors: [errors],
+        message: "Invalid input: Should pass single schema. Passed " + passed,
+      });
+    }
+  }))) }), "type": z.literal("discovery") }), z.object({ "result": z.union([z.object({ "audio_duration_sec": z.number(), "avg_block_micros": z.number(), "block_budget_micros": z.number(), "block_frames": z.number().int().gte(0), "end_to_end_throughput_x": z.number(), "filter": z.string(), "gates": z.object({ "p999": z.boolean(), "throughput": z.boolean() }), "input_rate_hz": z.number().int().gte(0), "p50_block_micros": z.number(), "p999_block_micros": z.number(), "p999_budget_percent": z.number(), "p99_block_micros": z.number(), "parallel_efficiency_percent": z.number(), "sequential_throughput_x": z.number(), "speedup_factor": z.number(), "target_format": z.string(), "tier": z.enum(["optimal","capable","constrained"]), "worker_throughput_x": z.number() }), z.null()]), "type": z.literal("finished") }), z.object({ "message": z.string(), "type": z.literal("failed") }), z.object({ "type": z.literal("cancelled") })];
+    const { errors, failed } = schemas.reduce<{
+      errors: z.core.$ZodIssue[];
+      failed: number;
+    }>(
+      ({ errors, failed }, schema) =>
+        ((result) =>
+          result.error
+            ? {
+                errors: [...errors, ...result.error.issues],
+                failed: failed + 1,
+              }
+            : { errors, failed })(
+          schema.safeParse(x),
+        ),
+      { errors: [], failed: 0 },
+    );
+    const passed = schemas.length - failed;
+    if (passed !== 1) {
+      ctx.addIssue(errors.length ? {
+        path: [],
+        code: "invalid_union",
+        errors: [errors],
+        message: "Invalid input: Should pass single schema. Passed " + passed,
+      } : {
+        path: [],
+        code: "custom",
+        errors: [errors],
+        message: "Invalid input: Should pass single schema. Passed " + passed,
+      });
+    }
+  }), z.null()]) }), "probe_alsa": z.object({ "error": z.union([z.string(), z.null()]), "report": z.union([z.object({ "cards": z.array(z.object({ "devices": z.array(z.object({ "active_status": z.union([z.object({ "buffer_size": z.number().int().gte(0), "channels": z.number().int().gte(0), "format": z.string(), "period_size": z.number().int().gte(0), "rate_hz": z.number().int().gte(0), "state": z.string() }), z.null()]).optional(), "capabilities": z.union([z.object({ "dop": z.object({ "max_dop_tier": z.union([z.string(), z.null()]).optional(), "supported": z.boolean(), "supported_containers": z.array(z.string()) }), "formats": z.array(z.string()), "max_channels": z.number().int().gte(0), "min_channels": z.number().int().gte(0), "native_dsd": z.object({ "dsd_raw": z.union([z.string(), z.null()]).optional(), "formats": z.array(z.string()), "max_dsd_tier": z.union([z.string(), z.null()]).optional(), "max_frame_rate_hz": z.union([z.number().int().gte(0), z.null()]).optional(), "supported": z.boolean() }), "rates_hz": z.array(z.number().int().gte(0)), "usb_altsets": z.array(z.object({ "altset": z.number().int().gte(0), "channels": z.number().int().gte(0), "dsd_raw": z.union([z.string(), z.null()]).optional(), "format": z.string(), "rates_hz": z.array(z.number().int().gte(0)) })).optional() }), z.null()]).optional(), "card_index": z.number().int(), "device_index": z.number().int(), "device_path": z.string(), "error": z.union([z.string(), z.null()]).optional(), "id": z.string(), "is_busy": z.boolean(), "name": z.string() })), "id": z.string(), "index": z.number().int(), "longname": z.string(), "name": z.string(), "usb_id": z.union([z.string(), z.null()]).optional() })) }), z.null()]) }), "probe_pipewire": z.object({ "error": z.union([z.string(), z.null()]), "report": z.union([z.object({ "sinks": z.array(z.object({ "alsa_card": z.union([z.number().int().gte(0), z.null()]), "alsa_card_name": z.union([z.string(), z.null()]), "alsa_path": z.union([z.string(), z.null()]), "description": z.union([z.string(), z.null()]), "device_api": z.union([z.string(), z.null()]), "id": z.number().int().gte(0), "node_name": z.string() })) }), z.null()]) }), "save": z.object({ "backup": z.union([z.string(), z.null()]), "created": z.boolean(), "next": z.array(z.string()), "path": z.string(), "unchanged": z.boolean() }), "validate": z.object({ "findings": z.array(z.object({ "message": z.string(), "path": z.string(), "severity": z.enum(["error","warning","info"]) })), "issues": z.array(z.object({ "error": z.boolean(), "message": z.string(), "path": z.union([z.string(), z.null()]) })), "ok": z.boolean() }) });

@@ -316,7 +316,7 @@ fn draw_guided(f: &mut Frame, app: &App, area: Rect) {
                         ),
                         ERR,
                     ),
-                    T::Error(m) => ("! ", format!("not measured: {m}"), ERR),
+                    T::Error { message: m } => ("! ", format!("not measured: {m}"), ERR),
                     T::Cancelled => ("  ", "cancelled".to_string(), DIM),
                 };
                 lines.push(Line::from(vec![

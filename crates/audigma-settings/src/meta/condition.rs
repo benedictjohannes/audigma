@@ -41,15 +41,18 @@ impl Resolver for BTreeMap<String, Value> {
 pub enum Condition {
     Eq {
         key: String,
+        #[cfg_attr(feature = "schema", schemars(with = "super::ConfigValue"))]
         eq: Value,
     },
     Neq {
         key: String,
+        #[cfg_attr(feature = "schema", schemars(with = "super::ConfigValue"))]
         neq: Value,
     },
     In {
         key: String,
         #[serde(rename = "in")]
+        #[cfg_attr(feature = "schema", schemars(with = "Vec<super::ConfigValue>"))]
         values: Vec<Value>,
     },
     All {

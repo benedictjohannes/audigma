@@ -9,7 +9,18 @@ pub const WIDTH: usize = 80;
 const PREFIX: &str = "## ";
 
 /// How much commentary the writer generates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
 pub enum CommentLevel {
     /// No generated comments (existing `##` blocks are removed).
     None,

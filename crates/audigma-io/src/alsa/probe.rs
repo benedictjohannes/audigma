@@ -10,6 +10,7 @@ use std::fs;
 use std::path::Path;
 
 /// Overall report of ALSA hardware probing.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AlsaProbeReport {
     /// Discovered sound cards.
@@ -17,6 +18,7 @@ pub struct AlsaProbeReport {
 }
 
 /// Discovered sound card report.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AlsaCardReport {
     /// Card index (e.g. 0, 1, 2).
@@ -35,6 +37,7 @@ pub struct AlsaCardReport {
 }
 
 /// Discovered PCM device report.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AlsaDeviceReport {
     /// Card index.
@@ -61,6 +64,7 @@ pub struct AlsaDeviceReport {
 }
 
 /// Real-time status of an active ALSA stream (from `/proc/asound/cardX/pcmYp/sub0/status`).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ActiveStreamStatus {
     /// Stream state (e.g. "RUNNING", "PREPARED", "PAUSED").
@@ -78,6 +82,7 @@ pub struct ActiveStreamStatus {
 }
 
 /// Probed hardware capabilities of an ALSA PCM playback device.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DeviceCapabilities {
     /// Supported audio formats (e.g. ["S16_LE", "S32_LE", "DSD_U32_BE"]).
@@ -98,6 +103,7 @@ pub struct DeviceCapabilities {
 }
 
 /// Native DSD hardware capability details.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NativeDsdSupport {
     /// Whether Native DSD (DSD_U32_BE/LE, etc.) is supported.
@@ -116,6 +122,7 @@ pub struct NativeDsdSupport {
 }
 
 /// DoP (DSD over PCM v1.1) capability details.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DopSupport {
     /// Whether DoP is supported (based on 176.4k+ and 24/32-bit PCM availability).
@@ -128,6 +135,7 @@ pub struct DopSupport {
 }
 
 /// USB Audio Class altset description from `/proc/asound/cardX/stream0`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UsbAltsetInfo {
     /// USB Interface altsetting number.

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Audigma configurator</title>
+<style>
+  :root { color-scheme: light dark; --bg: #fff; --fg: #1b1b1f; --muted: #5d6068; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #16171a; --fg: #e8e8ea; --muted: #9a9ca3; } }
+  body { background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui, sans-serif; margin: 0; }
+  main { max-width: 40rem; margin: 0 auto; padding: 3rem 1rem; }
+  code { font-family: ui-monospace, monospace; }
+  p.muted { color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Audigma configurator</h1>
+  <p>The server is running and you are signed in. The web interface is not built yet; the JSON API is available now.</p>
+  <p class="muted">Try <code>/api/meta</code>, <code>/api/draft</code> and <code>/api/guided/state</code>. Use the terminal interface (<code>audigma configure</code>) to edit a configuration for now.</p>
+</main>
+</body>
+</html>

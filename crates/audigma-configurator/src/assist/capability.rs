@@ -9,10 +9,11 @@ use audigma_dsp::config::TargetFormat;
 use audigma_dsp::rates::{PcmRateHz, RateFamily};
 use audigma_io::{AlsaCardReport, AlsaDeviceReport, AlsaProbeReport};
 use audigma_settings::{OutputBackend, OutputTransport, Settings, TargetRateFamily};
+use schemars::JsonSchema;
 use serde::Serialize;
 
 /// How serious a finding is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     /// The device cannot do this at all.
@@ -24,7 +25,7 @@ pub enum Severity {
 }
 
 /// One finding, attributed to a config key like the validator's issues.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct CapabilityFinding {
     pub path: &'static str,
     pub severity: Severity,

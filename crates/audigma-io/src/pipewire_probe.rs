@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::pipewire::{AUDIGMA_NODE_PROP, AUDIGMA_SINK_PREFIX};
 
 /// One `Audio/Sink` node found in the registry.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PipeWireSinkInfo {
     /// Registry object id (changes between sessions; not usable in configuration).
@@ -31,6 +32,7 @@ pub struct PipeWireSinkInfo {
 }
 
 /// Result of a PipeWire registry probe.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PipeWireProbeReport {
     /// Sinks other than audigma's own virtual sinks, ordered by `node.name`.

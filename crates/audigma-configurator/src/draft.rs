@@ -6,7 +6,11 @@
 
 use std::collections::BTreeSet;
 
+use std::path::{Path, PathBuf};
+
 use audigma_settings::{Settings, SettingsError};
+use schemars::JsonSchema;
+use serde::Serialize;
 
 /// Failure while changing a draft.
 #[derive(Debug, thiserror::Error)]
@@ -22,13 +26,25 @@ pub enum DraftError {
 }
 
 /// A finding about the draft, attributed to a key when the settings crate knows which one.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Issue {
     /// Absolute dotted path, `None` for a finding that belongs to no single key.
     pub path: Option<String>,
     pub message: String,
     /// An error blocks saving; a warning does not.
     pub error: bool,
+}
+
+/// Failure while loading the file a draft starts from.
+#[derive(Debug, thiserror::Error)]
+pub enum LoadError {
+    #[error("cannot read {path}: {source}")]
+    Read {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("{path}: {message}")]
+    Invalid { path: PathBuf, message: String },
 }
 
 /// Settings in progress with per-key "touched" tracking.
@@ -62,6 +78,32 @@ impl Draft {
     }
 
     /// A draft from a config file's text, which must be valid as a whole; nothing touched.
+    /// Parses `text`, the contents of `path`, into a draft; the error names the file and the
+    /// field (or the TOML line and column).
+    pub fn from_file_text(path: &Path, text: &str) -> Result<Self, LoadError> {
+        Self::from_toml_str(text).map_err(|e| LoadError::Invalid {
+            path: path.to_path_buf(),
+            message: match &e {
+                DraftError::Settings(SettingsError::TomlParse(t)) => {
+                    t.to_string().trim_end().to_string()
+                }
+                other => other.to_string(),
+            },
+        })
+    }
+
+    /// Reads `path` into a draft. A missing file is a new one: `(empty draft, false)`.
+    pub fn load(path: &Path) -> Result<(Self, bool), LoadError> {
+        match std::fs::read_to_string(path) {
+            Ok(text) => Ok((Self::from_file_text(path, &text)?, true)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((Self::empty(), false)),
+            Err(source) => Err(LoadError::Read {
+                path: path.to_path_buf(),
+                source,
+            }),
+        }
+    }
+
     pub fn from_toml_str(text: &str) -> Result<Self, DraftError> {
         Ok(Self::new(Settings::from_toml_str(text)?))
     }

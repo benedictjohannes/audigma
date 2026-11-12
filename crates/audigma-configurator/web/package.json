@@ -4,11 +4,13 @@
   "type": "module",
   "scripts": {
     "gen": "bun scripts/gen.ts",
-    "test": "bun test"
+    "test": "bun test",
+    "typecheck": "tsc -p tsconfig.json"
   },
   "devDependencies": {
     "json-schema-to-typescript": "^16.0.0",
     "json-schema-to-zod": "^2.8.1",
-    "zod": "^4.6.7"
+    "zod": "^4.6.7",
+    "typescript": "^5.9.0"
   }
 }

@@ -367,6 +367,7 @@ dependencies = [
  "libspa",
  "pipewire",
  "rtrb",
+ "schemars",
  "serde",
  "serde_json",
  "tempfile",

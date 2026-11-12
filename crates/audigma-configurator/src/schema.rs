@@ -74,6 +74,16 @@ pub fn meta_schema() -> String {
     render::<MetaBundle>(SchemaSettings::draft2020_12().for_serialize())
 }
 
+/// Schema of the API's request bodies (what the server parses).
+pub fn api_requests_schema() -> String {
+    render::<crate::web::api::ApiRequests>(SchemaSettings::draft2020_12())
+}
+
+/// Schema of the API's response bodies and benchmark events (what the server produces).
+pub fn api_responses_schema() -> String {
+    render::<crate::web::api::ApiResponses>(SchemaSettings::draft2020_12().for_serialize())
+}
+
 /// Metadata as JSON, in the shape [`meta_schema`] describes.
 pub fn meta_json() -> Value {
     let catalog = audigma_settings::meta::Catalog::load().expect("embedded metadata must load");
@@ -85,5 +95,7 @@ pub fn generated_files() -> Vec<(&'static str, String)> {
     vec![
         ("settings.schema.json", settings_schema()),
         ("meta.schema.json", meta_schema()),
+        ("api.requests.schema.json", api_requests_schema()),
+        ("api.responses.schema.json", api_responses_schema()),
     ]
 }

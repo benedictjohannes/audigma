@@ -79,7 +79,9 @@
         },
         "values": {
           "type": "object",
-          "additionalProperties": true
+          "additionalProperties": {
+            "$ref": "#/$defs/ConfigValue"
+          }
         }
       },
       "additionalProperties": false,
@@ -103,7 +105,9 @@
         {
           "type": "object",
           "properties": {
-            "eq": true,
+            "eq": {
+              "$ref": "#/$defs/ConfigValue"
+            },
             "key": {
               "type": "string"
             }
@@ -119,7 +123,9 @@
             "key": {
               "type": "string"
             },
-            "neq": true
+            "neq": {
+              "$ref": "#/$defs/ConfigValue"
+            }
           },
           "required": [
             "key",
@@ -131,7 +137,9 @@
           "properties": {
             "in": {
               "type": "array",
-              "items": true
+              "items": {
+                "$ref": "#/$defs/ConfigValue"
+              }
             },
             "key": {
               "type": "string"
@@ -172,6 +180,33 @@
         }
       ]
     },
+    "ConfigScalar": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "number",
+          "format": "double"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "ConfigValue": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ConfigScalar"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ConfigScalar"
+          }
+        }
+      ]
+    },
     "Field": {
       "type": "object",
       "properties": {
@@ -201,6 +236,14 @@
           }
         },
         "default": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConfigValue"
+            },
+            {
+              "type": "null"
+            }
+          ],
           "default": null
         },
         "default_text": {
@@ -401,7 +444,9 @@
     "Recommendation": {
       "type": "object",
       "properties": {
-        "value": true,
+        "value": {
+          "$ref": "#/$defs/ConfigValue"
+        },
         "why": {
           "type": "string"
         }

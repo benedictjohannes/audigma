@@ -101,11 +101,36 @@ pub enum FieldKind {
     Group,
 }
 
+/// A string, a number or a boolean.
+#[cfg(feature = "schema")]
+#[derive(schemars::JsonSchema)]
+#[serde(untagged)]
+#[allow(dead_code)]
+pub enum ConfigScalar {
+    Bool(bool),
+    Number(f64),
+    String(String),
+}
+
+/// The shape of every literal the metadata carries (defaults, recommendations, preset values,
+/// condition operands) and of every value a draft holds: a scalar, or a list of scalars (for
+/// example `input.allowed_rates`). Only the schema uses this type; the structs hold
+/// `serde_json::Value`, and a catalog test checks that every literal has this shape.
+#[cfg(feature = "schema")]
+#[derive(schemars::JsonSchema)]
+#[serde(untagged)]
+#[allow(dead_code)]
+pub enum ConfigValue {
+    Scalar(ConfigScalar),
+    List(Vec<ConfigScalar>),
+}
+
 /// A recommended value for one use case.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Recommendation {
+    #[cfg_attr(feature = "schema", schemars(with = "ConfigValue"))]
     pub value: Value,
     pub why: String,
 }
@@ -161,6 +186,7 @@ pub struct Field {
     pub description: String,
     /// Default value when it is a plain value.
     #[serde(default)]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<ConfigValue>"))]
     pub default: Option<Value>,
     /// Human description of the default when it is computed or context-dependent.
     #[serde(default)]
@@ -219,6 +245,10 @@ pub struct AssistPreset {
     pub label: String,
     pub summary: String,
     /// Absolute path -> value to set.
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "std::collections::BTreeMap<String, ConfigValue>")
+    )]
     pub values: BTreeMap<KeyPath, Value>,
 }
 
@@ -883,6 +913,41 @@ mod tests {
         let q = c.assist("quality-starting-point").unwrap();
         let names: Vec<_> = q.presets.iter().map(|p| p.key.as_str()).collect();
         assert_eq!(names, ["neutral", "apodizing", "low-latency"]);
+    }
+
+    /// The generated schema types every literal as a scalar or a list of scalars
+    /// (`ConfigValue`); this keeps the data honest.
+    #[test]
+    fn every_literal_in_the_metadata_is_a_scalar_or_list() {
+        fn scalar(v: &serde_json::Value) -> bool {
+            let one = |x: &serde_json::Value| x.is_string() || x.is_number() || x.is_boolean();
+            one(v) || v.as_array().is_some_and(|a| a.iter().all(one))
+        }
+        let c = catalog();
+        for f in c.fields() {
+            if let Some(d) = &f.default {
+                assert!(scalar(d), "{}: default {d}", f.path);
+            }
+            for (u, r) in &f.recommended {
+                assert!(scalar(&r.value), "{}: recommendation for {u:?}", f.path);
+            }
+            for cond in f.show_if.iter().chain(f.required_if.iter()) {
+                for (key, values) in cond.comparisons() {
+                    assert!(
+                        values.iter().all(|v| scalar(v)),
+                        "{}: condition on {key}",
+                        f.path
+                    );
+                }
+            }
+        }
+        for a in c.assists() {
+            for p in &a.presets {
+                for (k, v) in &p.values {
+                    assert!(scalar(v), "{}: preset {} sets {k} to {v}", a.id, p.key);
+                }
+            }
+        }
     }
 
     #[test]

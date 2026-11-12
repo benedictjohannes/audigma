@@ -24,6 +24,7 @@ use audigma_engine::{ChannelWorkerPool, MockAudioInput, OfflinePipeline, TargetD
 use audigma_format::AudioStreamInfo;
 use audigma_format::decoder::AudioDecoder;
 use audigma_settings::Settings;
+use schemars::JsonSchema;
 use serde::Serialize;
 use std::f64::consts::PI;
 use std::fmt::Display;
@@ -83,7 +84,7 @@ impl Default for BenchmarkParams {
 }
 
 /// The three measurement stages, in order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Stage {
     EndToEnd,
@@ -117,7 +118,7 @@ fn fail<E: Display>(e: E) -> BenchmarkError {
 }
 
 /// Realtime tier by worker-pool throughput.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Tier {
     /// At least [`GATE_THROUGHPUT_X`] times real time.
@@ -129,7 +130,7 @@ pub enum Tier {
 }
 
 /// Pass/fail against the two gates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Gates {
     pub throughput: bool,
     pub p999: bool,
@@ -149,7 +150,7 @@ impl Gates {
 }
 
 /// One benchmark's measurements. An estimate; see the module docs.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct BenchmarkResult {
     pub filter: String,
     pub input_rate_hz: u32,
