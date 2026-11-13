@@ -3065,7 +3065,10 @@ phase = "minimum"
         for section in ["input", "output"] {
             for bad in ["256", "301", "2048", "-512", r#""512""#] {
                 let result = parse(section, bad);
-                assert!(result.is_err(), "{section}.quantum_frames = {bad} must fail");
+                assert!(
+                    result.is_err(),
+                    "{section}.quantum_frames = {bad} must fail"
+                );
             }
         }
         let input = |v| parse("input", v).unwrap().input.unwrap().quantum_frames();
@@ -3074,7 +3077,10 @@ phase = "minimum"
         assert_eq!(input("1024"), QuantumFrames::Frames1024);
         assert_eq!(output("512"), QuantumFrames::Frames512);
         assert_eq!(output("1024"), QuantumFrames::Frames1024);
-        assert_eq!(InputConfig::default().quantum_frames(), QuantumFrames::Frames512);
+        assert_eq!(
+            InputConfig::default().quantum_frames(),
+            QuantumFrames::Frames512
+        );
     }
 
     #[test]

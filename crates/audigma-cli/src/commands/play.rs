@@ -399,7 +399,9 @@ fn play_pipewire(
         2,
         buffer_ms,
         out_cfg
-            .map_or(audigma_settings::QuantumFrames::Frames1024, |o| o.quantum_frames())
+            .map_or(audigma_settings::QuantumFrames::Frames1024, |o| {
+                o.quantum_frames()
+            })
             .frames(),
         Some(placement.pipewire()),
     )
@@ -429,7 +431,9 @@ fn play_pipewire(
     }
 
     let report = pipeline.run(&mut *input, Box::new(&mut pw_out))?;
-    pw_out.drain(std::time::Duration::from_millis(2000 + u64::from(buffer_ms)));
+    pw_out.drain(std::time::Duration::from_millis(
+        2000 + u64::from(buffer_ms),
+    ));
     let xruns = pw_out.xrun_count();
 
     if args.json {

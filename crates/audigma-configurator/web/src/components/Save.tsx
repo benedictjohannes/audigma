@@ -40,7 +40,7 @@ function Diff({ before, after }: { before: string; after: string }) {
         <span className="text-success">+{s.added}</span>{" "}
         <span className="text-danger">−{s.removed}</span> lines against the existing file
       </p>
-      <pre className="max-h-[28rem] overflow-auto rounded-ant border border-line-soft bg-code py-1 font-mono">
+      <pre className="max-h-112 overflow-auto rounded-ant border border-line-soft bg-code py-1 font-mono">
         {keyed(d, (l) => `${l.kind}:${l.text}`).map(({ key, item: l }) => (
           <div
             key={key}
@@ -211,7 +211,7 @@ export function SavePage(p: {
           <Diff before={pv.existing} after={pv.text} />
         )}
         {pv && !pv.exists && (
-          <pre className="max-h-[28rem] overflow-auto rounded-ant border border-line-soft bg-code p-3 font-mono whitespace-pre-wrap">
+          <pre className="max-h-112 overflow-auto rounded-ant border border-line-soft bg-code p-3 font-mono whitespace-pre-wrap">
             {pv.text}
           </pre>
         )}

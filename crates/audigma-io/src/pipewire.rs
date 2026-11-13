@@ -1101,7 +1101,7 @@ impl PipeWireVirtualSink {
                                         capture_units_cb.store(units, Ordering::Release);
                                         buffered_units_cb.fetch_add(units, Ordering::Relaxed);
                                         if producer.push(chunk).is_err() {
-                                            let _ = buffered_units_cb.fetch_update(
+                                            let _ = buffered_units_cb.try_update(
                                                 Ordering::Relaxed,
                                                 Ordering::Relaxed,
                                                 |cur| Some(cur.saturating_sub(units)),
@@ -1171,7 +1171,7 @@ impl PipeWireVirtualSink {
                                                 buffered_units_cb
                                                     .fetch_add(units, Ordering::Relaxed);
                                                 if producer.push(chunk).is_err() {
-                                                    let _ = buffered_units_cb.fetch_update(
+                                                    let _ = buffered_units_cb.try_update(
                                                         Ordering::Relaxed,
                                                         Ordering::Relaxed,
                                                         |cur| Some(cur.saturating_sub(units)),
@@ -1234,7 +1234,7 @@ impl PipeWireVirtualSink {
                                         capture_units_cb.store(units, Ordering::Release);
                                         buffered_units_cb.fetch_add(units, Ordering::Relaxed);
                                         if producer.push(chunk).is_err() {
-                                            let _ = buffered_units_cb.fetch_update(
+                                            let _ = buffered_units_cb.try_update(
                                                 Ordering::Relaxed,
                                                 Ordering::Relaxed,
                                                 |cur| Some(cur.saturating_sub(units)),
@@ -1272,7 +1272,7 @@ impl PipeWireVirtualSink {
                                                 buffered_units_cb
                                                     .fetch_add(units, Ordering::Relaxed);
                                                 if producer.push(chunk).is_err() {
-                                                    let _ = buffered_units_cb.fetch_update(
+                                                    let _ = buffered_units_cb.try_update(
                                                         Ordering::Relaxed,
                                                         Ordering::Relaxed,
                                                         |cur| Some(cur.saturating_sub(units)),
@@ -1499,7 +1499,7 @@ impl PipeWireVirtualSink {
         if units > 0 {
             let _ = self
                 .buffered_units
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
                     Some(cur.saturating_sub(units))
                 });
         }
