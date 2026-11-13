@@ -10,7 +10,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 TMP_DIR = REPO_ROOT / "tools" / "measure" / ".tmp_data"
 REPORT_DIR = REPO_ROOT / "docs" / "measurements"
-INDEX_PATH = REPORT_DIR / "report.md"
+INDEX_PATH = REPORT_DIR / "README.md"
 
 # Add tools/design to sys.path so design scripts and dsm_analysis import directly.
 sys.path.insert(0, str(REPO_ROOT / "tools" / "design"))

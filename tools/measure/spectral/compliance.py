@@ -15,10 +15,10 @@ def filter_goal(cascade_filters_res):
     return rej, ripple_off, rej >= IMAGE_REJECTION_MIN_DB and ripple_off <= FILTER_PASSBAND_DEV_DB
 
 
-def render(env_info, direct_results, stability_results, bench_stats, cascade_filters_res, failed_so_far, stability_ok):
+def render(env_info, direct_results, stability_results, cascade_filters_res, failed_so_far, stability_ok):
     """Returns (markdown, failed_checks) for the invariant table and the conclusion.
 
-    `bench_stats` is None when the benchmark never ran. `failed_so_far` are the failures raised by the family reports.
+    `failed_so_far` are the failures raised by the family reports.
     """
     failed_checks = list(failed_so_far)
 
@@ -60,14 +60,6 @@ def render(env_info, direct_results, stability_results, bench_stats, cascade_fil
         ("DSD Silence Byte Invariant", "`Design.md §1.3`", silence_val_str, silence_byte_compliant),
         ("Hardware FTZ/DAZ", "`Design.md §4.1`", env_info["ftz_daz_status"], env_info["ftz_daz_active"] is True),
     ]
-    if bench_stats:
-        min_tp, max_tp, max_p = bench_stats["min_tp"], bench_stats["max_tp"], bench_stats["max_p999_budget"]
-        rows.append(("Real-Time Throughput", "`Design.md §8.5`", f">= 2.0x sustained real-time throughput (Measured: {min_tp:.2f}x to {max_tp:.2f}x)", min_tp >= 2.0))
-        rows.append(("p99.9 Deadline Budget", "`Design.md §8.5`", f"<= 70% of audio block duration (Measured peak: {max_p:.1f}%)", max_p <= 70.0))
-        if min_tp < 2.0:
-            failed_checks.append("Real-time throughput goal")
-        if max_p > 70.0:
-            failed_checks.append("p99.9 deadline budget goal")
     text = """
 ## Invariants & Compliance Audit
 
@@ -76,8 +68,6 @@ def render(env_info, direct_results, stability_results, bench_stats, cascade_fil
 """
     for name, ref, val, ok in rows:
         text += f"| **{name}** | {ref} | {val} | {'Compliant' if ok else '**Non-Compliant**'} |\n"
-    if not bench_stats:
-        text += "| **Real-Time Throughput / p99.9 Budget** | `Design.md §8.5` | Benchmark never run (see [benchmark.md](benchmark.md)) | — |\n"
     text += "\n## Conclusion\n\n"
     n_ok = sum(bool(r[3]) for r in rows)
     text += (

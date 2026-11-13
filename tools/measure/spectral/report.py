@@ -1,6 +1,4 @@
-"""Report files: one markdown file per measurement family plus the index (report.md)."""
-
-from datetime import datetime, timezone
+"""Report files: one markdown file per measurement family plus the index (README.md)."""
 
 from .common import INDEX_PATH, REPORT_DIR, unnumber
 
@@ -9,57 +7,37 @@ FAMILIES = {
     "cascade": ("Cascade", "Half-band interpolation cascade as implemented (impulse response, tones) and cascade + modulator end to end."),
     "resampler": ("Resampler", "Polyphase rational SRC (44.1k <-> 48k families) and ASRC (clock-drift tracking)."),
     "signal": ("Signal", "Production DSD chain (gain L - M, DC blocker, cascade, dithered modulator): quality tiers, level sweep, dither, DC, IMD, ultrasonic noise, rate families."),
-    "benchmark": ("Benchmark", "CPU throughput and real-time deadline budget (pinned like a runtime DSP worker)."),
 }
 
 
-def now_str():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
-
-
-def family_header(key, env_info, extra="", generated=None):
+def family_header(key, extra=""):
     title = FAMILIES[key][0]
     return f"""# audigma — {title} Measurements
 
-> **Generated:** `{generated or now_str()}`  
-> **Evaluated on:** `{env_info['cpu']}` running `{env_info['os']}`  
-> **Rust compiler:** `{env_info['rustc']}`  
-> **Hardware FTZ/DAZ:** `{env_info['ftz_daz_status']}`  
+> **Specification:** `Design.md §4` and `§8`.  
 > **Harness:** `crates/audigma-measurements` (`measure_harness`), analysed by `tools/measure/measure_spectral.py`.  
-{extra}> **Index:** [report.md](report.md)
+{extra}> **Index:** [README.md](README.md)
 
 {FAMILIES[key][1]}
 """
 
 
-def write_family(key, env_info, sections, extra="", preamble="", generated=None):
-    """Writes docs/measurements/<key>.md from rendered Sections; returns the path.
-
-    `generated` overrides the header timestamp (the benchmark report carries the time of its last run, so
-    re-rendering it without re-running changes nothing)."""
+def write_family(key, sections, extra="", preamble=""):
+    """Writes docs/measurements/<key>.md from rendered Sections; returns the path."""
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     path = REPORT_DIR / f"{key}.md"
-    text = family_header(key, env_info, extra, generated) + preamble + "".join(unnumber(s.text) for s in sections)
+    text = family_header(key, extra) + preamble + "".join(unnumber(s.text) for s in sections)
     path.write_text(text)
     return path
 
 
-def write_index(env_info, headlines, compliance_text, bench_stats):
-    bench_line = (
-        f"last run `{bench_stats['measured_at']}`, placement `{bench_stats['placement']}`"
-        if bench_stats
-        else "never run"
-    )
+def write_index(headlines, compliance_text):
     rows = "".join(
         f"| [{FAMILIES[k][0]}]({k}.md) | {FAMILIES[k][1]} | {headlines[k]} |\n" for k in FAMILIES
     )
     text = f"""# audigma — DSP Quality Report
 
 > **Authoritative specification:** `Design.md §4` and `§8`.  
-> **Generated:** `{now_str()}` on `{env_info['cpu']}` running `{env_info['os']}`  
-> **Rust compiler:** `{env_info['rustc']}`  
-> **Hardware FTZ/DAZ:** `{env_info['ftz_daz_status']}`  
-> **Benchmark:** {bench_line}  
 > **Harness:** `crates/audigma-measurements` (`measure_harness`) analysed by `tools/measure/measure_spectral.py`.
 
 This index lists the per-family reports and the invariant check. Filter and resampler quality figures are reported

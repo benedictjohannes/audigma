@@ -9,6 +9,10 @@ use std::io::Write;
 use std::time::Instant;
 
 mod linear_modes;
+mod pipeline_benchmark;
+
+/// Timed blocks per `benchmark` configuration unless `--blocks` says otherwise.
+const DEFAULT_BENCH_BLOCKS: usize = 20_000;
 
 use audigma_dsp::{
     Apodization, DC_BLOCKER_CORNER_HZ, DcBlocker, DitherType, DsdBitRateHz, FilterPhase,
@@ -38,6 +42,8 @@ struct HarnessConfig {
     seed: u64,
     /// `chain`: production DC blocker ahead of the cascade (`--dc-blocker on|off`, default on).
     dc_blocker: bool,
+    /// `benchmark`: timed blocks per configuration (`--blocks`).
+    bench_blocks: usize,
 }
 
 fn parse_args() -> HarnessConfig {
@@ -59,6 +65,7 @@ fn parse_args() -> HarnessConfig {
         margin_db: None,
         seed: 12345,
         dc_blocker: true,
+        bench_blocks: DEFAULT_BENCH_BLOCKS,
     };
 
     let mut i = 1;
@@ -153,6 +160,11 @@ fn parse_args() -> HarnessConfig {
             "--seed" => {
                 i += 1;
                 config.seed = args[i].parse().expect("Invalid seed");
+            }
+            "--blocks" => {
+                i += 1;
+                config.bench_blocks = args[i].parse().expect("Invalid blocks");
+                assert!(config.bench_blocks > 0, "--blocks must be positive");
             }
             other => panic!("Unknown argument: {other}"),
         }
@@ -277,6 +289,10 @@ fn main() {
     }
 
     if linear_modes::dispatch(&raw_args) {
+        return;
+    }
+
+    if pipeline_benchmark::dispatch(&raw_args) {
         return;
     }
 
@@ -1033,14 +1049,19 @@ fn run_benchmark(
     pin_desc: &str,
 ) {
     let multiplier = 1usize << cascade_stages;
-    let tile_baseband: usize = if multiplier >= 512 { 32 } else { 64 };
+    // The production tile, executed as the worker does: in subtiles that keep the expanded PCM
+    // cache-hot (`DSD_SUBTILE_SAMPLES` in `audigma-engine/src/worker.rs`).
+    const DSD_SUBTILE_SAMPLES: usize = 16_384;
+    let tile_baseband = pipeline_benchmark::TILE_BASEBAND_FRAMES;
+    let subtile_baseband = tile_baseband.min((DSD_SUBTILE_SAMPLES / multiplier).max(1));
     let tile_expanded = tile_baseband * multiplier;
+    let subtile_expanded = subtile_baseband * multiplier;
 
     let mut cascade = HalfBandCascade::new(
         config.phase,
         config.apodization,
         cascade_stages,
-        tile_baseband,
+        subtile_baseband,
     );
     let mut bb_scratch = vec![0.0f64; tile_baseband];
     let mut exp_scratch = vec![0.0f64; tile_expanded];
@@ -1053,25 +1074,30 @@ fn run_benchmark(
         *s = amp * (2.0 * PI * 1000.0 * t).sin();
     }
 
+    let mut process_tile = |modulator: &mut Modulator| {
+        for ((bb, exp), bytes) in bb_scratch
+            .chunks(subtile_baseband)
+            .zip(exp_scratch.chunks_mut(subtile_expanded))
+            .zip(out_tile_bytes.chunks_mut(subtile_expanded / 8))
+        {
+            cascade.process_tile(bb, exp).unwrap();
+            modulator.process_tile_bytes(exp, bytes).unwrap();
+        }
+    };
+
     // Warm up cache and pipelines
     for _ in 0..100 {
-        cascade.process_tile(&bb_scratch, &mut exp_scratch).unwrap();
-        modulator
-            .process_tile_bytes(&exp_scratch, &mut out_tile_bytes)
-            .unwrap();
+        process_tile(modulator);
     }
 
-    // 20k samples: p99.9 is then the 20th-worst block, not the 2nd-worst.
-    const BENCH_BLOCKS: usize = 20_000;
-    let mut block_times_ns = Vec::with_capacity(BENCH_BLOCKS);
+    // 20k blocks by default: p99.9 is then the 20th-worst block, not the 2nd-worst.
+    let bench_blocks = config.bench_blocks;
+    let mut block_times_ns = Vec::with_capacity(bench_blocks);
 
     let total_start = Instant::now();
-    for _ in 0..BENCH_BLOCKS {
+    for _ in 0..bench_blocks {
         let block_start = Instant::now();
-        cascade.process_tile(&bb_scratch, &mut exp_scratch).unwrap();
-        modulator
-            .process_tile_bytes(&exp_scratch, &mut out_tile_bytes)
-            .unwrap();
+        process_tile(modulator);
         block_times_ns.push(block_start.elapsed().as_nanos() as u64);
     }
     let total_elapsed = total_start.elapsed();
@@ -1079,15 +1105,15 @@ fn run_benchmark(
     block_times_ns.sort_unstable();
     let min_ns = block_times_ns[0];
     let max_ns = *block_times_ns.last().unwrap();
-    let p50_ns = block_times_ns[BENCH_BLOCKS * 50 / 100];
-    let p90_ns = block_times_ns[BENCH_BLOCKS * 90 / 100];
-    let p99_ns = block_times_ns[BENCH_BLOCKS * 99 / 100];
-    let p999_ns = block_times_ns[BENCH_BLOCKS * 999 / 1000];
-    let avg_ns = block_times_ns.iter().sum::<u64>() / BENCH_BLOCKS as u64;
+    let p50_ns = block_times_ns[bench_blocks * 50 / 100];
+    let p90_ns = block_times_ns[bench_blocks * 90 / 100];
+    let p99_ns = block_times_ns[bench_blocks * 99 / 100];
+    let p999_ns = block_times_ns[bench_blocks * 999 / 1000];
+    let avg_ns = block_times_ns.iter().sum::<u64>() / bench_blocks as u64;
 
     let audio_block_duration_sec = tile_baseband as f64 / baseband_fs as f64;
     let audio_block_duration_micros = audio_block_duration_sec * 1_000_000.0;
-    let total_audio_duration_sec = BENCH_BLOCKS as f64 * audio_block_duration_sec;
+    let total_audio_duration_sec = bench_blocks as f64 * audio_block_duration_sec;
     let throughput_x_realtime = total_audio_duration_sec / total_elapsed.as_secs_f64();
     let p999_percent_of_budget = ((p999_ns as f64 / 1_000.0) / audio_block_duration_micros) * 100.0;
 
@@ -1116,7 +1142,7 @@ fn run_benchmark(
             config.rate,
             config.order,
             config.apodization,
-            BENCH_BLOCKS,
+            bench_blocks,
             tile_baseband,
             audio_block_duration_micros,
             throughput_x_realtime,

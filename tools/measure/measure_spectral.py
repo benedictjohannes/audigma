@@ -8,7 +8,7 @@
 # ///
 """Spectral verification and measurement harness for audigma-dsp (Design.md §8).
 
-Writes one report per measurement family to docs/measurements/ plus an index (report.md):
+Writes one report per measurement family to docs/measurements/ plus an index (README.md):
 
 - modulator.md: windowed coherent-FFT verification of the CRFB modulators against the synthesis oracle
   (tools/design/design_crfb.py, tools/design/dsm_analysis.py) and the stability envelope.
@@ -18,15 +18,9 @@ Writes one report per measurement family to docs/measurements/ plus an index (re
 - signal.md: the production DSD chain (gain L - M, DC blocker, cascade, dithered modulator) with signal-dependent stimuli:
   level sweep, dither on/off, DC blocker on/off, two-tone IMD, ultrasonic noise, 44.1k vs 48k family; the quality tiers
   (Design.md §8.6).
-- benchmark.md: CPU throughput and deadline budget. Part of a default run; it needs a quiet machine, so coordinate
-  with the user (AGENTS.md) or pass --skip-benchmark (the report is then re-rendered from the last results kept in
-  docs/measurements/benchmark.json).
-
 Usage:
-    uv run tools/measure/measure_spectral.py                       # everything, including the benchmark + index
-    uv run tools/measure/measure_spectral.py --skip-benchmark      # spectral families + index, benchmark not run
+    uv run tools/measure/measure_spectral.py                       # all spectral families + index
     uv run tools/measure/measure_spectral.py --only resampler      # one family; the index is not updated
-    uv run tools/measure/measure_spectral.py --only benchmark      # only the benchmark
 
 Layout: this file only orchestrates; each family lives in tools/measure/spectral/ (modules with run() for measurement
 and render() for markdown). Always use `uv run` (scipy is required).
@@ -37,9 +31,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "design"))
 
 from spectral import (  # noqa: E402
-    bench,
     cascade,
     cascade_filters,
     compliance,
@@ -59,13 +53,9 @@ SPECTRAL_FAMILIES = ["modulator", "cascade", "resampler", "signal"]
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--only", nargs="+", choices=SPECTRAL_FAMILIES + ["benchmark"], help="run only these families")
-    ap.add_argument("--skip-benchmark", action="store_true", help="do not run the CPU benchmark (the saved results are reused)")
+    ap.add_argument("--only", nargs="+", choices=SPECTRAL_FAMILIES, help="run only these families")
     args = ap.parse_args()
-    families = set(args.only or SPECTRAL_FAMILIES + ["benchmark"])
-    if args.skip_benchmark:
-        families.discard("benchmark")
-    run_bench = "benchmark" in families
+    families = set(args.only or SPECTRAL_FAMILIES)
     full = set(SPECTRAL_FAMILIES) <= families
 
     harness_bin = ensure_harness_binary()
@@ -93,7 +83,7 @@ def main():
         d_sec, s_sec = direct.render(direct_results), stability.render(stability_results)
         stability_ok = not s_sec.failures
         matrix = summary.matrix(direct_results, oracle_results, stability_results)
-        report.write_family("modulator", env_info, [d_sec, s_sec], preamble=f"\n## Modulator Architecture & Selection Matrix\n\n{matrix}\n")
+        report.write_family("modulator", [d_sec, s_sec], preamble=f"\n## Modulator Architecture & Selection Matrix\n\n{matrix}\n")
         failures["modulator"] = d_sec.failures + s_sec.failures
         results["modulator"] = (direct_results, stability_results)
         d64_5 = next(r for r in direct_results[5] if r["rate"] == "DSD64")
@@ -107,7 +97,7 @@ def main():
         filt = cascade_filters.run(harness_bin, design)
         casc = cascade.run(harness_bin, oracle_results)
         f_sec, c_sec = cascade_filters.render(filt), cascade.render(casc)
-        report.write_family("cascade", env_info, [f_sec, c_sec])
+        report.write_family("cascade", [f_sec, c_sec])
         failures["cascade"] = f_sec.failures + c_sec.failures
         results["cascade"] = filt
         imp = filt["impulse"]
@@ -119,7 +109,7 @@ def main():
     if "resampler" in families or full:
         res = resampler.run(harness_bin)
         r_sec = resampler.render(res)
-        report.write_family("resampler", env_info, [r_sec])
+        report.write_family("resampler", [r_sec])
         failures["resampler"] = r_sec.failures
         up = next(c for c in res["rational"] if c["label"] == "44.1k -> 48k" and c["mult"] == 1)
         down = next(c for c in res["rational"] if c["label"] == "48k -> 44.1k" and c["mult"] == 1)
@@ -138,7 +128,7 @@ def main():
     if "signal" in families or full:
         sig = signal.run(harness_bin, oracle_results)
         sig_sec = signal.render(sig)
-        report.write_family("signal", env_info, [sig_sec])
+        report.write_family("signal", [sig_sec])
         failures["signal"] = sig_sec.failures
         r = sig["rows"]
         dr = {o: -r[(o, "dsd64", "1k_-60", "tpdf", signal.PRODUCTION_MARGIN_DB)]["thdn_a_db"] for o in (5, 7)}
@@ -148,37 +138,17 @@ def main():
             f"DSD64 5th order (DR (A)); {len(failures['signal'])} failing check(s)"
         )
 
-    bench_results, bench_stats = bench.load()
-    if run_bench:
-        print("\n!! Running the CPU benchmark: the machine must be quiet (AGENTS.md). !!")
-        bench_results = bench.run(harness_bin)
-        bench_stats = bench.stats(bench_results)
-        bench.save(bench_results, bench_stats)
-    if bench_results:
-        b_sec = bench.render(bench_results, bench_stats)
-        report.write_family(
-            "benchmark", env_info, [b_sec],
-            extra=f"> **Benchmark placement:** `{bench_stats['placement']}` (measured `{bench_stats['measured_at']}`)  \n",
-            generated=bench_stats["measured_at"],
-        )
-        failures["benchmark"] = b_sec.failures
-        headlines["benchmark"] = (
-            f"{bench_stats['min_tp']:.1f}x to {bench_stats['max_tp']:.1f}x real-time; p99.9 up to {bench_stats['max_p999_budget']:.1f}% of budget "
-            f"(last run {bench_stats['measured_at']})"
-        )
-    else:
-        headlines["benchmark"] = "never run (run without --skip-benchmark on a quiet machine)"
-
+    # Benchmark orchestration moved to tools/benchmark/benchmark.py
     if full:
         direct_results, stability_results = results["modulator"]
         text, all_failed = compliance.render(
-            env_info, direct_results, stability_results, bench_stats, results["cascade"],
+            env_info, direct_results, stability_results, results["cascade"],
             [f for fam in failures.values() for f in fam], stability_ok,
         )
-        path = report.write_index(env_info, headlines, text, bench_stats)
+        path = report.write_index(headlines, text)
         print(f"\nWrote {path} and the family reports.")
     else:
-        print("\nFamily report(s) written; report.md (index) is only updated by a full run.")
+        print("\nFamily report(s) written; README.md (index) is only updated by a full run.")
 
 
 if __name__ == "__main__":
