@@ -113,6 +113,11 @@ pub trait AudioInput: Send {
         })
     }
 
+    /// Returns container audio metadata (tags, cover art) if present.
+    fn metadata(&self) -> Option<&audigma_format::AudioMetadata> {
+        None
+    }
+
     /// Opts into raw DSD dispatch to channel workers instead of decoding inside
     /// `read_channels`. The input remains responsible only for byte ordering,
     /// channel splitting, queue accounting, and preroll on this path.
@@ -399,6 +404,10 @@ impl DecoderInput {
 impl AudioInput for DecoderInput {
     fn info(&self) -> &AudioStreamInfo {
         self.decoder.info()
+    }
+
+    fn metadata(&self) -> Option<&audigma_format::AudioMetadata> {
+        self.decoder.metadata()
     }
 
     fn read_stereo(&mut self, left: &mut [f64], right: &mut [f64]) -> Result<usize, EngineError> {

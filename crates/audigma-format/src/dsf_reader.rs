@@ -2,6 +2,7 @@
 
 use crate::FormatError;
 use crate::dsf::{DSF_BLOCK_SIZE_PER_CHANNEL, DSF_HEADER_TOTAL_BYTES, DsfHeader};
+use crate::metadata::AudioMetadata;
 use std::io::{Read, Seek, SeekFrom};
 
 /// A streaming reader for Sony DSF v1.01 files.
@@ -17,6 +18,7 @@ pub struct DsfReader<R> {
     total_blocks: u64,
     block_buffer: Vec<u8>,
     pos_in_block: usize,
+    metadata: Option<AudioMetadata>,
 }
 
 impl<R: Read + Seek> DsfReader<R> {
@@ -25,6 +27,20 @@ impl<R: Read + Seek> DsfReader<R> {
         let mut header_buf = [0u8; DSF_HEADER_TOTAL_BYTES];
         reader.read_exact(&mut header_buf)?;
         let header = DsfHeader::from_bytes(&header_buf)?;
+
+        let metadata = if header.metadata_offset != 0 {
+            if reader.seek(SeekFrom::Start(header.metadata_offset)).is_ok() {
+                let tag_res = id3::Tag::read_from2(&mut reader).ok();
+                let _ = reader.seek(SeekFrom::Start(DSF_HEADER_TOTAL_BYTES as u64));
+                tag_res
+                    .map(|t| AudioMetadata::from_id3_tag(&t))
+                    .filter(|m| !m.is_empty())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         let channels = header.channels as usize;
         let stereo_block_bytes = channels * DSF_BLOCK_SIZE_PER_CHANNEL;
@@ -38,7 +54,14 @@ impl<R: Read + Seek> DsfReader<R> {
             total_blocks,
             block_buffer: Vec::new(),
             pos_in_block: DSF_BLOCK_SIZE_PER_CHANNEL, // Trigger reading first block on first read
+            metadata,
         })
+    }
+
+    /// Returns container audio metadata (ID3v2 tags and pictures) if present.
+    #[inline]
+    pub fn metadata(&self) -> Option<&AudioMetadata> {
+        self.metadata.as_ref()
     }
 
     /// Returns the parsed DSF header metadata.

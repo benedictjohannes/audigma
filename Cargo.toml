@@ -45,6 +45,7 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "json", "env-filter"]
 tracing-appender = "0.2"
 time = "0.3"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+id3 = "1.17"
 
 
 

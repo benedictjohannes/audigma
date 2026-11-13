@@ -10,6 +10,7 @@ pub mod dsf;
 pub mod dsf_reader;
 pub mod dsf_writer;
 pub mod flac_writer;
+pub mod metadata;
 pub mod topology;
 pub mod wav_writer;
 
@@ -30,6 +31,7 @@ pub use dsf::{
 pub use dsf_reader::DsfReader;
 pub use dsf_writer::DsfFileWriter;
 pub use flac_writer::FlacEncoder;
+pub use metadata::{AudioMetadata, Picture, PictureType};
 pub use topology::downmix_interleaved_to_stereo;
 pub use wav_writer::PcmWavWriter;
 

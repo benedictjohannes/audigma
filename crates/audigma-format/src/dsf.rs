@@ -97,20 +97,28 @@ pub struct DsfHeader {
     pub sample_count_per_channel: u64,
     /// Total byte length of the interleaved `L[4096], R[4096]` payload blocks.
     pub data_payload_bytes: u64,
+    /// Byte offset to the ID3v2 metadata chunk (`0` if no metadata is present).
+    pub metadata_offset: u64,
+    /// Total file size in bytes (if `0`, computed from headers + data payload).
+    pub total_file_size: u64,
 }
 
 impl DsfHeader {
     /// Encodes the 92-byte DSF header (`DSD ` + `fmt ` + `data` chunk header).
     pub fn to_bytes(&self) -> [u8; DSF_HEADER_TOTAL_BYTES] {
         let mut buf = [0u8; DSF_HEADER_TOTAL_BYTES];
-        let total_file_size = (DSF_HEADER_TOTAL_BYTES as u64) + self.data_payload_bytes;
+        let total_file_size = if self.total_file_size != 0 {
+            self.total_file_size
+        } else {
+            (DSF_HEADER_TOTAL_BYTES as u64) + self.data_payload_bytes
+        };
         let data_chunk_size = 12u64 + self.data_payload_bytes;
 
         // 1. `DSD ` chunk (28 bytes)
         buf[0..4].copy_from_slice(b"DSD ");
         buf[4..12].copy_from_slice(&28u64.to_le_bytes());
         buf[12..20].copy_from_slice(&total_file_size.to_le_bytes());
-        buf[20..28].copy_from_slice(&0u64.to_le_bytes()); // metadata_offset = 0
+        buf[20..28].copy_from_slice(&self.metadata_offset.to_le_bytes());
 
         // 2. `fmt ` chunk (52 bytes, offset 28..80)
         let channel_type = if self.channels == 1 { 1u32 } else { 2u32 };
@@ -147,6 +155,8 @@ impl DsfHeader {
         if dsd_chunk_size != 28 {
             return Err(FormatError::InvalidDsfHeader("DSD chunk size must be 28"));
         }
+        let total_file_size = u64::from_le_bytes(buf[12..20].try_into().unwrap());
+        let metadata_offset = u64::from_le_bytes(buf[20..28].try_into().unwrap());
 
         if &buf[28..32] != b"fmt " {
             return Err(FormatError::InvalidDsfHeader("missing 'fmt ' chunk magic"));
@@ -193,6 +203,8 @@ impl DsfHeader {
             bit_order,
             sample_count_per_channel,
             data_payload_bytes: data_chunk_size - 12,
+            metadata_offset,
+            total_file_size,
         })
     }
 }
@@ -264,6 +276,8 @@ pub fn pack_stereo_dsf_file(
         bit_order,
         sample_count_per_channel: (left_msb_bytes.len() as u64) * 8,
         data_payload_bytes: payload.len() as u64,
+        metadata_offset: 0,
+        total_file_size: 0,
     };
 
     let mut file_bytes = Vec::with_capacity(DSF_HEADER_TOTAL_BYTES + payload.len());

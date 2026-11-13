@@ -2,7 +2,9 @@
 //! with channel topology conditioning into normalized `f64` stereo streams.
 
 use crate::FormatError;
+use crate::metadata::AudioMetadata;
 use crate::topology::downmix_interleaved_to_stereo;
+use std::io::SeekFrom;
 use audigma_dsp::{DsdBitRateHz, PcmRateHz};
 use symphonia::core::codecs::audio::{
     AudioDecoder as SymphoniaAudioDecoder, AudioDecoderOptions, CODEC_ID_NULL_AUDIO,
@@ -114,14 +116,26 @@ pub struct AudioDecoder {
     info: AudioStreamInfo,
     channels: usize,
     interleaved_scratch: Vec<f64>,
+    metadata: Option<AudioMetadata>,
 }
 
 impl AudioDecoder {
     /// Opens an audio stream from any seekable media source (e.g., `std::fs::File` or `std::io::Cursor`).
     pub fn try_new<S: MediaSource + 'static>(
-        source: S,
+        mut source: S,
         extension_hint: Option<&str>,
     ) -> Result<Self, FormatError> {
+        let is_wav = extension_hint
+            .map(|e| e.trim_start_matches('.').eq_ignore_ascii_case("wav"))
+            .unwrap_or(false);
+        let wav_meta = if is_wav {
+            let m = crate::metadata::parse_wav_riff_metadata(&mut source);
+            let _ = source.seek(SeekFrom::Start(0));
+            m
+        } else {
+            None
+        };
+
         let mut hint = Hint::new();
         if let Some(ext) = extension_hint {
             hint.with_extension(ext.trim_start_matches('.'));
@@ -131,9 +145,16 @@ impl AudioDecoder {
         let format_opts = FormatOptions::default();
         let metadata_opts = MetadataOptions::default();
 
-        let format = symphonia::default::get_probe()
+        let mut format = symphonia::default::get_probe()
             .probe(&hint, mss, format_opts, metadata_opts)
             .map_err(|e| FormatError::DecoderError(format!("probe error: {e}")))?;
+
+        let metadata = format
+            .metadata()
+            .current()
+            .map(AudioMetadata::from_symphonia_revision)
+            .filter(|m| !m.is_empty())
+            .or(wav_meta);
 
         // Find first supported audio track
         let track = format
@@ -188,6 +209,7 @@ impl AudioDecoder {
             info,
             channels,
             interleaved_scratch: Vec::new(),
+            metadata,
         })
     }
 
@@ -195,6 +217,12 @@ impl AudioDecoder {
     #[inline]
     pub fn info(&self) -> &AudioStreamInfo {
         &self.info
+    }
+
+    /// Returns container audio metadata (tags and visual pictures) if present.
+    #[inline]
+    pub fn metadata(&self) -> Option<&AudioMetadata> {
+        self.metadata.as_ref()
     }
 
     /// Decodes the next chunk of frames into separate left and right stereo buffers.

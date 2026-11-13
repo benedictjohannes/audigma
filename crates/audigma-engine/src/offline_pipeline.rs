@@ -94,6 +94,7 @@ impl<'a> ContainerWriter<'a> {
         target_spec: &TargetRateSpec,
         container: Option<OutputContainer>,
         output: Box<dyn AudioOutput + 'a>,
+        metadata: Option<audigma_format::AudioMetadata>,
     ) -> Result<Self, EngineError> {
         let dither = dsp_config.dither;
         let dither_seed = dsp_config.dither_tpdf_seed;
@@ -120,7 +121,10 @@ impl<'a> ContainerWriter<'a> {
                     .as_ref()
                     .map(|o| o.dsf_pad_mode)
                     .unwrap_or(DsfPadMode::SpecZero);
-                let writer = DsfFileWriter::new(output, bit_rate, DsfBitOrder::LsbFirst, pad_mode)?;
+                let mut writer = DsfFileWriter::new(output, bit_rate, DsfBitOrder::LsbFirst, pad_mode)?;
+                if let Some(m) = metadata {
+                    writer = writer.with_metadata(m);
+                }
                 Ok(Self::Dsf(writer))
             }
             OutputContainer::Wav => {
@@ -138,7 +142,7 @@ impl<'a> ContainerWriter<'a> {
                         });
                     }
                 };
-                let writer = PcmWavWriter::new(output, pcm_rate, sample_format)?
+                let writer = PcmWavWriter::new_with_metadata(output, pcm_rate, sample_format, metadata)?
                     .with_dither(dither, dither_seed);
                 Ok(Self::Wav(writer))
             }
@@ -167,8 +171,11 @@ impl<'a> ContainerWriter<'a> {
                         });
                     }
                 };
-                let writer = FlacEncoder::new(output, pcm_rate, bits_per_sample)?
+                let mut writer = FlacEncoder::new(output, pcm_rate, bits_per_sample)?
                     .with_dither(dither, dither_seed);
+                if let Some(m) = metadata {
+                    writer = writer.with_metadata(m);
+                }
                 Ok(Self::Flac(writer))
             }
             OutputContainer::Raw => {
@@ -597,6 +604,7 @@ impl OfflinePipeline {
                 &target_spec,
                 self.container,
                 output,
+                input.metadata().cloned(),
             )?;
             let total_input_frames = transfer_offline_dsd_passthrough(input, |l, r| {
                 container_writer.write_stereo_dsd(l, r)
@@ -674,6 +682,7 @@ impl OfflinePipeline {
             &target_spec,
             self.container,
             output,
+            input.metadata().cloned(),
         )?;
 
         let mut feeder = InputFeeder::new(&self.processor, self.raw_dsd);

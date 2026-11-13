@@ -3,24 +3,59 @@
 //! Supports 16, 24, 32-bit integer PCM and 32-bit float PCM at sampling rates up to 768 kHz.
 
 use crate::FormatError;
+use crate::metadata::AudioMetadata;
 use audigma_dsp::{DitherType, PcmQuantizer, PcmRateHz, SampleFormat};
 use hound::{SampleFormat as HoundFormat, WavSpec, WavWriter};
-use std::io::{Seek, Write};
+use std::io::{Seek, SeekFrom, Write};
+use std::sync::{Arc, Mutex};
+
+struct SharedWriter<W>(Arc<Mutex<W>>);
+
+impl<W: Write> Write for SharedWriter<W> {
+    #[inline]
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().write(buf)
+    }
+
+    #[inline]
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.lock().unwrap().flush()
+    }
+}
+
+impl<W: Seek> Seek for SharedWriter<W> {
+    #[inline]
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.0.lock().unwrap().seek(pos)
+    }
+}
 
 /// High-rate PCM WAV file writer.
 pub struct PcmWavWriter<W: Write + Seek> {
-    writer: WavWriter<W>,
+    inner: Arc<Mutex<W>>,
+    writer: WavWriter<SharedWriter<W>>,
     sample_format: SampleFormat,
     quantizer: PcmQuantizer,
     frames_written: u64,
+    metadata: Option<AudioMetadata>,
 }
 
 impl<W: Write + Seek> PcmWavWriter<W> {
-    /// Initializes a new WAV file writer targeting high-rate stereo PCM.
+    /// Initializes a new WAV file writer targeting high-rate stereo PCM without metadata.
     pub fn new(
         writer: W,
         sample_rate: PcmRateHz,
         sample_format: SampleFormat,
+    ) -> Result<Self, FormatError> {
+        Self::new_with_metadata(writer, sample_rate, sample_format, None)
+    }
+
+    /// Initializes a new WAV file writer targeting high-rate stereo PCM with optional metadata.
+    pub fn new_with_metadata(
+        writer: W,
+        sample_rate: PcmRateHz,
+        sample_format: SampleFormat,
+        metadata: Option<AudioMetadata>,
     ) -> Result<Self, FormatError> {
         let (bits_per_sample, hound_fmt) = match sample_format {
             SampleFormat::S16Le => (16u16, HoundFormat::Int),
@@ -42,7 +77,10 @@ impl<W: Write + Seek> PcmWavWriter<W> {
             sample_format: hound_fmt,
         };
 
-        let wav_writer = WavWriter::new(writer, spec).map_err(|e| {
+        let inner = Arc::new(Mutex::new(writer));
+        let shared = SharedWriter(Arc::clone(&inner));
+
+        let wav_writer = WavWriter::new(shared, spec).map_err(|e| {
             FormatError::EncoderError(format!("failed to initialize WAV writer: {e}"))
         })?;
 
@@ -50,11 +88,21 @@ impl<W: Write + Seek> PcmWavWriter<W> {
             .ok_or(FormatError::UnsupportedSampleFormat(sample_format))?;
 
         Ok(Self {
+            inner,
             writer: wav_writer,
             sample_format,
             quantizer,
             frames_written: 0,
+            metadata,
         })
+    }
+
+    /// Attaches metadata to be written to the WAV file as a RIFF `LIST/INFO` chunk.
+    pub fn with_metadata(mut self, metadata: AudioMetadata) -> Self {
+        if !metadata.is_empty() {
+            self.metadata = Some(metadata);
+        }
+        self
     }
 
     /// Selects the dither applied before integer quantization (default: none, plain rounding).
@@ -104,12 +152,39 @@ impl<W: Write + Seek> PcmWavWriter<W> {
         Ok(())
     }
 
-    /// Flushes samples and updates RIFF chunk sizes in the WAV header.
+    /// Flushes samples and updates RIFF chunk sizes in the WAV header,
+    /// appending any attached metadata as a RIFF `LIST/INFO` chunk.
     pub fn finalize(self) -> Result<u64, FormatError> {
         let frames = self.frames_written;
         self.writer
             .finalize()
             .map_err(|e| FormatError::EncoderError(format!("failed to finalize WAV: {e}")))?;
+
+        if let Some(ref meta) = self.metadata {
+            if let Some(info_bytes) = meta.encode_wav_riff_info_chunk() {
+                let mut inner = self.inner.lock().unwrap();
+                let end_pos = inner
+                    .seek(SeekFrom::End(0))
+                    .map_err(|e| FormatError::IoError(e.to_string()))?;
+                inner
+                    .write_all(&info_bytes)
+                    .map_err(|e| FormatError::IoError(e.to_string()))?;
+
+                let new_total_size = end_pos + (info_bytes.len() as u64);
+                let new_riff_size = (new_total_size.saturating_sub(8)) as u32;
+
+                inner
+                    .seek(SeekFrom::Start(4))
+                    .map_err(|e| FormatError::IoError(e.to_string()))?;
+                inner
+                    .write_all(&new_riff_size.to_le_bytes())
+                    .map_err(|e| FormatError::IoError(e.to_string()))?;
+                inner
+                    .flush()
+                    .map_err(|e| FormatError::IoError(e.to_string()))?;
+            }
+        }
+
         Ok(frames)
     }
 }
@@ -148,5 +223,41 @@ mod tests {
         assert_eq!(samples.len(), 8);
         assert_eq!(samples[0], 0); // L[0]
         assert_eq!(samples[1], 0); // R[0]
+    }
+
+    #[test]
+    fn test_wav_writer_with_metadata_roundtrip() {
+        use crate::decoder::AudioDecoder;
+        use crate::metadata::AudioMetadata;
+
+        let mut buffer = Cursor::new(Vec::new());
+        let mut meta = AudioMetadata::default();
+        meta.title = Some("WAV Song".into());
+        meta.artist = Some("WAV Artist".into());
+        meta.album = Some("WAV Album".into());
+        meta.date = Some("2024".into());
+        meta.genre = Some("Acoustic".into());
+        meta.track_number = Some(2);
+
+        let mut writer =
+            PcmWavWriter::new(&mut buffer, PcmRateHz::PCM_48000, SampleFormat::S16Le)
+                .unwrap()
+                .with_metadata(meta);
+
+        let left = vec![0.1; 256];
+        let right = vec![-0.1; 256];
+        writer.write_stereo_samples(&left, &right).unwrap();
+        writer.finalize().unwrap();
+
+        // Read back with Symphonia AudioDecoder
+        buffer.set_position(0);
+        let dec = AudioDecoder::try_new(buffer, Some("wav")).unwrap();
+        let read_meta = dec.metadata().expect("WAV metadata preserved");
+        assert_eq!(read_meta.title.as_deref(), Some("WAV Song"));
+        assert_eq!(read_meta.artist.as_deref(), Some("WAV Artist"));
+        assert_eq!(read_meta.album.as_deref(), Some("WAV Album"));
+        assert_eq!(read_meta.date.as_deref(), Some("2024"));
+        assert_eq!(read_meta.genre.as_deref(), Some("Acoustic"));
+        assert_eq!(read_meta.track_number, Some(2));
     }
 }

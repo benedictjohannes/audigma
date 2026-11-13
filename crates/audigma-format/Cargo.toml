@@ -14,6 +14,7 @@ thiserror = { workspace = true }
 symphonia = { workspace = true }
 hound = { workspace = true }
 rusty_flac = { workspace = true }
+id3 = { workspace = true }
 tracing = { workspace = true }
 schemars = { workspace = true, optional = true }
 

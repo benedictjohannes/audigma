@@ -6,6 +6,7 @@
 //! 32-bit depth are outside the FLAC "subset", so player support varies.
 
 use crate::FormatError;
+use crate::metadata::AudioMetadata;
 use audigma_dsp::{DitherType, PcmQuantizer, PcmRateHz, SampleFormat};
 use rusty_flac::Encoder;
 use std::io::Write;
@@ -18,6 +19,7 @@ pub struct FlacEncoder<W: Write> {
     interleaved_samples: Vec<i32>,
     quantizer: PcmQuantizer,
     frames_written: u64,
+    metadata: Option<AudioMetadata>,
 }
 
 impl<W: Write> FlacEncoder<W> {
@@ -43,7 +45,16 @@ impl<W: Write> FlacEncoder<W> {
             interleaved_samples: Vec::new(),
             quantizer: Self::quantizer_for(bits, DitherType::None, None),
             frames_written: 0,
+            metadata: None,
         })
+    }
+
+    /// Attaches metadata (Vorbis comments and pictures) to be written to the FLAC bitstream.
+    pub fn with_metadata(mut self, metadata: AudioMetadata) -> Self {
+        if !metadata.is_empty() {
+            self.metadata = Some(metadata);
+        }
+        self
     }
 
     fn quantizer_for(bits: usize, dither: DitherType, seed: Option<u64>) -> PcmQuantizer {
@@ -91,7 +102,16 @@ impl<W: Write> FlacEncoder<W> {
         encoder
             .push_interleaved(&self.interleaved_samples)
             .map_err(|e| FormatError::EncoderError(format!("FLAC encoding failed: {e}")))?;
-        let bytes = encoder.finish();
+        let mut bytes = encoder.finish();
+
+        if let Some(ref meta) = self.metadata {
+            let meta_blocks = meta.encode_flac_metadata_blocks("audigma");
+            if !meta_blocks.is_empty() && bytes.len() >= 42 && &bytes[0..4] == b"fLaC" {
+                // Clear the is_last bit on STREAMINFO header (byte 4)
+                bytes[4] &= 0x7F;
+                bytes.splice(42..42, meta_blocks);
+            }
+        }
 
         self.writer
             .write_all(&bytes)
@@ -187,6 +207,54 @@ mod tests {
             assert!((dl[i] - l[i]).abs() < 1e-8, "L {i}: {} vs {}", dl[i], l[i]);
             assert!((dr[i] - r[i]).abs() < 1e-8, "R {i}");
         }
+    }
+
+    #[test]
+    fn test_flac_encoder_with_metadata_roundtrip() {
+        use crate::metadata::{AudioMetadata, Picture, PictureType};
+
+        let mut out = Vec::new();
+        let mut meta = AudioMetadata::default();
+        meta.title = Some("Flac Title".into());
+        meta.artist = Some("Flac Artist".into());
+        meta.album = Some("Flac Album".into());
+        meta.track_number = Some(7);
+        meta.track_total = Some(14);
+        meta.date = Some("2023".into());
+        meta.pictures.push(Picture {
+            picture_type: PictureType::CoverFront,
+            mime_type: "image/jpeg".into(),
+            description: "Front Cover".into(),
+            width: 600,
+            height: 600,
+            color_depth: 24,
+            num_colors: 0,
+            data: vec![0xFF, 0xD8, 0xFF, 0xEE, 0x01, 0x02, 0x03, 0x04],
+        });
+
+        let mut enc = FlacEncoder::new(&mut out, PcmRateHz::PCM_44100, 24)
+            .unwrap()
+            .with_metadata(meta);
+
+        let left = vec![0.1; 512];
+        let right = vec![-0.1; 512];
+        enc.write_stereo_samples(&left, &right).unwrap();
+        enc.finalize().unwrap();
+
+        // Decode with AudioDecoder (symphonia)
+        let dec = crate::AudioDecoder::try_new(std::io::Cursor::new(out), Some("flac")).unwrap();
+        let read_meta = dec.metadata().expect("FLAC metadata preserved");
+        assert_eq!(read_meta.title.as_deref(), Some("Flac Title"));
+        assert_eq!(read_meta.artist.as_deref(), Some("Flac Artist"));
+        assert_eq!(read_meta.album.as_deref(), Some("Flac Album"));
+        assert_eq!(read_meta.track_number, Some(7));
+        assert_eq!(read_meta.track_total, Some(14));
+        assert_eq!(read_meta.pictures.len(), 1);
+        assert_eq!(read_meta.pictures[0].picture_type, PictureType::CoverFront);
+        assert_eq!(
+            read_meta.pictures[0].data,
+            vec![0xFF, 0xD8, 0xFF, 0xEE, 0x01, 0x02, 0x03, 0x04]
+        );
     }
 
     #[test]

@@ -188,6 +188,13 @@ impl AudioInput for FileAudioInput {
         }
     }
 
+    fn metadata(&self) -> Option<&audigma_format::AudioMetadata> {
+        match &self.source {
+            FileInputSource::Pcm(dec) => dec.metadata(),
+            FileInputSource::Dsf { reader, .. } => reader.metadata(),
+        }
+    }
+
     #[inline]
     fn can_rewind(&self) -> bool {
         match &self.source {
