@@ -192,10 +192,16 @@ impl ClockDriftController {
     /// Feeds one fill sample taken after `dt_secs` of consumption and returns the correction to
     /// apply to the next tile.
     ///
-    /// A fault is returned only once the fill has stayed past a rail for `fault_debounce_secs`;
-    /// until then the correction is held unchanged.
+    /// During the warm-up the queue is still settling after a cushion refill or pipeline rebuild,
+    /// so neither the estimator nor the rails see those samples. Afterwards a fault is returned
+    /// only once the fill has stayed past a rail for `fault_debounce_secs`; until then the
+    /// correction is held unchanged.
     pub fn update(&mut self, fill_secs: f64, dt_secs: f64) -> Result<f64, ClockDriftError> {
         if !fill_secs.is_finite() || !dt_secs.is_finite() || dt_secs <= 0.0 {
+            return Ok(self.applied_ppm);
+        }
+        if self.warmup_left_secs > 0.0 {
+            self.warmup_left_secs -= dt_secs;
             return Ok(self.applied_ppm);
         }
         let max = self.config.max_correction_ppm;
@@ -227,11 +233,6 @@ impl ClockDriftController {
         self.below_min_secs = 0.0;
         self.above_max_secs = 0.0;
         self.rail = None;
-
-        if self.warmup_left_secs > 0.0 {
-            self.warmup_left_secs -= dt_secs;
-            return Ok(self.applied_ppm);
-        }
 
         self.time_secs += dt_secs;
         self.acc_secs += dt_secs;
@@ -419,6 +420,27 @@ mod tests {
         // Recovering slews back instead of jumping.
         let ppm = c.update(0.090, 0.005).unwrap();
         assert!((ppm + 500.0 - 0.05).abs() < 1e-9, "{ppm}");
+    }
+
+    #[test]
+    fn rails_are_ignored_during_warmup() {
+        let cfg = ClockDriftConfig {
+            fault_debounce_secs: 0.0,
+            ..Default::default()
+        };
+        // The queue dips right after a stream start while the pipeline primes.
+        let mut c = ClockDriftController::new(cfg, true);
+        for _ in 0..399 {
+            assert_eq!(c.update(0.002, 0.005).unwrap(), 0.0);
+        }
+        for _ in 0..10 {
+            c.update(0.020, 0.005).unwrap();
+        }
+        // Past the 2 s warm-up the same low fill is a fault again.
+        assert!(matches!(
+            c.update(0.002, 0.005),
+            Err(ClockDriftError::Starvation { .. })
+        ));
     }
 
     #[test]

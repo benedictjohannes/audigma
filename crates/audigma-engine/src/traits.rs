@@ -180,9 +180,6 @@ pub trait AudioInput: Send {
         InputClock::FreeRunning
     }
 
-    /// Sets the target preroll cushion duration in seconds before playback begins or resumes.
-    fn set_preroll_secs(&mut self, _secs: f64) {}
-
     /// Takes any real-time log event consumer registered on this input.
     fn take_rt_consumer(&mut self) -> Option<audigma_log::RtLogConsumer> {
         None

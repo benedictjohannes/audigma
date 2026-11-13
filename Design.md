@@ -34,7 +34,7 @@ In `audigma`, architectural decisions are enforced directly by the Rust type sys
      $$R_{\text{total}}(t) = R_{\text{asrc}}(t) \times R_{\text{rational}} \times 2^K$$
    - The continuously variable fractional-phase stage ($R_{\text{asrc}}(t)$) **always executes at the low baseband/intermediate PCM rate ($1\times$ or $2\times$)** *before* the fixed-coefficient $2\times$ half-band FIR cascade—never at the final MHz DSD bit rate, and never by dropping/duplicating DSD bits.
    - **Drift estimator plus fill trim (`asrc.rs`, `ClockDriftController`):** the queue obeys $\dot{f} = D - c$ (fill $f$ in seconds of input, true clock offset $D$, applied correction $c$), so $D = \dot{f} + \bar{c}$ is measured feed-forward, independent of any setpoint: fill and applied correction are averaged into 0.5 s blocks (removing the per-chunk sawtooth) and a least-squares slope over the last 64 blocks (32 s) gives $\dot{f}$. Fill samples from the first 2 s after a stream start or idle exit are ignored (warm-up: the queue is still settling after a cushion refill or decoder priming, and its ramp would read as drift), so the estimate is valid 10 s in. **A `FreeRunning` input must report its fill continuously** (queued frames plus the producer progress interpolated at the nominal rate since the last chunk arrival, capped at one chunk): chunk and read tile are commensurate, so queued frames alone sit on a tile-sized lattice that steps only every `tile / (rate · D)` seconds (29 s at 200 ppm, 44.1 kHz), and no practical window resolves drift from it. A proportional trim with no integrator (5 ppm/ms beyond a ±5 ms dead band, ≤ ±100 ppm) returns the fill to the level latched at stream start. The applied correction moves towards `estimate + trim` at ≤ 10 ppm/s and is clamped to `[resampler] max_clock_drift_ppm` (default `500`). There is no integrator state to wind up.
-   - **Rails & recovery:** a fill below 10 ms or above max(250 ms, 2 × setpoint) is acted on only after a 50 ms debounce (an end-of-stream drain does not move the correction); a confirmed rail counts a starvation/overrun fault, applies the full correction in the restoring direction and clears the estimator window. A new controller is built per stream (rate switches); on idle entry the warm-up restarts and the window, trim, setpoint and rails reset while the estimate is kept.
+   - **Rails & recovery:** a fill below 10 ms or above max(250 ms, 2 × setpoint) is acted on only after a 50 ms debounce (an end-of-stream drain does not move the correction); a confirmed rail counts a starvation/overrun fault, applies the full correction in the restoring direction and clears the estimator window. The rails are not checked during the 2 s warm-up: with a 20 ms input cushion the queue dips below 10 ms for a moment after a stream start or rate switch while the pipeline primes (observed about 0.3 s in, with the device buffer still above 27 ms), which is settling, not a fault. A new controller is built per stream (rate switches); on idle entry the warm-up restarts and the window, trim, setpoint and rails reset while the estimate is kept.
 
 6. **DSD Ingestion, Automatic Passthrough & Bounded Decimation Remodulation (`audigma-engine` / `audigma-dsp`):**
    - **Automatic Opportunistic Passthrough:** Bit-exact DSD passthrough is an automatic, opportunistic signal path: whenever the input format is DSD (via SPA `audio/dsd`, Sony `.dsf` file, or auto-detected DoP), the input bit rate matches the target output DSD rate, digital software volume attenuation is at unity ($0\text{ dBFS}$ / 100% or routed to hardware UAC2 mixer / line-out), and the link is clock-locked or backpressured (file conversion, shared PipeWire graph clock, or synchronized stream), the stream bypasses intermediate float decimation and modulation completely, copying DSD bytes directly into the target transport packet with zero intermediate float conversions.
@@ -391,6 +391,8 @@ channel_positions = [ "FL", "FR" ]
 rate_mode = "dynamic"
 allowed_rates = [ 44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000 ]
 allow_dsd = true
+buffer_ms = 20                   # sink pull cushion; output.buffer_ms protects the DAC
+quantum_frames = 512             # 512 | 1024 frames per sink cycle at 44.1/48 kHz, scaled with rate
 
 [output]
 backend = "alsa"
@@ -401,8 +403,9 @@ volume_control = "hardware-software-fallback"
 device_wait_ms = -1
 device_wait_expiry = "exit"      # "exit" | "pause"
 keep_audio_sink_ms = 5000
-buffer_ms = 40
+buffer_ms = 20
 period_ms = 5
+quantum_frames = 1024            # pipewire output only: 512 | 1024 graph quantum at 44.1/48 kHz, scaled with rate
 
 [target]
 format = "dsd"

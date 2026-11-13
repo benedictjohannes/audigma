@@ -377,6 +377,82 @@ impl DsdInputConfig {
     }
 }
 
+/// Frames per PipeWire graph cycle at 44.1/48 kHz; higher rates scale it by the same power of
+/// two, so each choice is a fixed duration. TOML: `512` or `1024`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum QuantumFrames {
+    Frames512,
+    Frames1024,
+}
+
+impl QuantumFrames {
+    /// Frames per cycle at 44.1/48 kHz.
+    pub const fn frames(self) -> u32 {
+        match self {
+            Self::Frames512 => 512,
+            Self::Frames1024 => 1024,
+        }
+    }
+
+    /// Resolves a supported frame count.
+    pub const fn from_frames(frames: u32) -> Option<Self> {
+        match frames {
+            512 => Some(Self::Frames512),
+            1024 => Some(Self::Frames1024),
+            _ => None,
+        }
+    }
+}
+
+/// Accepted TOML values; mirrors the `Deserialize` impl.
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for QuantumFrames {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "QuantumFrames".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({ "enum": [512, 1024] })
+    }
+}
+
+impl Serialize for QuantumFrames {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u32(self.frames())
+    }
+}
+
+impl<'de> Deserialize<'de> for QuantumFrames {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct QuantumFramesVisitor;
+
+        const EXPECTED: &str = "512 or 1024";
+
+        impl serde::de::Visitor<'_> for QuantumFramesVisitor {
+            type Value = QuantumFrames;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(EXPECTED)
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<QuantumFrames, E> {
+                u32::try_from(v)
+                    .ok()
+                    .and_then(QuantumFrames::from_frames)
+                    .ok_or_else(|| E::invalid_value(serde::de::Unexpected::Unsigned(v), &EXPECTED))
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<QuantumFrames, E> {
+                u64::try_from(v)
+                    .map_err(|_| E::invalid_value(serde::de::Unexpected::Signed(v), &EXPECTED))
+                    .and_then(|v| self.visit_u64(v))
+            }
+        }
+
+        deserializer.deserialize_u64(QuantumFramesVisitor)
+    }
+}
+
 /// `[input]` section (`Design.md §6.2`).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -391,6 +467,8 @@ pub struct InputConfig {
     pub rate_mode: Option<RateMode>,
     pub allowed_rates: Option<Vec<u32>>,
     pub allow_dsd: Option<bool>,
+    pub buffer_ms: Option<u32>,
+    pub quantum_frames: Option<QuantumFrames>,
     pub dsd: Option<DsdInputConfig>,
 }
 
@@ -462,6 +540,16 @@ impl InputConfig {
         self.allow_dsd.unwrap_or(true)
     }
 
+    /// Returns the live input cushion in milliseconds (defaults to 20).
+    pub fn buffer_ms(&self) -> u32 {
+        self.buffer_ms.unwrap_or(20)
+    }
+
+    /// Returns the capture cycle size of the live sink (defaults to 512 frames).
+    pub fn quantum_frames(&self) -> QuantumFrames {
+        self.quantum_frames.unwrap_or(QuantumFrames::Frames512)
+    }
+
     /// Returns the configured maximum intermediate PCM rate for DSD decimation, if set.
     pub fn dsd_max_intermediate_rate_hz(&self) -> Option<PcmRateHz> {
         self.dsd.as_ref().and_then(|d| d.max_intermediate_rate_hz)
@@ -494,6 +582,7 @@ pub struct OutputConfig {
     pub reserve_device: Option<bool>,
     pub buffer_ms: Option<u32>,
     pub period_ms: Option<u32>,
+    pub quantum_frames: Option<QuantumFrames>,
     pub volume_control: Option<VolumeControlMode>,
     pub device_wait_ms: Option<i64>,
     pub device_wait_expiry: Option<DeviceWaitExpiry>,
@@ -521,6 +610,19 @@ impl OutputConfig {
     /// Returns device wait timeout in milliseconds (`-1` = wait indefinitely by default).
     pub fn device_wait_ms(&self) -> i64 {
         self.device_wait_ms.unwrap_or(-1)
+    }
+
+    /// Output buffer length used when `buffer_ms` is unset.
+    pub const DEFAULT_BUFFER_MS: u32 = 20;
+
+    /// Returns the output buffer length in milliseconds (defaults to [`Self::DEFAULT_BUFFER_MS`]).
+    pub fn buffer_ms(&self) -> u32 {
+        self.buffer_ms.unwrap_or(Self::DEFAULT_BUFFER_MS)
+    }
+
+    /// Returns the graph quantum the PipeWire output stream requests (defaults to 1024 frames).
+    pub fn quantum_frames(&self) -> QuantumFrames {
+        self.quantum_frames.unwrap_or(QuantumFrames::Frames1024)
     }
 
     /// Returns what happens when the device wait runs out (`exit` by default).
@@ -967,6 +1069,8 @@ impl Settings {
                     rate_mode: None,
                     allowed_rates: None,
                     allow_dsd: None,
+                    buffer_ms: None,
+                    quantum_frames: None,
                     dsd: None,
                 }),
                 output: Some(OutputConfig {
@@ -978,6 +1082,7 @@ impl Settings {
                     reserve_device: None,
                     buffer_ms: None,
                     period_ms: None,
+                    quantum_frames: None,
                     volume_control: None,
                     device_wait_ms: None,
                     device_wait_expiry: None,
@@ -1025,6 +1130,8 @@ impl Settings {
                     rate_mode: None,
                     allowed_rates: None,
                     allow_dsd: None,
+                    buffer_ms: None,
+                    quantum_frames: None,
                     dsd: None,
                 }),
                 output: Some(OutputConfig {
@@ -1036,6 +1143,7 @@ impl Settings {
                     reserve_device: None,
                     buffer_ms: None,
                     period_ms: None,
+                    quantum_frames: None,
                     volume_control: None,
                     device_wait_ms: None,
                     device_wait_expiry: None,
@@ -1083,6 +1191,8 @@ impl Settings {
                     rate_mode: None,
                     allowed_rates: None,
                     allow_dsd: None,
+                    buffer_ms: None,
+                    quantum_frames: None,
                     dsd: None,
                 }),
                 output: Some(OutputConfig {
@@ -1094,6 +1204,7 @@ impl Settings {
                     reserve_device: None,
                     buffer_ms: None,
                     period_ms: None,
+                    quantum_frames: None,
                     volume_control: None,
                     device_wait_ms: None,
                     device_wait_expiry: None,
@@ -1141,6 +1252,8 @@ impl Settings {
                     rate_mode: None,
                     allowed_rates: None,
                     allow_dsd: None,
+                    buffer_ms: None,
+                    quantum_frames: None,
                     dsd: None,
                 }),
                 output: Some(OutputConfig {
@@ -1152,6 +1265,7 @@ impl Settings {
                     reserve_device: None,
                     buffer_ms: None,
                     period_ms: None,
+                    quantum_frames: None,
                     volume_control: None,
                     device_wait_ms: None,
                     device_wait_expiry: None,
@@ -1252,6 +1366,15 @@ impl Settings {
                             "must be between -30.0 and +30.0 dB",
                         ));
                     }
+                }
+            }
+
+            if let Some(ms) = input.buffer_ms {
+                if !(5..=500).contains(&ms) {
+                    return Err(SettingsError::invalid(
+                        "input.buffer_ms",
+                        "must be between 5 and 500 ms",
+                    ));
                 }
             }
         }
@@ -2255,6 +2378,8 @@ pcm_rate_hz = 96000
             rate_mode: None,
             allowed_rates: None,
             allow_dsd: None,
+            buffer_ms: None,
+            quantum_frames: None,
             dsd: None,
         };
         assert_eq!(mono_input.resolved_channel_positions(), vec!["MONO"]);
@@ -2928,6 +3053,28 @@ phase = "minimum"
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn test_quantum_frames_accepts_only_locked_values() {
+        let parse = |section: &str, value: &str| {
+            Settings::from_toml_str(&format!(
+                "schema_version = 1\n[{section}]\nquantum_frames = {value}\n[target]\nformat = \"dsd\"\ndsd_rate = \"dsd64\"\n"
+            ))
+        };
+        for section in ["input", "output"] {
+            for bad in ["256", "301", "2048", "-512", r#""512""#] {
+                let result = parse(section, bad);
+                assert!(result.is_err(), "{section}.quantum_frames = {bad} must fail");
+            }
+        }
+        let input = |v| parse("input", v).unwrap().input.unwrap().quantum_frames();
+        let output = |v| parse("output", v).unwrap().output.unwrap().quantum_frames();
+        assert_eq!(input("512"), QuantumFrames::Frames512);
+        assert_eq!(input("1024"), QuantumFrames::Frames1024);
+        assert_eq!(output("512"), QuantumFrames::Frames512);
+        assert_eq!(output("1024"), QuantumFrames::Frames1024);
+        assert_eq!(InputConfig::default().quantum_frames(), QuantumFrames::Frames512);
     }
 
     #[test]

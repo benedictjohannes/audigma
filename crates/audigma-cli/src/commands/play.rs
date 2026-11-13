@@ -208,8 +208,9 @@ fn apply_live_output_defaults(
         OutputBackend::Alsa => {
             out.entry("transport".to_string())
                 .or_insert_with(|| toml::Value::String("native".to_string()));
-            out.entry("buffer_ms".to_string())
-                .or_insert_with(|| toml::Value::Integer(40));
+            out.entry("buffer_ms".to_string()).or_insert_with(|| {
+                toml::Value::Integer(audigma_settings::OutputConfig::DEFAULT_BUFFER_MS.into())
+            });
             out.entry("period_ms".to_string())
                 .or_insert_with(|| toml::Value::Integer(5));
             out.entry("reserve_device".to_string())
@@ -233,8 +234,9 @@ fn apply_live_output_defaults(
                 "transport".to_string(),
                 toml::Value::String("pcm".to_string()),
             );
-            out.entry("buffer_ms".to_string())
-                .or_insert_with(|| toml::Value::Integer(40));
+            out.entry("buffer_ms".to_string()).or_insert_with(|| {
+                toml::Value::Integer(audigma_settings::OutputConfig::DEFAULT_BUFFER_MS.into())
+            });
             if let Some(target) = table.get_mut("target").and_then(|v| v.as_table_mut()) {
                 target.insert(
                     "sample_format".to_string(),
@@ -384,7 +386,10 @@ fn play_pipewire(
         ));
     };
     let out_cfg = settings.output.as_ref();
-    let buffer_ms = out_cfg.and_then(|o| o.buffer_ms).unwrap_or(40) as usize;
+    let buffer_ms = out_cfg.map_or(
+        audigma_settings::OutputConfig::DEFAULT_BUFFER_MS,
+        audigma_settings::OutputConfig::buffer_ms,
+    );
     let target_node = out_cfg.and_then(|o| o.target_node.clone());
     let placement = crate::runtime::resolve(settings, 2, true)?;
     let mut pw_out = PipeWirePcmOutput::new(
@@ -392,7 +397,10 @@ fn play_pipewire(
         target_node.as_deref(),
         rate.get(),
         2,
-        buffer_ms as u32,
+        buffer_ms,
+        out_cfg
+            .map_or(audigma_settings::QuantumFrames::Frames1024, |o| o.quantum_frames())
+            .frames(),
         Some(placement.pipewire()),
     )
     .map_err(|e| CliError::Other(format!("failed to initialize PipeWire output: {e}")))?;
@@ -421,7 +429,7 @@ fn play_pipewire(
     }
 
     let report = pipeline.run(&mut *input, Box::new(&mut pw_out))?;
-    pw_out.drain(std::time::Duration::from_millis(2000 + buffer_ms as u64));
+    pw_out.drain(std::time::Duration::from_millis(2000 + u64::from(buffer_ms)));
     let xruns = pw_out.xrun_count();
 
     if args.json {
@@ -486,16 +494,16 @@ mod tests {
         let out = t["output"].as_table().unwrap();
         assert_eq!(out["backend"].as_str(), Some("alsa"));
         assert_eq!(out["transport"].as_str(), Some("native"));
-        assert_eq!(out["buffer_ms"].as_integer(), Some(40));
+        assert_eq!(out["buffer_ms"].as_integer(), Some(20));
     }
 
     #[test]
     fn configured_alsa_settings_are_kept() {
-        let mut t = table("[output]\nbackend = \"alsa\"\ntransport = \"dop\"\nbuffer_ms = 20\n");
+        let mut t = table("[output]\nbackend = \"alsa\"\ntransport = \"dop\"\nbuffer_ms = 30\n");
         apply_live_output_defaults(&mut t, true).unwrap();
         let out = t["output"].as_table().unwrap();
         assert_eq!(out["transport"].as_str(), Some("dop"));
-        assert_eq!(out["buffer_ms"].as_integer(), Some(20));
+        assert_eq!(out["buffer_ms"].as_integer(), Some(30));
     }
 
     #[test]

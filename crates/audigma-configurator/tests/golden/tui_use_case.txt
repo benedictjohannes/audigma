@@ -10,15 +10,15 @@
 │ rat│    play into it.                                                   │t   │
 │ all│                                                                    │    │
 │ all│  headless appliance                                                │or  │
-│ dsd│    A dedicated music box with no desktop sound server.             │    │
+│ buf│    A dedicated music box with no desktop sound server.             │    │
+│ qua│                                                                    │    │
+│ dsd│  offline conversion                                                │    │
+│   d│    Converting files with audigma convert.                          │    │
 │   d│                                                                    │    │
-│   d│  offline conversion                                                │    │
-│▾ Ou│    Converting files with audigma convert.                          │    │
+│▾ Ou│  Skip                                                              │    │
 │?bac│                                                                    │    │
-│ vol│  Skip                                                              │    │
-│ dev│                                                                    │    │
-│ dev│                                                                    │    │
-│ kee└────────────────────────────────────────────────────────────────────┘    │
+│ vol│                                                                    │    │
+│ dev└────────────────────────────────────────────────────────────────────┘    │
 └────────────────────────────────────┘└────────────────────────────────────────┘
  Error in target: the configuration must specify [target]
  Enter edit  Del reset  a assist  u use case  m mode  * hidden  r review  q quit

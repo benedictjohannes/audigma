@@ -18,7 +18,7 @@
 │Uses the DAC's analog mixer when it has one and keeps the digital stream at   │
 │full scale; otherwise scales in software before the modulator.                │
 └──────────────────────────────────────────────────────────────────────────────┘
-│ keep_audio_sink_ms  5000           ││                                        │
+│ device_wait_ms      -1             ││                                        │
 └────────────────────────────────────┘└────────────────────────────────────────┘
  Error in target: the configuration must specify [target]
  Enter edit  Del reset  a assist  u use case  m mode  * hidden  r review  q quit

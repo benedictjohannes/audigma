@@ -287,15 +287,12 @@ pub fn build_dsd_format_pod(
     .map_err(|e| PipeWireError::FormatPod(format!("{e:?}")))
 }
 
-/// Computes a power-of-two PipeWire quantum (in frames) scaled to the stream rate (~21–23 ms).
-pub fn quantum_frames_for_rate(rate_hz: u32) -> u32 {
+/// Power-of-two PipeWire quantum (in frames) for `base_frames` at 44.1/48 kHz, scaled to the
+/// stream rate so its duration stays constant across rates and DSD byte rates.
+pub fn quantum_frames_for_rate(rate_hz: u32, base_frames: u32) -> u32 {
     let mult = (rate_hz.max(44_100) / 44_100).next_power_of_two();
-    1024_u32.saturating_mul(mult).clamp(1024, 65_536)
+    base_frames.saturating_mul(mult).min(65_536)
 }
-
-/// Default input cushion requested before the engine resumes consuming after startup
-/// or a rate/format switch if not configured from the output buffer duration.
-const DEFAULT_INPUT_PREROLL_SECS: f64 = 0.090;
 
 fn input_preroll_ready(
     buffered_secs: f64,
@@ -613,7 +610,6 @@ pub struct PipeWireVirtualSink {
     dsd_residue: Vec<Vec<u8>>,
     prerolled: bool,
     preroll_secs: f64,
-    capture_cushion_ns: Arc<AtomicU64>,
     rt_consumer: Option<audigma_log::RtLogConsumer>,
     dropped_rt_events: Arc<AtomicU64>,
     decimation_recorder: Arc<audigma_log::DecimationErrorRecorder>,
@@ -677,6 +673,8 @@ impl PipeWireVirtualSink {
         let allow_dsd = in_cfg.allow_dsd();
         let dsd_gain_db = in_cfg.dsd_gain_db();
         let dsd_max_intermediate = in_cfg.dsd_max_intermediate_rate_hz();
+        let cushion_secs = f64::from(in_cfg.buffer_ms()) / 1000.0;
+        let capture_quantum = in_cfg.quantum_frames().frames();
 
         Self::new_internal(
             node_name,
@@ -689,6 +687,8 @@ impl PipeWireVirtualSink {
             dsd_gain_db,
             dsd_max_intermediate,
             queue_chunks,
+            cushion_secs,
+            capture_quantum,
             placement,
         )
     }
@@ -710,6 +710,8 @@ impl PipeWireVirtualSink {
             rate_mode: None,
             allowed_rates: None,
             allow_dsd: None,
+            buffer_ms: None,
+            quantum_frames: None,
             dsd: None,
         };
         Self::from_input_config(&dummy_cfg, rate_hz, queue_chunks)
@@ -727,6 +729,8 @@ impl PipeWireVirtualSink {
         dsd_gain_db: f64,
         dsd_max_intermediate: Option<PcmRateHz>,
         queue_chunks: usize,
+        cushion_secs: f64,
+        capture_quantum: u32,
         placement: Option<audigma_engine::ThreadPlacement>,
     ) -> Result<Self, PipeWireError> {
         let desc = format!("Audigma Virtual Sink ({node_name})");
@@ -745,9 +749,7 @@ impl PipeWireVirtualSink {
         let dropped_chunks = Arc::new(AtomicU64::new(0));
         let processed_chunks = Arc::new(AtomicU64::new(0));
         let buffered_units = Arc::new(AtomicU64::new(0));
-        let capture_cushion_ns =
-            Arc::new(AtomicU64::new((DEFAULT_INPUT_PREROLL_SECS * 1e9) as u64));
-        let capture_cushion_worker = capture_cushion_ns.clone();
+        let cushion_ns = (cushion_secs * 1e9) as u64;
         let buffered_units_worker = buffered_units.clone();
 
         let (rt_producer, rt_consumer, dropped_rt_events) =
@@ -806,6 +808,7 @@ impl PipeWireVirtualSink {
                 };
 
                 let stream_name = node_name_owned.clone();
+                let init_quantum = quantum_frames_for_rate(rate_hz, capture_quantum);
                 let mut stream_props = properties! {
                     *pipewire::keys::NODE_NAME => stream_name.as_str(),
                     *pipewire::keys::NODE_DESCRIPTION => desc.as_str(),
@@ -820,6 +823,8 @@ impl PipeWireVirtualSink {
                     // between) hardware drivers, so input timing follows the
                     // output and a source's requested size is in its own units.
                     *pipewire::keys::NODE_DRIVER => "true",
+                    // The graph quantum is the size of each pulled cycle.
+                    *pipewire::keys::NODE_LATENCY => format!("{init_quantum}/{rate_hz}"),
                 };
                 if rate_mode == RateMode::Dynamic || allow_dsd {
                     stream_props.insert("audio.allowed-rates", format!("[ {allowed_rates_str} ]"));
@@ -968,7 +973,8 @@ impl PipeWireVirtualSink {
                             }
 
                             if let Some((stream_rate, stride)) = negotiated_stream_rate_and_stride {
-                                let quantum_frames = quantum_frames_for_rate(stream_rate);
+                                let quantum_frames =
+                                    quantum_frames_for_rate(stream_rate, capture_quantum);
                                 let native_dsd = is_dsd_cb.load(Ordering::Acquire);
                                 capture_units_format
                                     .store(u64::from(quantum_frames), Ordering::Release);
@@ -987,6 +993,21 @@ impl PipeWireVirtualSink {
                                         let mut params = [buf_pod];
                                         let _ = stream.update_params(&mut params);
                                     }
+                                }
+                                // Re-request the quantum at the new rate: a single latency
+                                // fraction would land off the power-of-two grid in the
+                                // other rate family.
+                                let latency = format!("{quantum_frames}/{stream_rate}");
+                                let props = properties! {
+                                    *pipewire::keys::NODE_LATENCY => latency.as_str(),
+                                };
+                                // SAFETY: `stream` is live for this callback and PipeWire
+                                // copies the dict before returning.
+                                unsafe {
+                                    pipewire::sys::pw_stream_update_properties(
+                                        stream.as_raw_ptr(),
+                                        props.dict().as_raw_ptr(),
+                                    );
                                 }
                             }
                         } else if id == libspa::param::ParamType::Props.as_raw() {
@@ -1296,7 +1317,6 @@ impl PipeWireVirtualSink {
                     None
                 };
 
-                let init_quantum = quantum_frames_for_rate(rate_hz);
                 let init_stride = channels.max(1) * 4;
                 let init_buffers_bytes = build_buffers_pod(init_quantum, init_stride).ok();
 
@@ -1362,7 +1382,7 @@ impl PipeWireVirtualSink {
                         || !PullDemand::needs_buffer(
                             buffered_units_worker.load(Ordering::Acquire),
                             units_per_sec,
-                            capture_cushion_worker.load(Ordering::Relaxed),
+                            cushion_ns,
                         )
                     {
                         continue;
@@ -1423,20 +1443,11 @@ impl PipeWireVirtualSink {
             dsd_scratch: Vec::new(),
             dsd_residue: Vec::new(),
             prerolled: false,
-            preroll_secs: DEFAULT_INPUT_PREROLL_SECS,
-            capture_cushion_ns,
+            preroll_secs: cushion_secs,
             rt_consumer: Some(rt_consumer),
             dropped_rt_events,
             decimation_recorder,
         })
-    }
-
-    /// Sets the target preroll cushion duration in seconds.
-    #[inline]
-    pub fn set_preroll_secs(&mut self, secs: f64) {
-        self.preroll_secs = secs.clamp(0.040, 1.0);
-        self.capture_cushion_ns
-            .store((self.preroll_secs * 1e9) as u64, Ordering::Relaxed);
     }
 
     /// Returns whether the currently negotiated DSD bitstream is LSB bit order.
@@ -1928,10 +1939,6 @@ impl AudioInput for PipeWireVirtualSink {
         audigma_engine::traits::InputClock::DemandDriven
     }
 
-    fn set_preroll_secs(&mut self, secs: f64) {
-        PipeWireVirtualSink::set_preroll_secs(self, secs);
-    }
-
     fn take_rt_consumer(&mut self) -> Option<audigma_log::RtLogConsumer> {
         self.rt_consumer.take()
     }
@@ -1972,6 +1979,8 @@ pub struct PipeWirePcmOutput {
     graph_rate: Arc<AtomicU32>,
     /// The rate this stream negotiated, to compare the graph's against.
     rate_hz: u32,
+    /// Base graph quantum this stream requests (frames at 44.1/48 kHz).
+    base_quantum_frames: u32,
     /// Channels of the f32 interleaved stream, for converting queued bytes to frames.
     channels: u32,
     /// The last graph rate reported by `write`, so a change is logged once.
@@ -2015,35 +2024,44 @@ fn queued_us(queued_bytes: usize, stride: usize, rate_hz: u32) -> Option<u64> {
 
 /// One graph pull, in microseconds: the larger of the largest pull observed and the quantum
 /// this stream requests (no cycle may have run yet).
-fn pull_us(observed_pull_frames: u32, rate_hz: u32) -> u64 {
+fn pull_us(observed_pull_frames: u32, rate_hz: u32, base_quantum_frames: u32) -> u64 {
     if rate_hz == 0 {
         return 0;
     }
-    let pull = observed_pull_frames.max(quantum_frames_for_rate(rate_hz));
+    let pull = observed_pull_frames.max(quantum_frames_for_rate(rate_hz, base_quantum_frames));
     u64::from(pull) * 1_000_000 / u64::from(rate_hz)
 }
 
-/// Frames of audio the output queue may hold: `queue_ms`, but at least two PipeWire quanta so the
-/// graph never finds the queue empty between two refills.
-fn output_queue_frames(queue_ms: u32, rate_hz: u32) -> usize {
+/// Base size of one live-loop tile (frames at 44.1/48 kHz), the unit `write` pushes.
+const OUTPUT_TILE_FRAMES: u32 = 256;
+
+/// Frames of audio the output queue may hold: `queue_ms`, but at least one PipeWire quantum plus
+/// one tile, so a full quantum is queued when the graph pulls even if the next tile is late.
+fn output_queue_frames(queue_ms: u32, rate_hz: u32, base_quantum_frames: u32) -> usize {
     let by_time = (u64::from(queue_ms) * u64::from(rate_hz) / 1000) as usize;
-    by_time.max(2 * quantum_frames_for_rate(rate_hz) as usize)
+    let floor = quantum_frames_for_rate(rate_hz, base_quantum_frames + OUTPUT_TILE_FRAMES);
+    by_time.max(floor as usize)
 }
 
 impl PipeWirePcmOutput {
     /// Creates and connects a new output stream into the PipeWire graph.
+    ///
+    /// `quantum_frames` is the graph quantum requested at 44.1/48 kHz (`[output].quantum_frames`),
+    /// scaled with the rate.
     pub fn new(
         stream_name: &str,
         target_node: Option<&str>,
         rate_hz: u32,
         channels: u32,
         queue_ms: u32,
+        quantum_frames: u32,
         placement: Option<audigma_engine::ThreadPlacement>,
     ) -> Result<Self, PipeWireError> {
         let (producer, mut consumer) = RingBuffer::<Vec<u8>>::new(OUTPUT_QUEUE_SLOTS);
         let queued_bytes = Arc::new(AtomicUsize::new(0));
         let queued_bytes_cb = queued_bytes.clone();
-        let max_queued_bytes = output_queue_frames(queue_ms, rate_hz) * channels as usize * 4;
+        let max_queued_bytes =
+            output_queue_frames(queue_ms, rate_hz, quantum_frames) * channels as usize * 4;
         let max_pull_frames = Arc::new(AtomicU32::new(0));
         let max_pull_frames_cb = max_pull_frames.clone();
         let running = Arc::new(AtomicBool::new(true));
@@ -2086,11 +2104,10 @@ impl PipeWirePcmOutput {
                     *pipewire::keys::MEDIA_CATEGORY => "Playback",
                     *pipewire::keys::MEDIA_ROLE => "Music",
                     *pipewire::keys::AUDIO_CHANNELS => format!("{channels}"),
-                    // Match the input sink's ~23 ms buffer duration rather than
-                    // pulling the shared graph down to a 256-frame quantum.
-                    // Native DSD passthrough sources such as MPD can fill the
-                    // entire negotiated buffer on each graph cycle.
-                    *pipewire::keys::NODE_LATENCY => format!("{}/{rate_hz}", quantum_frames_for_rate(rate_hz)),
+                    // The quantum scales with the rate, so it is a fixed duration. This stream
+                    // joins the target device's graph, which other apps may share: a smaller
+                    // request shortens every app's cycle on that device.
+                    *pipewire::keys::NODE_LATENCY => format!("{}/{rate_hz}", quantum_frames_for_rate(rate_hz, quantum_frames)),
                 };
 
                 // Ask the graph to run at the output rate. Without this, a graph clocked at another
@@ -2263,6 +2280,7 @@ impl PipeWirePcmOutput {
             target_present: None,
             graph_rate,
             rate_hz,
+            base_quantum_frames: quantum_frames,
             reported_graph_rate: 0,
         })
     }
@@ -2448,7 +2466,11 @@ impl AudioOutput for PipeWirePcmOutput {
 
     /// The graph takes a whole quantum per cycle.
     fn pull_us(&self) -> u64 {
-        pull_us(self.max_pull_frames.load(Ordering::Relaxed), self.rate_hz)
+        pull_us(
+            self.max_pull_frames.load(Ordering::Relaxed),
+            self.rate_hz,
+            self.base_quantum_frames,
+        )
     }
 }
 
@@ -2462,10 +2484,11 @@ mod output_tests {
         assert_eq!(queued_us(16_384 * stride, stride, 384_000), Some(42_666));
         assert_eq!(queued_us(1, 0, 384_000), None);
         // Before any cycle the requested quantum (8192 frames at 384 kHz) stands in.
-        assert_eq!(pull_us(0, 384_000), 21_333);
+        assert_eq!(pull_us(0, 384_000, 1024), 21_333);
+        assert_eq!(pull_us(0, 384_000, 512), 10_666);
         // A larger observed pull (graph at 352.8 kHz resampling to 384 kHz) wins.
-        assert_eq!(pull_us(8_916, 384_000), 23_218);
-        assert_eq!(pull_us(8_916, 0), 0);
+        assert_eq!(pull_us(8_916, 384_000, 1024), 23_218);
+        assert_eq!(pull_us(8_916, 0, 1024), 0);
     }
 
     #[test]
@@ -2476,13 +2499,20 @@ mod output_tests {
     }
 
     #[test]
-    fn requested_output_quantum_matches_native_dsd_buffer_duration() {
-        for pcm_rate in [44_100u32, 88_200, 176_400, 352_800] {
-            for dsd_byte_rate in [352_800u32, 705_600, 1_411_200, 2_822_400] {
-                assert_eq!(
-                    u64::from(quantum_frames_for_rate(pcm_rate)) * u64::from(dsd_byte_rate),
-                    u64::from(quantum_frames_for_rate(dsd_byte_rate)) * u64::from(pcm_rate),
-                );
+    fn quantum_keeps_its_duration_across_pcm_and_native_dsd_rates() {
+        for base in [512u32, 1024] {
+            assert_eq!(quantum_frames_for_rate(44_100, base), base);
+            assert_eq!(quantum_frames_for_rate(48_000, base), base);
+            assert_eq!(quantum_frames_for_rate(96_000, base), 2 * base);
+            for pcm_rate in [44_100u32, 88_200, 176_400, 352_800] {
+                for dsd_byte_rate in [352_800u32, 705_600, 1_411_200, 2_822_400] {
+                    assert_eq!(
+                        u64::from(quantum_frames_for_rate(pcm_rate, base))
+                            * u64::from(dsd_byte_rate),
+                        u64::from(quantum_frames_for_rate(dsd_byte_rate, base))
+                            * u64::from(pcm_rate),
+                    );
+                }
             }
         }
     }
@@ -2554,7 +2584,6 @@ mod input_clock_tests {
                 dsd_residue: Vec::new(),
                 prerolled: false,
                 preroll_secs: 0.090,
-                capture_cushion_ns: Arc::new(AtomicU64::new(90_000_000)),
                 rt_consumer: None,
                 dropped_rt_events: Arc::new(AtomicU64::new(0)),
                 decimation_recorder: Arc::new(audigma_log::DecimationErrorRecorder::new()),
@@ -2634,12 +2663,15 @@ mod input_clock_tests {
 
     #[test]
     fn output_queue_frames_is_bounded_by_time_with_a_quantum_floor() {
-        // 40 ms at 352.8 kHz is 14112 frames; the floor of two 8192-frame quanta wins.
-        assert_eq!(output_queue_frames(40, 352_800), 16_384);
-        // 40 ms at 44.1 kHz is 1764 frames; two 1024-frame quanta (2048) win.
-        assert_eq!(output_queue_frames(40, 44_100), 2_048);
+        // 40 ms at 352.8 kHz is 14112 frames and beats the floor (8192-frame quantum + 2048-frame tile).
+        assert_eq!(output_queue_frames(40, 352_800, 1024), 14_112);
+        // 10 ms at 44.1 kHz is 441 frames; the floor of one quantum plus one tile (1280) wins.
+        assert_eq!(output_queue_frames(10, 44_100, 1024), 1_280);
+        assert_eq!(output_queue_frames(10, 384_000, 1024), 10_240);
+        // A 512-frame quantum lowers the floor: 512 + 256 frames at 44.1 kHz.
+        assert_eq!(output_queue_frames(5, 44_100, 512), 768);
         // A long configured duration is honoured.
-        assert_eq!(output_queue_frames(500, 96_000), 48_000);
+        assert_eq!(output_queue_frames(500, 96_000, 1024), 48_000);
     }
 
     #[test]

@@ -262,6 +262,14 @@
             }
           ]
         },
+        "buffer_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
         "channel_positions": {
           "type": [
             "array",
@@ -294,6 +302,16 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "quantum_frames": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/QuantumFrames"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "rate_hz": {
@@ -463,6 +481,16 @@
           "format": "uint32",
           "minimum": 0
         },
+        "quantum_frames": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/QuantumFrames"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "reserve_device": {
           "type": [
             "boolean",
@@ -523,6 +551,12 @@
       "enum": [
         "single-pass",
         "two-pass"
+      ]
+    },
+    "QuantumFrames": {
+      "enum": [
+        512,
+        1024
       ]
     },
     "RateMode": {

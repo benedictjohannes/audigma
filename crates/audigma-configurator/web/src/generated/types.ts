@@ -3,6 +3,7 @@
 
 export type InputBackend = "pipewire"
 export type PcmRateHz = number
+export type QuantumFrames = (512 | 1024)
 export type RateMode = ("dynamic" | "fixed")
 export type SampleFormat = ("s16le" | "s24le" | "s24_3le" | "s32le" | "f32" | "f64" | "dsd_u32_be" | "dsd_u32_le")
 export type TailPolicy = ("trim-to-duration" | "preserve-tail")
@@ -36,10 +37,12 @@ export interface InputConfig {
 allow_dsd?: (boolean | null)
 allowed_rates?: (number[] | null)
 backend?: (InputBackend | null)
+buffer_ms?: (number | null)
 channel_positions?: (string[] | null)
 channels?: (number | null)
 dsd?: (DsdInputConfig | null)
 node_name?: (string | null)
+quantum_frames?: (QuantumFrames | null)
 rate_hz?: (PcmRateHz | null)
 rate_mode?: (RateMode | null)
 sample_format?: (SampleFormat | null)
@@ -68,6 +71,7 @@ dop_sample_format?: (DopSampleFormat | null)
 keep_audio_sink_ms?: (number | null)
 mixer_control?: (string | null)
 period_ms?: (number | null)
+quantum_frames?: (QuantumFrames | null)
 reserve_device?: (boolean | null)
 target_node?: (string | null)
 transport?: (OutputTransport | null)

@@ -978,7 +978,7 @@ mod tests {
         assert_eq!(d("input.rate_mode"), Some(json!("dynamic")));
         assert_eq!(d("input.allow_dsd"), Some(json!(true)));
         assert_eq!(d("input.dsd.gain_db"), Some(json!(6.0)));
-        assert_eq!(d("output.buffer_ms"), Some(json!(40)));
+        assert_eq!(d("output.buffer_ms"), Some(json!(20)));
         assert_eq!(d("output.period_ms"), Some(json!(5)));
         assert_eq!(d("output.device_wait_ms"), Some(json!(-1)));
         assert_eq!(d("output.keep_audio_sink_ms"), Some(json!(5000)));

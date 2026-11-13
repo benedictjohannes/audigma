@@ -131,7 +131,7 @@ impl Default for AlsaOutputConfig {
             channels: 2,
             frame_rate_hz: 44100,
             format: AlsaFormatRequest::Exact("S16_LE".to_string()),
-            buffer_ms: 40,
+            buffer_ms: audigma_settings::OutputConfig::DEFAULT_BUFFER_MS,
             period_ms: 5,
         }
     }
@@ -149,11 +149,10 @@ impl AlsaOutputConfig {
             .and_then(|o| o.device.clone())
             .unwrap_or_else(|| "default".to_string());
 
-        let buffer_ms = settings
-            .output
-            .as_ref()
-            .and_then(|o| o.buffer_ms)
-            .unwrap_or(40);
+        let buffer_ms = settings.output.as_ref().map_or(
+            audigma_settings::OutputConfig::DEFAULT_BUFFER_MS,
+            audigma_settings::OutputConfig::buffer_ms,
+        );
 
         let period_ms = settings
             .output
@@ -719,6 +718,7 @@ mod tests {
             reserve_device: Some(true),
             buffer_ms: Some(50),
             period_ms: Some(10),
+            quantum_frames: None,
         });
 
         let target_spec = TargetRateSpec::Dsd {
@@ -764,6 +764,7 @@ mod tests {
                 reserve_device: Some(true),
                 buffer_ms: Some(40),
                 period_ms: Some(5),
+                quantum_frames: None,
             });
 
             let target_spec = TargetRateSpec::Dsd {
@@ -858,6 +859,7 @@ mod tests {
             reserve_device: None,
             buffer_ms: None,
             period_ms: None,
+            quantum_frames: None,
         });
 
         let target_spec = TargetRateSpec::Pcm {
@@ -870,7 +872,7 @@ mod tests {
         assert_eq!(cfg.channels, 2);
         assert_eq!(cfg.frame_rate_hz, 768_000);
         assert_eq!(cfg.format, AlsaFormatRequest::Exact("S32_LE".into()));
-        assert_eq!(cfg.buffer_ms, 40);
+        assert_eq!(cfg.buffer_ms, 20);
         assert_eq!(cfg.period_ms, 5);
     }
 

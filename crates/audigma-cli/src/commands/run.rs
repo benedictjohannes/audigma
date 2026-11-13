@@ -435,15 +435,14 @@ fn run_session(
     );
 
     // Set up Input Backend helper closure
-    let out_buf_ms = out_cfg.buffer_ms.unwrap_or(40);
-    let target_preroll_secs = (out_buf_ms as f64 / 1000.0 + 0.050).clamp(0.060, 0.500);
+    let out_buf_ms = out_cfg.buffer_ms();
 
     let create_input_driver =
         |in_cfg: &audigma_settings::InputConfig| -> Result<Box<dyn AudioInput>, EngineError> {
             match in_cfg.backend() {
                 #[cfg(feature = "pipewire")]
                 InputBackend::Pipewire => {
-                    let mut sink = PipeWireVirtualSink::from_input_config_with_placement(
+                    let sink = PipeWireVirtualSink::from_input_config_with_placement(
                         in_cfg,
                         input_rate.get(),
                         128,
@@ -453,7 +452,6 @@ fn run_session(
                         backend: "pipewire",
                         message: format!("failed to bind PipeWire virtual sink: {e}"),
                     })?;
-                    sink.set_preroll_secs(target_preroll_secs);
                     Ok(Box::new(sink))
                 }
                 #[cfg(not(feature = "pipewire"))]
@@ -518,6 +516,7 @@ fn run_session(
                     pw_rate,
                     channels as u32,
                     out_buf_ms,
+                    out_cfg.quantum_frames().frames(),
                     Some(pw_placement.clone()),
                 )
                 .map_err(|e| EngineError::AudioBackend {
@@ -999,7 +998,6 @@ fn run_session(
                                 control.inc_rate_switch();
                                 input.set_generation(generation);
                                 input.set_active_rate(new_rate);
-                                input.set_preroll_secs(target_preroll_secs);
 
                                 // Update telemetry
                                 control.set_stream_config(new_rate.get(), output_format, output_rate_hz);

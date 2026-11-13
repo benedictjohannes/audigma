@@ -159,6 +159,8 @@ fn test_pipewire_virtual_sink_from_input_config_resolution() {
         rate_mode: Some(RateMode::Dynamic),
         allowed_rates: Some(vec![44100, 48000, 96000, 192000]),
         allow_dsd: None,
+        buffer_ms: None,
+        quantum_frames: None,
         dsd: None,
     };
 
@@ -216,7 +218,7 @@ fn test_pipewire_virtual_sink_and_pcm_output_lifecycle() {
         }
     }
 
-    match PipeWirePcmOutput::new("audigma_test_out", None, 48000, 2, 40, None) {
+    match PipeWirePcmOutput::new("audigma_test_out", None, 48000, 2, 40, 1024, None) {
         Ok(mut out) => {
             use std::io::Write;
             let silence_bytes = vec![0u8; 128];

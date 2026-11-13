@@ -147,9 +147,11 @@ summary = "Output buffer length in milliseconds."
 description = """
 For `alsa`, the device buffer length (minimum 5). For `pipewire`, it sizes the output queue.
 
+The PipeWire queue never holds less than one graph quantum (`quantum_frames`) plus one processing tile of 256 frames (~29 ms at the default 1024-frame quantum in the 44.1 kHz family, ~17 ms at 512), so values below that have no further effect. PipeWire's own graph adds about 1.5 quanta on top.
+
 A larger buffer tolerates scheduling hiccups and CPU spikes without dropouts. A smaller one reduces latency and the time before a pause or stop is heard. Validate with a real playback test after changing it.
 """
-default = 40
+default = 20
 range = [5.0, 5000.0]
 show_if = { key = "output.backend", in = ["alsa", "pipewire"] }
 applies_to = ["run", "play"]
@@ -160,12 +162,34 @@ summary = "ALSA period length in milliseconds."
 description = """
 How often the device asks for more data (minimum 1).
 
-Smaller periods lower latency but cause more CPU wakeups. Keep it well below `buffer_ms`; the defaults (5 ms against 40 ms) give 8 periods per buffer.
+Smaller periods lower latency but cause more CPU wakeups. Keep it well below `buffer_ms`; the defaults (5 ms against 20 ms) give 4 periods per buffer.
 """
 default = 5
 range = [1.0, 1000.0]
 show_if = { key = "output.backend", eq = "alsa" }
 applies_to = ["run", "play"]
+
+[[field]]
+key = "quantum_frames"
+summary = "Graph quantum the PipeWire output stream requests."
+description = """
+The output stream requests this quantum (`node.latency`) from PipeWire. The values are frames at 44.1/48 kHz; higher rates scale them by the same power of two, so each choice is a fixed duration.
+
+The quantum sets both the floor of the output queue and most of PipeWire's own delay to the DAC, so 512 removes roughly 1.5 × 11.6 ms of latency compared with 1024. The stream joins the DAC's graph, which other applications playing to the same device share: a smaller quantum makes all of them run shorter cycles, with more wakeups. Validate with a real playback test after changing it.
+"""
+default = 1024
+show_if = { key = "output.backend", eq = "pipewire" }
+applies_to = ["run", "play"]
+
+[[field.options]]
+key = "1024"
+label = "1024 frames (~23.2 ms)"
+summary = "PipeWire's default quantum; fewest wakeups."
+
+[[field.options]]
+key = "512"
+label = "512 frames (~11.6 ms)"
+summary = "Lower latency; shorter cycles for every app on the DAC."
 
 [[field]]
 key = "volume_control"

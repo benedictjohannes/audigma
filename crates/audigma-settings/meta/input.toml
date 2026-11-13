@@ -148,6 +148,39 @@ recommended.headless-appliance = { value = true, why = "you have DSD sources and
 recommended.interactive-desktop = { value = false, why = "keeps PipeWire's mixer always available; no DSD stream takes the sink exclusively." }
 
 [[field]]
+key = "buffer_ms"
+summary = "Input cushion of the PipeWire sink in milliseconds."
+description = """
+The sink pulls the next graph cycle from the playing application only when less than this much audio is queued, so this is the input share of the end-to-end latency (plus up to one `quantum_frames` cycle).
+
+It only has to cover the time an application takes to answer a pull; the output buffer (`output.buffer_ms`) protects the DAC. Raise it if a slow or heavily loaded source causes dropouts. Validate with a real playback test after changing it.
+"""
+default = 20
+range = [5.0, 500.0]
+applies_to = ["run"]
+
+[[field]]
+key = "quantum_frames"
+summary = "Audio pulled from the playing application per sink cycle."
+description = """
+The sink requests this graph quantum (`node.latency`) from PipeWire. The values are frames at 44.1/48 kHz; higher rates and DSD scale them by the same power of two, so each choice is a fixed duration.
+
+The input queue swings between `buffer_ms` and `buffer_ms` plus one cycle, so a smaller cycle lowers latency at the cost of more PipeWire wakeups. A source that asks for an even smaller quantum still gets it. Validate with a real playback test after changing it.
+"""
+default = 512
+applies_to = ["run"]
+
+[[field.options]]
+key = "512"
+label = "512 frames (~11.6 ms)"
+summary = "Lower latency; about 6 ms less input queue than 1024."
+
+[[field.options]]
+key = "1024"
+label = "1024 frames (~23.2 ms)"
+summary = "PipeWire's default quantum; fewest wakeups."
+
+[[field]]
 key = "dsd"
 kind = "group"
 summary = "DSD input processing."

@@ -269,6 +269,8 @@ mod tests {
             0.0,
             None,
             128,
+            0.090,
+            1024,
             None,
         )
         .unwrap();

@@ -10,15 +10,15 @@
 │ rate_mode           dynamic        ││Default: none.                          │
 │ allowed_rates       [44100, 48000,…││                                        │
 │ allow_dsd           true           ││Recommended for headless appliance:     │
-│ dsd                                ││alsa. audigma owns the DAC; supports    │
-│   dsd.max_intermed… (auto)         ││DSD.                                    │
-│   dsd.gain_db       6.0            ││Used by: run, play.                     │
+│ buffer_ms           20             ││alsa. audigma owns the DAC; supports    │
+│ quantum_frames      512            ││DSD.                                    │
+│ dsd                                ││Used by: run, play.                     │
+│   dsd.max_intermed… (auto)         ││                                        │
+│   dsd.gain_db       6.0            ││                                        │
 │▾ Output                            ││                                        │
 │?backend             -              ││                                        │
 │ volume_control      hardware-softw…││                                        │
 │ device_wait_ms      -1             ││                                        │
-│ device_wait_expiry  exit           ││                                        │
-│ keep_audio_sink_ms  5000           ││                                        │
 └────────────────────────────────────┘└────────────────────────────────────────┘
  Error in target.dsd_rate: is required when format = "dsd"
  Enter edit  Del reset  a assist  u use case  m mode  * hidden  r review  q quit

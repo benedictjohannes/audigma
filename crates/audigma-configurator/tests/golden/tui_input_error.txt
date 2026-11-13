@@ -1,24 +1,24 @@
  audigma configure  new file · use case: not set · mode: all · hidden keys shown
 ┌ Settings ──────────────────────────┐┌ Help ──────────────────────────────────┐
-│ node_name           (auto)         ││Output buffer length in milliseconds.   │
-│ sample_format       s16le          ││                                        │
-│ rate_hz             (auto)         ││For alsa, the device buffer length      │
-│ channels            2              ││(minimum 5). For pipewire, it sizes the │
-│ channel_positions   (auto)         ││output queue.                           │
-│ rate_mode           dynamic        ││                                        │
-│ allowe┌ buffer_ms ───────────────────────────────────────────────────┐ing    │
-│ allow_│Range: 5 to 5000. Default: 40. Empty resets to the default.   │       │
-│ dsd   │                                                              │atency │
-│   dsd.│> 999999▏                                                     │op is  │
-│   dsd.│                                                              │ack    │
-│▾ Outpu│Must be between 5 and 5000.                                   │       │
-│?backen│                                                              │       │
+│ rate_hz             (auto)         ││Output buffer length in milliseconds.   │
+│ channels            2              ││                                        │
+│ channel_positions   (auto)         ││For alsa, the device buffer length      │
+│ rate_mode           dynamic        ││(minimum 5). For pipewire, it sizes the │
+│ allowed_rates       [44100, 48000,…││output queue.                           │
+│ allow_dsd           true           ││                                        │
+│ buffer┌ buffer_ms ───────────────────────────────────────────────────┐ss     │
+│ quantu│Range: 5 to 5000. Default: 20. Empty resets to the default.   │rames) │
+│ dsd   │                                                              │rames  │
+│   dsd.│> 999999▏                                                     │       │
+│   dsd.│                                                              │17 ms  │
+│▾ Outpu│Must be between 5 and 5000.                                   │e no   │
+│?backen│                                                              │aph    │
 │ target└──────────────────────────────────────────────────────────────┘       │
-│ device              (hidden)       ││Used by: run, play.                     │
-│ transport           (hidden)       ││Hidden: not applicable to the current   │
-│ dop_sample_format   (hidden)       ││choices.                                │
-│ reserve_device      (hidden)       ││                                        │
-│ buffer_ms           (hidden)       ││                                        │
-└────────────────────────────────────┘└────────────────────────────────────────┘
+│ device              (hidden)       ││                                        │
+│ transport           (hidden)       ││A larger buffer tolerates scheduling    │
+│ dop_sample_format   (hidden)       ││hiccups and CPU spikes without          │
+│ reserve_device      (hidden)       ││dropouts. A smaller one reduces latency │
+│ buffer_ms           (hidden)       ││and the time before a pause or stop is  │
+└────────────────────────────────────┘└──────────────────────────── ] more ────┘
  Error in target: the configuration must specify [target]
  Enter edit  Del reset  a assist  u use case  m mode  * hidden  r review  q quit
