@@ -472,6 +472,18 @@ pub struct BenchmarkHandle {
 }
 
 impl BenchmarkHandle {
+    pub fn new(
+        events: Receiver<BenchmarkEvent>,
+        cancel: Arc<AtomicBool>,
+        join: Option<JoinHandle<()>>,
+    ) -> Self {
+        Self {
+            events,
+            cancel,
+            join,
+        }
+    }
+
     /// Asks the run to stop at its next check (see the module docs for the granularity).
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Relaxed);

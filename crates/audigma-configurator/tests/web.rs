@@ -3,19 +3,61 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use audigma_configurator::assist::benchmark::{
-    self, BenchmarkHandle, BenchmarkParams, BenchmarkRequest,
+    self, BenchmarkEvent, BenchmarkHandle, BenchmarkParams, BenchmarkRequest,
 };
 use audigma_configurator::web::{Backend, EndReason, ServeOptions, Server, Session, is_exposed};
 use audigma_io::{AlsaProbeReport, PipeWireProbeReport, PipeWireSinkInfo};
 use audigma_settings::Settings;
 use serde_json::{Value, json};
 
-/// Fake probes, and benchmarks shrunk to about a second.
-struct Fake;
+struct Gate {
+    released: Mutex<bool>,
+    cv: Condvar,
+}
+
+impl Gate {
+    fn new() -> Self {
+        Self {
+            released: Mutex::new(false),
+            cv: Condvar::new(),
+        }
+    }
+
+    fn wait(&self, cancel: &AtomicBool) {
+        let mut released = self.released.lock().unwrap();
+        while !*released && !cancel.load(Ordering::Relaxed) {
+            let (r, _) = self
+                .cv
+                .wait_timeout(released, Duration::from_millis(10))
+                .unwrap();
+            released = r;
+        }
+    }
+
+    fn release(&self) {
+        *self.released.lock().unwrap() = true;
+        self.cv.notify_all();
+    }
+}
+
+struct ReleaseHandle(Arc<Gate>);
+
+impl Drop for ReleaseHandle {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+/// Fake probes, and benchmarks shrunk to minimal audio duration with an optional pause gate.
+#[derive(Default)]
+struct Fake {
+    gate: Mutex<Option<Arc<Gate>>>,
+}
 
 impl Backend for Fake {
     fn probe_alsa(&self) -> Result<AlsaProbeReport, String> {
@@ -40,7 +82,53 @@ impl Backend for Fake {
             seconds: 1,
             blocks: 250,
         };
-        benchmark::start(req)
+        let real = benchmark::start(req);
+        let gate = self.gate.lock().unwrap().take();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_for_thread = Arc::clone(&cancel);
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let join = std::thread::Builder::new()
+            .name("fake-benchmark-proxy".into())
+            .spawn(move || {
+                loop {
+                    if cancel_for_thread.load(Ordering::Relaxed) {
+                        real.cancel();
+                    }
+                    match real.events.recv_timeout(Duration::from_millis(10)) {
+                        Ok(BenchmarkEvent::Progress { stage, fraction }) => {
+                            let _ = tx.send(BenchmarkEvent::Progress { stage, fraction });
+                        }
+                        Ok(terminal) => {
+                            if cancel_for_thread.load(Ordering::Relaxed) {
+                                let _ = tx.send(BenchmarkEvent::Cancelled);
+                                return;
+                            }
+                            if let Some(ref g) = gate {
+                                g.wait(&cancel_for_thread);
+                            }
+                            if cancel_for_thread.load(Ordering::Relaxed) {
+                                let _ = tx.send(BenchmarkEvent::Cancelled);
+                            } else {
+                                let _ = tx.send(terminal);
+                            }
+                            return;
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            let _ = tx.send(if cancel_for_thread.load(Ordering::Relaxed) {
+                                BenchmarkEvent::Cancelled
+                            } else {
+                                BenchmarkEvent::Failed("benchmark ended unexpectedly".into())
+                            });
+                            return;
+                        }
+                    }
+                }
+            })
+            .expect("spawn fake benchmark proxy");
+
+        BenchmarkHandle::new(rx, cancel, Some(join))
     }
 }
 
@@ -102,6 +190,7 @@ struct T {
     server: Server,
     addr: SocketAddr,
     auth: String,
+    backend: Arc<Fake>,
 }
 
 const NEW_PATH: &str = "/nonexistent/audigma/config.toml";
@@ -116,13 +205,21 @@ impl T {
     }
 
     fn with(session: Session, opts: &ServeOptions) -> Self {
-        let server = Server::start(session, Arc::new(Fake), opts).unwrap();
+        let backend = Arc::new(Fake::default());
+        let server = Server::start(session, backend.clone() as Arc<dyn Backend>, opts).unwrap();
         let auth = format!("Bearer {}", server.token);
         Self {
             addr: server.addr,
             server,
             auth,
+            backend,
         }
+    }
+
+    fn hold_benchmark(&self) -> ReleaseHandle {
+        let gate = Arc::new(Gate::new());
+        *self.backend.gate.lock().unwrap() = Some(Arc::clone(&gate));
+        ReleaseHandle(gate)
     }
 
     fn call(&self, method: &str, path: &str, body: &str) -> Reply {
@@ -489,6 +586,7 @@ fn offline_guided_setup_ends_in_the_form() {
 fn validating_streams_progress_and_marks_a_later_edit_stale() {
     let dir = tempfile::tempdir().unwrap();
     let t = T::new(existing_session(dir.path()));
+    let release = t.hold_benchmark();
     let started = t.post("/api/benchmark", json!({}));
     assert_eq!(started.status, 200, "{}", started.body);
     let id = started.json()["id"].as_u64().unwrap();
@@ -497,6 +595,8 @@ fn validating_streams_progress_and_marks_a_later_edit_stale() {
     let busy = t.put_draft(json!({ "set": { "target.rate_family": "44100" } }));
     assert_eq!(busy.status, 409);
     assert_eq!(t.post("/api/benchmark", json!({})).status, 409);
+
+    drop(release);
 
     let stream = events(&t, id);
     assert!(stream.contains("event: progress"), "{stream}");
@@ -528,6 +628,7 @@ fn validating_needs_a_valid_draft() {
 #[test]
 fn a_discovery_sweep_can_be_cancelled() {
     let t = T::new(new_session());
+    let _hold = t.hold_benchmark();
     t.guided_to_discover();
     let started = t.answer("run");
     assert_eq!(started["next"], "benchmark");
@@ -733,12 +834,14 @@ fn an_unreadable_target_is_an_error_not_a_null() {
 fn a_preview_is_allowed_while_a_benchmark_runs() {
     let dir = tempfile::tempdir().unwrap();
     let t = T::new(existing_session(dir.path()));
+    let release = t.hold_benchmark();
     let id = t.post("/api/benchmark", json!({})).json()["id"]
         .as_u64()
         .unwrap();
     assert_eq!(t.post("/api/preview", json!({})).status, 200);
     // Saving would end the server mid-run, so it stays refused.
     assert_eq!(t.post("/api/save", json!({})).status, 409);
+    drop(release);
     events(&t, id);
 }
 
@@ -876,6 +979,7 @@ fn loading_is_refused_during_guided_setup_and_guided_setup_after_loading() {
 fn loading_is_refused_while_a_benchmark_runs() {
     let t = T::new(new_session());
     valid_draft(&t);
+    let _hold = t.hold_benchmark();
     let id = t.post("/api/benchmark", json!({})).json()["id"]
         .as_u64()
         .unwrap();
