@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { ApiRequestsSchema, ApiResponsesSchema } from "./generated/zod";
 import type { AlsaProbeResponse, DraftView, JobEvent } from "./generated/types";
+import { ApiRequestsSchema, ApiResponsesSchema } from "./generated/zod";
 
 const res = ApiResponsesSchema.shape;
 
@@ -15,6 +15,7 @@ const k17: AlsaProbeResponse = {
         name: "USB-Audio",
         longname: "FiiO K17",
         usb_id: "2972:0107",
+        mixer_controls: [{ name: "PCM", index: 0, has_volume: true, has_switch: true }],
         devices: [
           {
             card_index: 3,
@@ -41,7 +42,9 @@ const k17: AlsaProbeResponse = {
 test("the ALSA probe response is typed and parses", () => {
   expect(res.probe_alsa.safeParse(k17).success).toBe(true);
   const broken = structuredClone(k17);
-  (broken.report!.cards[0].devices[0] as { is_busy: unknown }).is_busy = "no";
+  const device = broken.report?.cards[0]?.devices[0] as { is_busy: unknown } | undefined;
+  if (!device) throw new Error("fixture has no device");
+  device.is_busy = "no";
   expect(res.probe_alsa.safeParse(broken).success).toBe(false);
 });
 
@@ -55,9 +58,15 @@ test("the PipeWire probe response and a failed probe parse", () => {
     alsa_card_name: "K17",
     alsa_path: null,
   };
-  expect(res.probe_pipewire.safeParse({ report: { sinks: [sink] }, error: null }).success).toBe(true);
-  expect(res.probe_pipewire.safeParse({ report: null, error: "no PipeWire daemon" }).success).toBe(true);
-  expect(res.probe_pipewire.safeParse({ report: { sinks: [{ id: "x" }] }, error: null }).success).toBe(false);
+  expect(res.probe_pipewire.safeParse({ report: { sinks: [sink] }, error: null }).success).toBe(
+    true,
+  );
+  expect(res.probe_pipewire.safeParse({ report: null, error: "no PipeWire daemon" }).success).toBe(
+    true,
+  );
+  expect(
+    res.probe_pipewire.safeParse({ report: { sinks: [{ id: "x" }] }, error: null }).success,
+  ).toBe(false);
 });
 
 test("benchmark events are a tagged union", () => {
@@ -65,7 +74,9 @@ test("benchmark events are a tagged union", () => {
   expect(res.job_event.safeParse(progress).success).toBe(true);
   expect(res.job_event.safeParse({ type: "cancelled" }).success).toBe(true);
   expect(res.job_event.safeParse({ type: "failed", message: "x" }).success).toBe(true);
-  expect(res.job_event.safeParse({ type: "progress", stage: "nope", fraction: 0, tier: null }).success).toBe(false);
+  expect(
+    res.job_event.safeParse({ type: "progress", stage: "nope", fraction: 0, tier: null }).success,
+  ).toBe(false);
   const sweep: JobEvent = {
     type: "discovery",
     discovery: {
@@ -98,6 +109,7 @@ test("a draft carries scalar and list values", () => {
     touched: ["target.format"],
     issues: [{ path: "target", message: "the configuration must specify [target]", error: true }],
     findings: [],
+    device_check: { state: "not_run" },
     validation: null,
   };
   expect(res.draft.safeParse(draft).success).toBe(true);
@@ -108,7 +120,9 @@ test("a draft carries scalar and list values", () => {
 
 test("request bodies are typed", () => {
   const req = ApiRequestsSchema.shape;
-  expect(req.draft_edit.safeParse({ set: { "target.pcm_rate_hz": 88200 }, use_case: null }).success).toBe(true);
+  expect(
+    req.draft_edit.safeParse({ set: { "target.pcm_rate_hz": 88200 }, use_case: null }).success,
+  ).toBe(true);
   expect(req.draft_edit.safeParse({ set: { "target.format": { nested: 1 } } }).success).toBe(false);
   expect(req.save.safeParse({ comment_level: "full", only_changed: false }).success).toBe(true);
   expect(req.save.safeParse({ comment_level: "loud" }).success).toBe(false);

@@ -87,7 +87,24 @@ pub struct DraftView {
     pub touched: Vec<String>,
     pub issues: Vec<Issue>,
     pub findings: Vec<CapabilityFinding>,
+    /// Whether `findings` come from a device probe: an empty list means "checked and clean"
+    /// only in the `checked` state.
+    pub device_check: DeviceCheck,
     pub validation: Option<ValidationView>,
+}
+
+/// State of the ALSA device check behind `DraftView::findings`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum DeviceCheck {
+    /// No ALSA probe has run in this session.
+    NotRun,
+    /// The probe ran and the findings are current.
+    Checked,
+    /// The draft has errors, so it cannot be checked.
+    Blocked,
+    /// The probe itself failed.
+    Failed { message: String },
 }
 
 /// The last "validate on this machine" result.
@@ -284,6 +301,16 @@ impl Session {
         capability::check(self.draft.settings(), alsa)
     }
 
+    pub fn device_check(&self) -> DeviceCheck {
+        match self.probe.as_ref().map(|p| &p.alsa) {
+            None => DeviceCheck::NotRun,
+            Some(Err(e)) if e == "not probed yet" => DeviceCheck::NotRun,
+            Some(Err(e)) => DeviceCheck::Failed { message: e.clone() },
+            Some(Ok(_)) if self.draft.has_errors() => DeviceCheck::Blocked,
+            Some(Ok(_)) => DeviceCheck::Checked,
+        }
+    }
+
     pub fn validation(&self) -> Option<ValidationView> {
         self.validated.as_ref().map(|v| ValidationView {
             result: v.result.clone(),
@@ -308,6 +335,7 @@ impl Session {
             touched: self.draft.touched().iter().cloned().collect(),
             issues: self.draft.issues(),
             findings: self.findings(),
+            device_check: self.device_check(),
             validation: self.validation(),
         }
     }

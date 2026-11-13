@@ -34,6 +34,52 @@ pub struct AlsaCardReport {
     pub usb_id: Option<String>,
     /// PCM playback devices found on this card.
     pub devices: Vec<AlsaDeviceReport>,
+    /// Mixer elements with playback volume or switch (candidates for `output.mixer_control`).
+    #[serde(default)]
+    pub mixer_controls: Vec<MixerControlReport>,
+}
+
+/// A playback mixer element of a card.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MixerControlReport {
+    /// Element name (e.g. "PCM", "Master"), the value for `output.mixer_control`.
+    pub name: String,
+    /// Element index (usually 0).
+    pub index: u32,
+    /// Has a playback volume.
+    pub has_volume: bool,
+    /// Has a playback switch (mute).
+    pub has_switch: bool,
+}
+
+/// Lists the playback mixer elements of a card; empty when the mixer cannot be opened.
+#[cfg(feature = "alsa")]
+fn probe_mixer_controls(card_idx: i32) -> Vec<MixerControlReport> {
+    use alsa::mixer::{Mixer, Selem};
+    let Ok(mixer) = Mixer::new(&format!("hw:{card_idx}"), false) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for elem in mixer.iter() {
+        let Some(selem) = Selem::new(elem) else {
+            continue;
+        };
+        let (has_volume, has_switch) = (selem.has_playback_volume(), selem.has_playback_switch());
+        if !has_volume && !has_switch {
+            continue;
+        }
+        let id = selem.get_id();
+        if let Ok(name) = id.get_name() {
+            out.push(MixerControlReport {
+                name: name.to_string(),
+                index: id.get_index(),
+                has_volume,
+                has_switch,
+            });
+        }
+    }
+    out
 }
 
 /// Discovered PCM device report.
@@ -511,6 +557,7 @@ pub fn probe_alsa_devices_procfs_only() -> Result<AlsaProbeReport, String> {
                         longname,
                         usb_id,
                         devices: vec![dev_report],
+                        mixer_controls: Vec::new(),
                     });
                 }
             }
@@ -574,6 +621,7 @@ fn probe_alsa_devices_native() -> Result<AlsaProbeReport, String> {
                         capabilities: None,
                         error: Some(format!("failed to open ALSA ctl: {e}")),
                     }],
+                    mixer_controls: probe_mixer_controls(card_idx),
                 });
                 continue;
             }
@@ -706,6 +754,7 @@ fn probe_alsa_devices_native() -> Result<AlsaProbeReport, String> {
             longname: card_longname,
             usb_id,
             devices,
+            mixer_controls: probe_mixer_controls(card_idx),
         });
     }
 

@@ -78,7 +78,6 @@ This setting only applies to DSD targets; PCM targets ignore it. Keep `5` unless
 """
 default = 5
 show_if = { key = "target.format", eq = "dsd" }
-assist = ["benchmark-validate"]
 
 [[field.options]]
 key = "5"

@@ -445,6 +445,7 @@ fn probe_assist_requests_a_probe_and_offers_the_devices() {
                 name: "K17".into(),
                 longname: "FiiO K17".into(),
                 usb_id: None,
+                mixer_controls: vec![],
                 devices: vec![AlsaDeviceReport {
                     card_index: 2,
                     device_index: 0,
@@ -809,6 +810,7 @@ fn k17_probe() -> ProbeReport {
                 name: "USB-Audio".into(),
                 longname: "FiiO K17".into(),
                 usb_id: None,
+                mixer_controls: vec![],
                 devices: vec![AlsaDeviceReport {
                     card_index: 3,
                     device_index: 0,

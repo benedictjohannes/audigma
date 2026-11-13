@@ -26,8 +26,8 @@ pub use self::pipewire_probe::{
 pub use self::pipewire_watch::PipeWireSinkWatcher;
 pub use alsa::{
     AlsaAudioOutput, AlsaCardReport, AlsaDeviceReport, AlsaDeviceWatcher, AlsaHardwareMixer,
-    AlsaOutputConfig, AlsaOutputError, AlsaProbeReport, is_alsa_device_present, probe_alsa_devices,
-    resolve_card_index, wait_for_alsa_device,
+    AlsaOutputConfig, AlsaOutputError, AlsaProbeReport, MixerControlReport, is_alsa_device_present,
+    probe_alsa_devices, resolve_card_index, wait_for_alsa_device,
 };
 
 #[cfg(feature = "dbus")]

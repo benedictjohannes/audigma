@@ -5,12 +5,32 @@
   "scripts": {
     "gen": "bun scripts/gen.ts",
     "test": "bun test",
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json",
+    "dev": "vite --port 12302 --strictPort",
+    "build": "vite build",
+    "format": "biome format --write .",
+    "lint": "biome check .",
+    "fix": "biome check --write ."
   },
   "devDependencies": {
+    "@biomejs/biome": "2.6.4",
+    "@tailwindcss/vite": "4.3.3",
+    "@types/bun": "1.4.4",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.2",
     "json-schema-to-typescript": "^16.0.0",
     "json-schema-to-zod": "^2.8.1",
-    "zod": "^4.6.7",
-    "typescript": "^5.9.0"
-  }
+    "tailwindcss": "4.3.3",
+    "typescript": "^5.9.0",
+    "vite": "8.3.5",
+    "vite-plugin-singlefile": "2.3.4",
+    "zod": "^4.6.7"
+  },
+  "dependencies": {
+    "lucide-react": "1.64.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "packageManager": "bun@1.4.4"
 }

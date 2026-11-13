@@ -112,6 +112,13 @@
         "longname": {
           "type": "string"
         },
+        "mixer_controls": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MixerControlReport"
+          }
+        },
         "name": {
           "type": "string"
         },
@@ -127,7 +134,8 @@
         "id",
         "name",
         "longname",
-        "devices"
+        "devices",
+        "mixer_controls"
       ]
     },
     "AlsaDeviceReport": {
@@ -490,6 +498,62 @@
         "dop"
       ]
     },
+    "DeviceCheck": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "not_run"
+            }
+          },
+          "required": [
+            "state"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "checked"
+            }
+          },
+          "required": [
+            "state"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "blocked"
+            }
+          },
+          "required": [
+            "state"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string",
+              "const": "failed"
+            }
+          },
+          "required": [
+            "state",
+            "message"
+          ]
+        }
+      ]
+    },
     "DiscoveryView": {
       "type": "object",
       "properties": {
@@ -544,6 +608,9 @@
     "DraftView": {
       "type": "object",
       "properties": {
+        "device_check": {
+          "$ref": "#/$defs/DeviceCheck"
+        },
         "exists": {
           "type": "boolean"
         },
@@ -615,6 +682,7 @@
         "touched",
         "issues",
         "findings",
+        "device_check",
         "validation"
       ]
     },
@@ -890,6 +958,31 @@
         "kind",
         "done",
         "last"
+      ]
+    },
+    "MixerControlReport": {
+      "type": "object",
+      "properties": {
+        "has_switch": {
+          "type": "boolean"
+        },
+        "has_volume": {
+          "type": "boolean"
+        },
+        "index": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "index",
+        "has_volume",
+        "has_switch"
       ]
     },
     "NativeDsdSupport": {

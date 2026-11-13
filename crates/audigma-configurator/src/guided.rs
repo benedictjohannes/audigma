@@ -937,6 +937,7 @@ mod tests {
                     name: "USB-Audio".into(),
                     longname: "FIIO K17".into(),
                     usb_id: None,
+                    mixer_controls: vec![],
                     devices: vec![AlsaDeviceReport {
                         card_index: 2,
                         device_index: 0,

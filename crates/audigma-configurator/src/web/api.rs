@@ -33,7 +33,11 @@ use crate::assist::probe::ProbeReport;
 use crate::draft::Issue;
 use crate::guided::Outcome;
 
-const PLACEHOLDER: &str = include_str!("placeholder.html");
+/// The page `GET /` serves: the built single-file app, or the fallback page (see `build.rs`).
+const INDEX_HTML: &str = include_str!(concat!(env!("OUT_DIR"), "/index.html"));
+
+/// `true` when the page is the real web app (`web/dist/index.html` existed at build time).
+pub const UI_EMBEDDED: bool = matches!(env!("AUDIGMA_UI_EMBEDDED").as_bytes(), b"1");
 
 /// Compares in time that does not depend on where the strings differ.
 pub fn ct_eq(a: &str, b: &str) -> bool {
@@ -211,7 +215,7 @@ fn route(sh: &Arc<Shared>, req: &Request) -> Response {
     let segs: Vec<&str> = req.path.trim_matches('/').split('/').collect();
     let m = req.method.as_str();
     match (m, segs.as_slice()) {
-        ("GET", [""]) => Response::html(PLACEHOLDER),
+        ("GET", [""]) => Response::html(INDEX_HTML),
         ("GET", ["api", "meta"]) => ok(&sh.meta),
         ("GET", ["api", "draft"]) => ok(&sh.session().draft_view()),
         ("PUT", ["api", "draft"]) => put_draft(sh, req),

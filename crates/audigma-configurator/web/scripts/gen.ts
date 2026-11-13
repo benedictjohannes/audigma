@@ -1,11 +1,12 @@
 // Generates src/generated/types.ts and zod.ts from the two JSON Schemas that
 // `cargo run -p audigma-configurator --example gen_schema` writes next to them.
 // Output must be deterministic: the Rust drift test regenerates and compares.
-import { compile } from "json-schema-to-typescript";
-import { jsonSchemaToZod } from "json-schema-to-zod";
+
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { compile } from "json-schema-to-typescript";
+import { jsonSchemaToZod } from "json-schema-to-zod";
 
 // Optional argument: another directory holding the two schemas (the Rust drift test uses this).
 const dir =
@@ -25,7 +26,7 @@ type Json = null | boolean | number | string | Json[] | { [k: string]: Json };
 function inline(node: Json, root: { [k: string]: Json }, stack: string[] = []): Json {
   if (Array.isArray(node)) return node.map((n) => inline(n, root, stack));
   if (node === null || typeof node !== "object") return node;
-  const ref = node["$ref"];
+  const ref = node.$ref;
   if (typeof ref === "string") {
     if (!ref.startsWith("#/")) throw new Error(`unsupported $ref ${ref}`);
     if (stack.includes(ref)) return {};
@@ -57,11 +58,12 @@ function dedupe(source: string): string {
   let out = lines.slice(0, starts[0] ?? lines.length).join("\n");
   starts.forEach((start, n) => {
     const chunk = lines.slice(start, starts[n + 1] ?? lines.length).join("\n");
-    const name = /^export (?:type|interface) (\w+)/.exec(chunk)![1];
+    const name = /^export (?:type|interface) (\w+)/.exec(chunk)?.[1];
+    if (name === undefined) throw new Error(`cannot find a type name in: ${chunk.slice(0, 80)}`);
     const prev = seen.get(name);
     if (prev === undefined) {
       seen.set(name, chunk);
-      out += "\n" + chunk;
+      out += `\n${chunk}`;
     } else if (prev.trim() !== chunk.trim()) {
       throw new Error(`type ${name} is generated differently by two schemas`);
     }
@@ -70,15 +72,25 @@ function dedupe(source: string): string {
 }
 
 let types = banner;
-let zod = banner + 'import { z } from "zod";\n';
+let zod = `${banner}import { z } from "zod";\n`;
 for (const { file, name } of inputs) {
   const schema = JSON.parse(readFileSync(join(dir, file), "utf8"));
   types +=
     "\n" +
-    dedupe(await compile(schema, name, { bannerComment: "", additionalProperties: false, format: false }));
+    dedupe(
+      await compile(schema, name, {
+        bannerComment: "",
+        additionalProperties: false,
+        format: false,
+      }),
+    );
   zod +=
     `\nexport const ${name}Schema = ` +
-    jsonSchemaToZod(inline(schema, schema) as object, { module: "none", name: undefined, type: false }) +
+    jsonSchemaToZod(inline(schema, schema) as object, {
+      module: "none",
+      name: undefined,
+      type: false,
+    }) +
     ";\n";
 }
 writeFileSync(join(dir, "types.ts"), types);

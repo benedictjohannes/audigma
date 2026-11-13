@@ -175,7 +175,6 @@ Hardware control is unavailable for pipewire and file output.
 """
 default = "hardware-software-fallback"
 applies_to = ["run", "play"]
-assist = ["alsa-detect"]
 
 [[field.options]]
 key = "hardware-software-fallback"

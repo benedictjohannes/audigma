@@ -228,6 +228,16 @@ path?: (string | null)
 }
 
 
+export type DeviceCheck = ({
+state: "not_run"
+} | {
+state: "checked"
+} | {
+state: "blocked"
+} | {
+message: string
+state: "failed"
+})
 export type Severity = ("error" | "warning" | "info")
 export type Tier = ("optimal" | "capable" | "constrained")
 export type GuidedNext = ("step" | "probed" | "benchmark" | "review" | "form_offline")
@@ -289,6 +299,7 @@ save: SaveResponse
 validate: ValidateResponse
 }
 export interface DraftView {
+device_check: DeviceCheck
 exists: boolean
 findings: CapabilityFinding[]
 guided_active: boolean
@@ -416,6 +427,7 @@ devices: AlsaDeviceReport[]
 id: string
 index: number
 longname: string
+mixer_controls: MixerControlReport[]
 name: string
 usb_id?: (string | null)
 }
@@ -465,6 +477,12 @@ channels: number
 dsd_raw?: (string | null)
 format: string
 rates_hz: number[]
+}
+export interface MixerControlReport {
+has_switch: boolean
+has_volume: boolean
+index: number
+name: string
 }
 export interface PipeWireProbeResponse {
 error: (string | null)

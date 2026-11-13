@@ -163,7 +163,6 @@ The intermediate rate is min(useful input rate, useful output rate, this cap).
 A lower cap saves CPU in DSD-in/DSD-out chains, at the cost of ultrasonic content you would not hear anyway. Leave it unset unless a benchmark confirms that lowering it helps.
 """
 default_text = "unset (no cap)"
-assist = ["benchmark-validate"]
 
 [[field]]
 key = "dsd.gain_db"

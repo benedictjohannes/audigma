@@ -9,7 +9,7 @@ pub use mixer::{AlsaHardwareMixer, CANDIDATE_MIXER_CONTROLS, resolve_card_mixer_
 pub use output::{AlsaAudioOutput, AlsaFormatRequest, AlsaOutputConfig, AlsaOutputError};
 pub use probe::{
     ActiveStreamStatus, AlsaCardReport, AlsaDeviceReport, AlsaProbeReport, DeviceCapabilities,
-    DopSupport, NativeDsdSupport, UsbAltsetInfo, probe_alsa_devices,
+    DopSupport, MixerControlReport, NativeDsdSupport, UsbAltsetInfo, probe_alsa_devices,
 };
 pub use watcher::{
     AlsaDeviceWatcher, is_alsa_device_present, resolve_card_index, wait_for_alsa_device,

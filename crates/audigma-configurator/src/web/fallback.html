@@ -16,8 +16,9 @@
 <body>
 <main>
   <h1>Audigma configurator</h1>
-  <p>The server is running and you are signed in. The web interface is not built yet; the JSON API is available now.</p>
-  <p class="muted">Try <code>/api/meta</code>, <code>/api/draft</code> and <code>/api/guided/state</code>. Use the terminal interface (<code>audigma configure</code>) to edit a configuration for now.</p>
+  <p>The server is running and you are signed in, but this build of <code>audigma</code> has no web interface. The JSON API works.</p>
+  <p>To get the interface, build it once with <code>bun install &amp;&amp; bun run build</code> in <code>crates/audigma-configurator/web</code> and rebuild <code>audigma</code>, or use a release binary. The terminal interface (<code>audigma configure</code>) needs none of this.</p>
+  <p class="muted">Try <code>/api/meta</code>, <code>/api/draft</code> and <code>/api/guided/state</code>.</p>
 </main>
 </body>
 </html>

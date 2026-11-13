@@ -238,6 +238,15 @@ fn the_url_token_becomes_a_cookie_and_leaves_the_address() {
     let page = raw(t.addr, "GET", "/", &[("Cookie", pair)], "");
     assert_eq!(page.status, 200);
     assert!(page.body.contains("Audigma configurator"));
+    if audigma_configurator::web::api::UI_EMBEDDED {
+        assert!(page.body.contains("id=\"root\""), "the built app");
+        assert!(page.body.len() > 50_000);
+    } else {
+        assert!(
+            page.body.contains("has no web interface"),
+            "the fallback page"
+        );
+    }
     // The cookie also opens the API.
     assert_eq!(
         raw(t.addr, "GET", "/api/draft", &[("Cookie", pair)], "").status,
