@@ -19,7 +19,7 @@ const inlineText = (inline: Inline[]) => inline.map((s) => s.text).join("");
 const blockText = (b: Block) =>
   b.kind === "p" ? `p:${inlineText(b.inline)}` : `ul:${b.items.map(inlineText).join("|")}`;
 
-/** Renders the metadata markdown subset (plan §5). */
+/** Renders the metadata markdown subset. */
 export function Markdown({ text }: { text: string }) {
   return (
     <div className="space-y-2">

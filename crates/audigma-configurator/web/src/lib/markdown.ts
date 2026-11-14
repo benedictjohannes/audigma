@@ -1,5 +1,5 @@
 /**
- * The markdown subset of the metadata (plan §5): paragraphs (blank line), `- ` bullet lists,
+ * The markdown subset of the metadata: paragraphs (blank line), `- ` bullet lists,
  * `` `code` `` spans and `*emphasis*`. Nothing else.
  */
 export type Inline = { kind: "text" | "code" | "em"; text: string };

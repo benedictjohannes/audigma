@@ -1,4 +1,4 @@
-"""Signal-dependent measurements of the production DSD chain (DSP quality audit, plan step 4).
+"""Signal-dependent measurements of the production DSD chain.
 
 Every record runs the chain as `audigma run` builds it with the default settings (`Design.md §2`, §4.3-§4.4):
 baseband PCM -> profile gain L - M (M = `[gain] dsd_safety_margin_db`, default 0.25) -> `DcBlocker` (1 Hz) -> `HalfBandCascade`
@@ -401,10 +401,9 @@ is the modulator's signal transfer function).
                 )
 
     text += """
-### Ultrasonic noise (reported, not gated)
+### Ultrasonic noise (digital domain noise analysis)
 
-Out-of-band power per band, dBFS (PCM full scale). Neither the K17 nor the JA11 documents an ultrasonic input limit
-(`docs/hardware/`), so this is information for the DAC and amplifier chain, not a check. "dBc @ -6" is relative to a
+Out-of-band power per band, dBFS (PCM full scale). This is mathematical noise analysis of audigma's output per band that would enter the receiving device, not a DAC analog output noise measurement. "dBc @ -6" is relative to a
 -6 dBFS tone, for comparison with earlier reports.
 
 | Order | Rate | Silence 20-50 kHz | Silence 50-100 kHz | Silence 20-100 kHz | 0 dBFS 20-50 kHz | 0 dBFS 50-100 kHz | 0 dBFS 20-100 kHz | 20-100 kHz, dBc @ -6 dBFS |

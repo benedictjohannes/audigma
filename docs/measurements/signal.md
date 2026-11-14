@@ -273,10 +273,9 @@ is the modulator's signal transfer function).
 | 7 | `DSD512_48` | SMPTE 60 Hz + 7 kHz (4:1) | -276.7 | -278.4 | -266.2 | -264.3 | 24.1 / -270.7 | -0.0013 / +0.0000 | 1.048 |
 | 7 | `DSD512_48` | CCIF 19 kHz + 20 kHz (1:1) | -273.5 | -276.5 | — | -243.4 | 30.4 / -262.8 | +0.0002 / +0.0002 | 1.077 |
 
-### Ultrasonic noise (reported, not gated)
+### Ultrasonic noise (software output analysis)
 
-Out-of-band power per band, dBFS (PCM full scale). Neither the K17 nor the JA11 documents an ultrasonic input limit
-(`docs/hardware/`), so this is information for the DAC and amplifier chain, not a check. "dBc @ -6" is relative to a
+Out-of-band power per band, dBFS (PCM full scale). This is mathematically measured noise output by audigma per band that would enter the receiving device, not a DAC output noise measurement. "dBc @ -6" is relative to a
 -6 dBFS tone, for comparison with earlier reports.
 
 | Order | Rate | Silence 20-50 kHz | Silence 50-100 kHz | Silence 20-100 kHz | 0 dBFS 20-50 kHz | 0 dBFS 50-100 kHz | 0 dBFS 20-100 kHz | 20-100 kHz, dBc @ -6 dBFS |
