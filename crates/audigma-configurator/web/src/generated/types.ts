@@ -89,6 +89,7 @@ core_selection?: ("performance" | "efficient" | "os")
 dsp_cpus?: (number[] | null)
 dsp_threads?: (("auto" | "inline") | number)
 loop_cpu?: (number | null)
+persist_volume?: boolean
 realtime?: ("auto" | "required" | "off")
 realtime_priority?: number
 smt_siblings?: ("avoid" | "never")

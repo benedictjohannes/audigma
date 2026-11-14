@@ -899,6 +899,8 @@ pub struct RuntimeConfig {
     pub dsp_cpus: Option<Vec<u32>>,
     /// System tray icon for `run`; fixed at process start.
     pub systray: SystrayMode,
+    /// Remember volume and mute across daemon restarts (`run` only; fixed at process start).
+    pub persist_volume: bool,
 }
 
 impl Default for RuntimeConfig {
@@ -912,6 +914,7 @@ impl Default for RuntimeConfig {
             loop_cpu: None,
             dsp_cpus: None,
             systray: SystrayMode::Off,
+            persist_volume: true,
         }
     }
 }
@@ -1697,17 +1700,19 @@ mod tests {
         assert_eq!(r.core_selection, CoreSelection::Performance);
         assert_eq!(r.smt_siblings, SmtSiblings::Avoid);
         assert_eq!(r.systray, SystrayMode::Off);
+        assert!(r.persist_volume);
         assert_eq!(r.explicit_worker_count(2), None);
     }
 
     #[test]
     fn test_runtime_full_section_parses() {
         let s = Settings::from_toml_str(&runtime_toml(
-            "[runtime]\ndsp_threads = 2\nrealtime = \"required\"\nrealtime_priority = 30\ncore_selection = \"efficient\"\nsmt_siblings = \"never\"\nloop_cpu = 4\ndsp_cpus = [0, 2]\nsystray = \"auto\"\n",
+            "[runtime]\ndsp_threads = 2\nrealtime = \"required\"\nrealtime_priority = 30\ncore_selection = \"efficient\"\nsmt_siblings = \"never\"\nloop_cpu = 4\ndsp_cpus = [0, 2]\nsystray = \"auto\"\npersist_volume = false\n",
         ))
         .unwrap();
         let r = s.runtime_config();
         assert_eq!(r.systray, SystrayMode::Auto);
+        assert!(!r.persist_volume);
         assert_eq!(r.dsp_threads, DspThreads::Count(2));
         assert_eq!(r.realtime, RealtimeMode::Required);
         assert_eq!(r.realtime_priority, 30);
@@ -1752,6 +1757,7 @@ mod tests {
             "[runtime]\nrealtime_priority = 100\n",
             "[runtime]\nsystray = \"on\"\n",
             "[runtime]\nsystray = true\n",
+            "[runtime]\npersist_volume = \"yes\"\n",
             "[runtime]\nbogus = 1\n",
             "[runtime]\ndsp_cpus = []\n",
             "[runtime]\ndsp_cpus = [0, 0]\n",

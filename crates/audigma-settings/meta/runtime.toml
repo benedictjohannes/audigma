@@ -176,3 +176,14 @@ key = "required"
 label = "Required"
 summary = "Do not start without a tray icon."
 caution = "Startup fails when no tray host is available, for example on a headless machine."
+
+[[field]]
+key = "persist_volume"
+summary = "Whether the daemon remembers volume and mute across restarts."
+description = """
+The daemon saves the volume and mute state of each instance to a small state file under `$XDG_STATE_HOME/audigma` (default `~/.local/state/audigma`) and restores it at the next start. Volume set with `play -v` is not saved.
+
+Turn it off to start every time at the level given by `[gain]` alone. Fixed at process start: changing it requires a restart.
+"""
+default = true
+applies_to = ["run"]

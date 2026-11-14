@@ -333,14 +333,25 @@ smt_siblings = "avoid"           # "avoid" | "never"
 # loop_cpu = 4                   # pin audigma-loop (default: housekeeping set)
 # dsp_cpus = [0, 2]              # explicit pins, one per worker
 systray = "off"                  # "off" | "auto" | "required"; `run` only, fixed at process start
+persist_volume = true            # remember volume and mute per instance; `run` only, fixed at process start
 ```
 
 - `dsp_threads`: see §3.4. `dsp_cpus` with `"auto"` sets the worker count to its length (capped at the channel count); with an integer its length must match; `dsp_cpus` cannot be combined with `"inline"`.
 - `realtime`: `auto` tries RT and continues at normal priority on failure (with a warning); `required` makes any startup RT failure fatal; `off` never requests RT.
 - `systray`: `off` shows no tray icon; `auto` shows one and warns and continues without it when no tray host is available; `required` makes that failure fatal at startup. Like the rest of `[runtime]`, it is read once at process start; a change picked up by `resume` only logs a warning.
+- `persist_volume`: with `true` the daemon restores the user volume and mute state of its instance at startup and saves them while running (§6.1.2). `false` neither reads nor writes the state file. Read once at process start.
 - `core_selection = "os"` disables automatic pinning and spinning (explicit `dsp_cpus` still applies). `smt_siblings = "never"` fails at startup if workers exceed the allowed physical cores.
 - Validated by `config check`: priority range, non-empty and duplicate-free `dsp_cpus`, count/pin agreement, `loop_cpu` not in `dsp_cpus`. Checks that need the machine (CPU exists and is allowed, pins that are SMT siblings) happen at startup and are errors or warnings as described.
 - More than two channels is supported by the placement code but untested.
+
+### 6.1.2 Volume Persistence (`[runtime] persist_volume`)
+Each `run` instance remembers its user volume and mute state across restarts. The configuration file is never written.
+
+- **File:** `$XDG_STATE_HOME/audigma/<instance>.state.toml`, else `~/.local/state/audigma/<instance>.state.toml` (directory mode 0700). The instance name is the one validated for the control socket (§7), so instances sharing a configuration file keep separate state.
+- **Content:** `volume_source_percent` (required bool), `volume_db` or `volume_percent`, and `muted`. The volume is kept in the unit the user last used, because a percentage maps to dB through a curve that depends on the volume mode and the DAC's mixer range. The flag names the authoritative key, which must be present and valid; the other key is ignored, so no precedence rule is involved (inside the daemon both values can exist, but only the percentage counts while it is set). The daemon writes the flag and that one key. A file without the flag, or whose flagged key is missing or invalid, is rejected as a whole. Unknown keys are ignored.
+- **Restore:** once at startup, after the instance lock is taken and before the control socket is bound, through the same setters IPC uses (dB is clamped). A missing file is normal; an unreadable or invalid one is logged (`volume_persist`) and ignored, and the next change replaces it.
+- **Save:** a poller thread compares the daemon's volume and mute state with what was last saved every 250 ms and writes on change (temp file plus `rename`), so scroll bursts coalesce and no control path touches the filesystem. A final comparison runs on clean shutdown; `SIGKILL` loses at most the last 250 ms. Write failures are logged once per failure streak, retried on the next tick and never fatal.
+- **Not persisted:** `play -v`; `[gain]` (calibration, not user volume). With `output.volume_control = "none"` nothing is restored or saved.
 
 ### 6.2 Reference Configuration Fixtures
 

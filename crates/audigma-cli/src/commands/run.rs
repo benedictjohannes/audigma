@@ -303,6 +303,17 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
         );
     }
 
+    // Restore the saved volume and mute state, then keep saving changes until the daemon exits.
+    // Done before the control socket is bound so the restored level is never raced by a client.
+    // Read once at process start; skipped when `volume_control = "none"`, where volume is ignored.
+    let volume_controlled = settings
+        .output
+        .as_ref()
+        .is_none_or(|o| o.volume_control() != audigma_settings::VolumeControlMode::None);
+    let _persister = (settings.runtime_config().persist_volume && volume_controlled)
+        .then(|| crate::persist::start(&instance, &control))
+        .flatten();
+
     // System tray (`[runtime] systray`); read once at process start. The guard removes the icon
     // when the daemon exits. A `required` failure aborts before the control socket is bound.
     let _tray = crate::tray::start(settings.runtime_config().systray, &instance, &control)?;
