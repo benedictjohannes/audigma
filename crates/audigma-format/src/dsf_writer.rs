@@ -250,7 +250,9 @@ mod tests {
 
         let left_msb = vec![0x12; 100];
         let right_msb = vec![0x34; 100];
-        writer.write_stereo_dsd_bytes(&left_msb, &right_msb).unwrap();
+        writer
+            .write_stereo_dsd_bytes(&left_msb, &right_msb)
+            .unwrap();
         let (samples, total_bytes) = writer.finalize().unwrap();
 
         assert_eq!(samples, 800);
@@ -267,6 +269,9 @@ mod tests {
         assert_eq!(read_meta.track_number, Some(5));
         assert_eq!(read_meta.pictures.len(), 1);
         assert_eq!(read_meta.pictures[0].picture_type, PictureType::CoverFront);
-        assert_eq!(read_meta.pictures[0].data, vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]);
+        assert_eq!(
+            read_meta.pictures[0].data,
+            vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]
+        );
     }
 }

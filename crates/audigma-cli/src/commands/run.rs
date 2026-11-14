@@ -453,7 +453,7 @@ fn run_session(
             match in_cfg.backend() {
                 #[cfg(feature = "pipewire")]
                 InputBackend::Pipewire => {
-                    let sink = PipeWireVirtualSink::from_input_config_with_placement(
+                    let mut sink = PipeWireVirtualSink::from_input_config_with_placement(
                         in_cfg,
                         input_rate.get(),
                         128,
@@ -463,6 +463,9 @@ fn run_session(
                         backend: "pipewire",
                         message: format!("failed to bind PipeWire virtual sink: {e}"),
                     })?;
+                    // Audigma is authoritative: seed the stream's Props before PipeWire
+                    // reports its own defaults (the streaming loop repeats this as a handshake).
+                    sink.push_volume(audigma_engine::volume_sync::seed(control));
                     Ok(Box::new(sink))
                 }
                 #[cfg(not(feature = "pipewire"))]

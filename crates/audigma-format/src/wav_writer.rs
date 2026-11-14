@@ -239,10 +239,9 @@ mod tests {
         meta.genre = Some("Acoustic".into());
         meta.track_number = Some(2);
 
-        let mut writer =
-            PcmWavWriter::new(&mut buffer, PcmRateHz::PCM_48000, SampleFormat::S16Le)
-                .unwrap()
-                .with_metadata(meta);
+        let mut writer = PcmWavWriter::new(&mut buffer, PcmRateHz::PCM_48000, SampleFormat::S16Le)
+            .unwrap()
+            .with_metadata(meta);
 
         let left = vec![0.1; 256];
         let right = vec![-0.1; 256];

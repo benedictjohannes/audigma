@@ -26,6 +26,7 @@ pub mod tail;
 pub mod timing;
 pub mod traits;
 pub mod transport;
+pub mod volume_sync;
 pub mod worker;
 
 pub use asrc::{ClockDriftConfig, ClockDriftController, ClockDriftError, DriftMode};

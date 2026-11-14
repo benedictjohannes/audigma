@@ -577,6 +577,48 @@ pub fn parse_props_pod(bytes: &[u8]) -> Option<VolumeUpdate> {
     None
 }
 
+/// PipeWire's volume curve: linear amplitude is the cube of the perceptual fraction, the
+/// inverse of the `cbrt` in [`parse_props_pod`].
+fn percent_to_linear(pct: f64) -> f32 {
+    (pct.clamp(0.0, 150.0) / 100.0).powi(3) as f32
+}
+
+/// Writes a pending audigma-originated volume / mute to the stream. A write the stream is
+/// not yet ready for (not connected) stays queued and is retried on the next loop pass.
+fn apply_outgoing_volume(
+    stream: &pipewire::stream::Stream,
+    channels: usize,
+    slot: &Mutex<Option<VolumeUpdate>>,
+) {
+    let Some(update) = slot.lock().unwrap().take() else {
+        return;
+    };
+    let mut ok = true;
+    if let Some(pct) = update.volume_percent {
+        // `channelVolumes` is what desktop sliders write and `parse_props_pod` reads; the
+        // master `volume` is pinned to unity (a session manager may restore a stale one) so
+        // the two never compound.
+        let linear = vec![percent_to_linear(pct); channels.max(1)];
+        ok &= stream
+            .set_control(libspa::sys::SPA_PROP_volume, &[1.0])
+            .is_ok();
+        ok &= stream
+            .set_control(libspa::sys::SPA_PROP_channelVolumes, &linear)
+            .is_ok();
+    }
+    if let Some(muted) = update.is_muted {
+        let value = if muted { 1.0 } else { 0.0 };
+        ok &= stream
+            .set_control(libspa::sys::SPA_PROP_mute, &[value])
+            .is_ok();
+    }
+    if !ok {
+        let mut slot = slot.lock().unwrap();
+        // A newer push supersedes the failed one.
+        slot.get_or_insert(update);
+    }
+}
+
 /// PipeWire virtual audio sink node (`audigma_sink`).
 ///
 /// Desktop sound and audio players route into this virtual sink (`media.class = "Audio/Sink"`).
@@ -595,6 +637,8 @@ pub struct PipeWireVirtualSink {
     interleave: Arc<AtomicI32>,
     active_dsd_bit_rate: Arc<AtomicU32>,
     pending_volume: Arc<Mutex<Option<VolumeUpdate>>>,
+    /// Latest audigma-originated volume / mute, written to the stream by the PipeWire thread.
+    outgoing_volume: Arc<Mutex<Option<VolumeUpdate>>>,
     running: Arc<AtomicBool>,
     dropped_chunks: Arc<AtomicU64>,
     processed_chunks: Arc<AtomicU64>,
@@ -745,6 +789,7 @@ impl PipeWireVirtualSink {
         let interleave = Arc::new(AtomicI32::new(1));
         let active_dsd_bit_rate = Arc::new(AtomicU32::new(0));
         let pending_volume = Arc::new(Mutex::new(None));
+        let outgoing_volume = Arc::new(Mutex::new(None));
         let running = Arc::new(AtomicBool::new(true));
         let dropped_chunks = Arc::new(AtomicU64::new(0));
         let processed_chunks = Arc::new(AtomicU64::new(0));
@@ -766,6 +811,7 @@ impl PipeWireVirtualSink {
         let interleave_cb = interleave.clone();
         let active_dsd_rate_cb = active_dsd_bit_rate.clone();
         let pending_vol_cb = pending_volume.clone();
+        let outgoing_vol_worker = outgoing_volume.clone();
         let running_clone = running.clone();
         let dropped_chunks_cb = dropped_chunks.clone();
         let processed_chunks_cb = processed_chunks.clone();
@@ -1355,6 +1401,7 @@ impl PipeWireVirtualSink {
                     mainloop.loop_().iterate(pipewire::loop_::Timeout::Finite(
                         std::time::Duration::from_millis(1),
                     ));
+                    apply_outgoing_volume(&stream, channels as usize, &outgoing_vol_worker);
                     let now = std::time::Instant::now();
                     if pull_pending.load(Ordering::Acquire) {
                         if pull_started.is_some_and(|t| now.duration_since(t) >= PULL_TIMEOUT) {
@@ -1433,6 +1480,7 @@ impl PipeWireVirtualSink {
             interleave,
             active_dsd_bit_rate,
             pending_volume,
+            outgoing_volume,
             running,
             dropped_chunks,
             processed_chunks,
@@ -1859,6 +1907,11 @@ impl AudioInput for PipeWireVirtualSink {
 
     fn check_volume_change(&self) -> Option<VolumeUpdate> {
         self.pending_volume.lock().unwrap().take()
+    }
+
+    fn push_volume(&mut self, volume: VolumeUpdate) -> bool {
+        *self.outgoing_volume.lock().unwrap() = Some(volume);
+        true
     }
 
     fn set_generation(&mut self, generation_tag: u64) {
@@ -2573,6 +2626,7 @@ mod input_clock_tests {
                 interleave: Arc::new(AtomicI32::new(1)),
                 active_dsd_bit_rate: Arc::new(AtomicU32::new(DsdBitRateHz::DSD64.get())),
                 pending_volume: Arc::new(Mutex::new(None)),
+                outgoing_volume: Arc::new(Mutex::new(None)),
                 running: Arc::new(AtomicBool::new(true)),
                 dropped_chunks: Arc::new(AtomicU64::new(0)),
                 processed_chunks: Arc::new(AtomicU64::new(1)),

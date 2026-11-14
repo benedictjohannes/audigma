@@ -4,8 +4,8 @@
 use crate::FormatError;
 use crate::metadata::AudioMetadata;
 use crate::topology::downmix_interleaved_to_stereo;
-use std::io::SeekFrom;
 use audigma_dsp::{DsdBitRateHz, PcmRateHz};
+use std::io::SeekFrom;
 use symphonia::core::codecs::audio::{
     AudioDecoder as SymphoniaAudioDecoder, AudioDecoderOptions, CODEC_ID_NULL_AUDIO,
 };

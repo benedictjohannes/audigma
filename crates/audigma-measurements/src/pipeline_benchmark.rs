@@ -119,7 +119,10 @@ pub fn dispatch(args: &[String]) -> bool {
 enum Stimulus {
     Pcm(Vec<f64>),
     /// MSB-first packed DSD bytes.
-    Dsd { bytes: Vec<u8>, tile_bytes: usize },
+    Dsd {
+        bytes: Vec<u8>,
+        tile_bytes: usize,
+    },
 }
 
 fn pcm_stimulus(rate: PcmRateHz) -> Vec<f64> {
@@ -191,7 +194,8 @@ fn run(a: &Args) {
     let dsd = dsd_input.map(|bit_rate| DsdDecodeConfig {
         decimation_stages: bit_rate
             .power_of_two_decimation_stages_to(input_rate)
-            .expect("DSD rate decimates to the intermediate rate") as usize,
+            .expect("DSD rate decimates to the intermediate rate")
+            as usize,
         gain_db: 0.0,
     });
     let is_dsd_output = matches!(target, TargetRateSpec::Dsd { .. });

@@ -28,7 +28,10 @@ pub enum DraftError {
 /// `e` on one line: TOML key errors put the key on a second line (`... only\nin \`k\``), which
 /// clients that drop newlines would glue into "onlyin".
 fn one_line(e: &SettingsError) -> String {
-    e.to_string().split_whitespace().collect::<Vec<_>>().join(" ")
+    e.to_string()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// A finding about the draft, attributed to a key when the settings crate knows which one.
@@ -273,7 +276,15 @@ mod tests {
     fn numbers_and_booleans_fall_back_to_string_enums() {
         let mut d = base();
         d.set("target.rate_family", &json!(44100)).unwrap();
-        assert_eq!(d.settings().target.as_ref().unwrap().rate_family.to_string(), "44100");
+        assert_eq!(
+            d.settings()
+                .target
+                .as_ref()
+                .unwrap()
+                .rate_family
+                .to_string(),
+            "44100"
+        );
         d.set("target.pcm_rate_hz", &json!(44100)).unwrap();
         let err = d.set("output.backend", &json!(7)).unwrap_err().to_string();
         assert!(!err.contains('\n'), "{err}");

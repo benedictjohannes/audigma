@@ -13,6 +13,7 @@ pub const DEVICE_WAIT_TICK: &str = "device_wait_tick";
 pub const HARDWARE_MIXER_UNAVAILABLE: &str = "hardware_mixer_unavailable";
 pub const VOLUME_MODE: &str = "volume_mode";
 pub const VOLUME_PERSIST: &str = "volume_persist";
+pub const VOLUME_SYNC: &str = "volume_sync";
 pub const PW_VOLUME_EVENT: &str = "pw_volume_event";
 pub const PW_FORMAT_NEGOTIATED: &str = "pw_format_negotiated";
 pub const RATE_SWITCH: &str = "rate_switch";

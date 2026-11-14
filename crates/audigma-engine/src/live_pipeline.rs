@@ -1302,6 +1302,9 @@ impl LivePipeline {
         let profile_headroom = self.plan.dsp_config.profile_headroom_db;
 
         let mut last_hw_vol: Option<f64> = None;
+        // Audigma is authoritative at connect: every streaming run starts with a handshake,
+        // so a freshly (re)built input never overwrites the user volume with its defaults.
+        let mut volume_sync = crate::volume_sync::VolumeSync::new();
         let mut last_hw_mute: Option<bool> = None;
 
         while control.is_active() {
@@ -1315,17 +1318,8 @@ impl LivePipeline {
                 }
             }
 
-            // Check dynamic volume / mute updates from input driver
-            if let Some(vol_upd) = input.check_volume_change() {
-                if let Some(pct) = vol_upd.volume_percent {
-                    control.set_volume_percent(pct);
-                } else if let Some(db) = vol_upd.volume_db {
-                    control.set_volume(db);
-                }
-                if let Some(muted) = vol_upd.is_muted {
-                    control.set_muted(muted);
-                }
-            }
+            // Two-way volume / mute sync with the input driver (handshake, push, echo filter)
+            volume_sync.step(Instant::now(), &control, input);
 
             // Compute current dynamic gain based on active volume mode
             let is_muted = control.is_muted();

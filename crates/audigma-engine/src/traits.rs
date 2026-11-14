@@ -138,6 +138,16 @@ pub trait AudioInput: Send {
         None
     }
 
+    /// Pushes audigma's user volume and mute into the input's environment (e.g. the PipeWire
+    /// stream's Props). `volume_percent` is on audigma's 0-100 % curve; both fields are set.
+    ///
+    /// Returns `true` when the input forwards the state and later reports the environment's
+    /// resulting state (including echoes of this write) through [`Self::check_volume_change`].
+    /// Inputs without such an environment return `false` and are not synchronised.
+    fn push_volume(&mut self, _volume: VolumeUpdate) -> bool {
+        false
+    }
+
     /// Sets the active generation tag for input buffer filtering.
     fn set_generation(&mut self, _gen: u64) {}
 
@@ -479,6 +489,8 @@ pub struct MockAudioInput {
     pending_rate: Option<audigma_dsp::PcmRateHz>,
     pending_volume: std::sync::Arc<std::sync::Mutex<Option<VolumeUpdate>>>,
     generation: u64,
+    /// `Some` once [`Self::with_volume_push`] is called: records pushes and echoes them back.
+    volume_push: Option<std::sync::Arc<std::sync::Mutex<Vec<VolumeUpdate>>>>,
 }
 
 impl MockAudioInput {
@@ -499,6 +511,7 @@ impl MockAudioInput {
             pending_rate: None,
             pending_volume: std::sync::Arc::new(std::sync::Mutex::new(None)),
             generation: 1,
+            volume_push: None,
         }
     }
 
@@ -524,6 +537,7 @@ impl MockAudioInput {
             pending_rate: None,
             pending_volume: std::sync::Arc::new(std::sync::Mutex::new(None)),
             generation: 1,
+            volume_push: None,
         }
     }
 
@@ -549,6 +563,7 @@ impl MockAudioInput {
             pending_rate: None,
             pending_volume: std::sync::Arc::new(std::sync::Mutex::new(None)),
             generation: 1,
+            volume_push: None,
         }
     }
 
@@ -560,6 +575,16 @@ impl MockAudioInput {
     /// Simulates a dynamic volume or mute change from upstream.
     pub fn simulate_volume_change(&self, update: VolumeUpdate) {
         *self.pending_volume.lock().unwrap() = Some(update);
+    }
+
+    /// Makes the mock behave like a PipeWire stream: [`AudioInput::push_volume`] is accepted,
+    /// recorded, and echoed back as a volume report. Returns the record of pushed updates.
+    pub fn with_volume_push(
+        mut self,
+    ) -> (Self, std::sync::Arc<std::sync::Mutex<Vec<VolumeUpdate>>>) {
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        self.volume_push = Some(log.clone());
+        (self, log)
     }
 }
 
@@ -642,6 +667,15 @@ impl AudioInput for MockAudioInput {
 
     fn check_volume_change(&self) -> Option<VolumeUpdate> {
         self.pending_volume.lock().unwrap().take()
+    }
+
+    fn push_volume(&mut self, volume: VolumeUpdate) -> bool {
+        let Some(log) = &self.volume_push else {
+            return false;
+        };
+        log.lock().unwrap().push(volume);
+        *self.pending_volume.lock().unwrap() = Some(volume);
+        true
     }
 
     fn set_generation(&mut self, generation_tag: u64) {

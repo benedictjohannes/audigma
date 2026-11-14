@@ -538,15 +538,9 @@ impl AudioMetadata {
                     symphonia::core::meta::StandardVisualKey::OtherIcon => {
                         PictureType::OtherFileIcon
                     }
-                    symphonia::core::meta::StandardVisualKey::FrontCover => {
-                        PictureType::CoverFront
-                    }
-                    symphonia::core::meta::StandardVisualKey::BackCover => {
-                        PictureType::CoverBack
-                    }
-                    symphonia::core::meta::StandardVisualKey::Leaflet => {
-                        PictureType::LeafletPage
-                    }
+                    symphonia::core::meta::StandardVisualKey::FrontCover => PictureType::CoverFront,
+                    symphonia::core::meta::StandardVisualKey::BackCover => PictureType::CoverBack,
+                    symphonia::core::meta::StandardVisualKey::Leaflet => PictureType::LeafletPage,
                     symphonia::core::meta::StandardVisualKey::Media => PictureType::Media,
                     symphonia::core::meta::StandardVisualKey::LeadArtistPerformerSoloist => {
                         PictureType::LeadArtist
@@ -554,9 +548,7 @@ impl AudioMetadata {
                     symphonia::core::meta::StandardVisualKey::ArtistPerformer => {
                         PictureType::Artist
                     }
-                    symphonia::core::meta::StandardVisualKey::Conductor => {
-                        PictureType::Conductor
-                    }
+                    symphonia::core::meta::StandardVisualKey::Conductor => PictureType::Conductor,
                     symphonia::core::meta::StandardVisualKey::BandOrchestra => PictureType::Band,
                     symphonia::core::meta::StandardVisualKey::Composer => PictureType::Composer,
                     symphonia::core::meta::StandardVisualKey::Lyricist => PictureType::Lyricist,
@@ -724,7 +716,9 @@ impl AudioMetadata {
 }
 
 /// Parses RIFF `LIST/INFO` metadata from a seekable WAV stream.
-pub fn parse_wav_riff_metadata<R: std::io::Read + std::io::Seek>(reader: &mut R) -> Option<AudioMetadata> {
+pub fn parse_wav_riff_metadata<R: std::io::Read + std::io::Seek>(
+    reader: &mut R,
+) -> Option<AudioMetadata> {
     if reader.seek(std::io::SeekFrom::Start(12)).is_err() {
         return None;
     }
@@ -750,7 +744,10 @@ pub fn parse_wav_riff_metadata<R: std::io::Read + std::io::Seek>(reader: &mut R)
                     }
                     let mut buf = vec![0u8; sub_len as usize];
                     if reader.read_exact(&mut buf).is_ok() {
-                        let text = String::from_utf8_lossy(&buf).trim_matches('\0').trim().to_string();
+                        let text = String::from_utf8_lossy(&buf)
+                            .trim_matches('\0')
+                            .trim()
+                            .to_string();
                         match &sub_id {
                             b"INAM" => meta.title = Some(text),
                             b"IART" => meta.artist = Some(text),
@@ -784,7 +781,10 @@ pub fn parse_wav_riff_metadata<R: std::io::Read + std::io::Seek>(reader: &mut R)
             }
         } else {
             let pad = if chunk_len % 2 != 0 { 1 } else { 0 };
-            if reader.seek(std::io::SeekFrom::Current((chunk_len + pad) as i64)).is_err() {
+            if reader
+                .seek(std::io::SeekFrom::Current((chunk_len + pad) as i64))
+                .is_err()
+            {
                 break;
             }
         }
@@ -880,6 +880,9 @@ mod tests {
         assert_eq!(decoded.pictures.len(), 1);
         assert_eq!(decoded.pictures[0].picture_type, PictureType::CoverFront);
         assert_eq!(decoded.pictures[0].mime_type, "image/jpeg");
-        assert_eq!(decoded.pictures[0].data, vec![0xFF, 0xD8, 0xFF, 0xE0, 0x01, 0x02]);
+        assert_eq!(
+            decoded.pictures[0].data,
+            vec![0xFF, 0xD8, 0xFF, 0xE0, 0x01, 0x02]
+        );
     }
 }

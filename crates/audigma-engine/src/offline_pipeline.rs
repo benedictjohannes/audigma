@@ -121,7 +121,8 @@ impl<'a> ContainerWriter<'a> {
                     .as_ref()
                     .map(|o| o.dsf_pad_mode)
                     .unwrap_or(DsfPadMode::SpecZero);
-                let mut writer = DsfFileWriter::new(output, bit_rate, DsfBitOrder::LsbFirst, pad_mode)?;
+                let mut writer =
+                    DsfFileWriter::new(output, bit_rate, DsfBitOrder::LsbFirst, pad_mode)?;
                 if let Some(m) = metadata {
                     writer = writer.with_metadata(m);
                 }
@@ -142,8 +143,9 @@ impl<'a> ContainerWriter<'a> {
                         });
                     }
                 };
-                let writer = PcmWavWriter::new_with_metadata(output, pcm_rate, sample_format, metadata)?
-                    .with_dither(dither, dither_seed);
+                let writer =
+                    PcmWavWriter::new_with_metadata(output, pcm_rate, sample_format, metadata)?
+                        .with_dither(dither, dither_seed);
                 Ok(Self::Wav(writer))
             }
             OutputContainer::Flac => {

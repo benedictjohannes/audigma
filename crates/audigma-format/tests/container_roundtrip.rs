@@ -314,10 +314,7 @@ fn test_dsf_to_flac_metadata_roundtrip() {
     assert_eq!(final_meta.album.as_deref(), Some("Hi-Res Album"));
     assert_eq!(final_meta.track_number, Some(7));
     assert_eq!(final_meta.pictures.len(), 1);
-    assert_eq!(
-        final_meta.pictures[0].picture_type,
-        PictureType::CoverFront
-    );
+    assert_eq!(final_meta.pictures[0].picture_type, PictureType::CoverFront);
     assert_eq!(final_meta.pictures[0].data, meta.pictures[0].data);
 }
 
@@ -346,8 +343,13 @@ fn test_flac_to_wav_to_dsf_metadata_roundtrip() {
     // 3. Write WAV with metadata (RIFF INFO tags)
     let mut wav_buffer = Cursor::new(Vec::new());
     {
-        let mut wav_writer =
-            PcmWavWriter::new_with_metadata(&mut wav_buffer, pcm_rate, SampleFormat::S24Le, Some(flac_meta.clone())).unwrap();
+        let mut wav_writer = PcmWavWriter::new_with_metadata(
+            &mut wav_buffer,
+            pcm_rate,
+            SampleFormat::S24Le,
+            Some(flac_meta.clone()),
+        )
+        .unwrap();
         let l = vec![0.0f64; 100];
         let r = vec![0.0f64; 100];
         wav_writer.write_stereo_samples(&l, &r).unwrap();
@@ -386,7 +388,9 @@ fn test_flac_to_wav_to_dsf_metadata_roundtrip() {
     // 6. Decode DSF, verify ID3v2 tags
     dsf_buffer.set_position(0);
     let dsf_reader = DsfReader::try_new(dsf_buffer).unwrap();
-    let dsf_meta = dsf_reader.metadata().expect("DSF metadata should be present");
+    let dsf_meta = dsf_reader
+        .metadata()
+        .expect("DSF metadata should be present");
     assert_eq!(dsf_meta.title.as_deref(), Some("Audigma Anthem"));
     assert_eq!(dsf_meta.artist.as_deref(), Some("Audigma Artist"));
     assert_eq!(dsf_meta.album.as_deref(), Some("Hi-Res Album"));
