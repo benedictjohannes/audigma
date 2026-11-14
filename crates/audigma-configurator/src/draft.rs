@@ -19,10 +19,16 @@ pub enum DraftError {
     Unrepresentable(String),
     #[error("`{0}` is not a key of a section")]
     BadPath(String),
-    #[error(transparent)]
+    #[error("{}", one_line(.0))]
     Settings(#[from] SettingsError),
     #[error("draft cannot be serialized: {0}")]
     Serialize(String),
+}
+
+/// `e` on one line: TOML key errors put the key on a second line (`... only\nin \`k\``), which
+/// clients that drop newlines would glue into "onlyin".
+fn one_line(e: &SettingsError) -> String {
+    e.to_string().split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// A finding about the draft, attributed to a key when the settings crate knows which one.
@@ -163,10 +169,21 @@ impl Draft {
 
     /// Sets `path` (e.g. `output.backend`) to `value`, validates the whole draft, and marks the
     /// key touched. On error the draft is unchanged.
+    ///
+    /// Option keys made of digits or `true`/`false` reach here as numbers and booleans, but some
+    /// enums spell them as strings (`target.rate_family = "44100"`); a number or boolean the
+    /// settings reject is retried as its text.
     pub fn set(&mut self, path: &str, value: &serde_json::Value) -> Result<(), DraftError> {
         let v = toml::Value::try_from(value)
             .map_err(|_| DraftError::Unrepresentable(path.to_string()))?;
-        self.edit(path, Some(v))
+        match self.edit(path, Some(v)) {
+            Err(DraftError::Settings(SettingsError::TomlParse(_)))
+                if value.is_number() || value.is_boolean() =>
+            {
+                self.edit(path, Some(toml::Value::String(value.to_string())))
+            }
+            r => r,
+        }
     }
 
     /// Removes `path` from the draft (back to unset) and marks it touched.
@@ -250,6 +267,16 @@ mod tests {
         let before = d.clone();
         assert!(d.set("output.backend", &json!("nonsense")).is_err());
         assert_eq!(d, before);
+    }
+
+    #[test]
+    fn numbers_and_booleans_fall_back_to_string_enums() {
+        let mut d = base();
+        d.set("target.rate_family", &json!(44100)).unwrap();
+        assert_eq!(d.settings().target.as_ref().unwrap().rate_family.to_string(), "44100");
+        d.set("target.pcm_rate_hz", &json!(44100)).unwrap();
+        let err = d.set("output.backend", &json!(7)).unwrap_err().to_string();
+        assert!(!err.contains('\n'), "{err}");
     }
 
     #[test]
