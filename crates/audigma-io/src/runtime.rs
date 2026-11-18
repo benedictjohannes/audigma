@@ -144,5 +144,6 @@ pub fn worker_setup(placement: &Placement) -> WorkerSetup {
         })),
         // Startup handshake: with `realtime = "required"` a failed worker setup aborts startup.
         require_hook_ok: require,
+        waiter: crate::wait::waiter(),
     }
 }

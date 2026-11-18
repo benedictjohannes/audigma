@@ -69,8 +69,8 @@ This file describes audio behavior, formulas and configuration. Backend-specific
   - `audigma-format` — *portable*. Containers (WAV, FLAC, DSF) and bit-packers (`DSD_U32`, DoP words).
   - `audigma-settings` — *portable*. The Schema v1 configuration, validation, `config explain` resolution, and the per-key metadata catalog (`meta/*.toml`) the configurator displays.
   - `audigma-log` — *portable*. Structured logging, real-time-safe event queue, event names.
-  - `audigma-engine` — *portable* except the worker pool's wake-up (Linux futex). Pipeline planning, real-time queues, ASRC drift controller, lifecycle, worker pool, CPU placement resolution, and the abstract input/output traits backends implement.
-  - `audigma-io` — *OS-specific*. Concrete backends (ALSA, PipeWire, D-Bus device reservation, file, stdio), device probing, CPU topology reading and thread scheduling. On non-Linux platforms topology discovery reports nothing and threads stay unpinned at normal priority.
+  - `audigma-engine` — *portable*. Pipeline planning, real-time queues, ASRC drift controller, lifecycle, worker pool, CPU placement resolution, and the abstract input/output traits backends implement.
+  - `audigma-io` — *OS-specific*. Concrete backends (ALSA, PipeWire, D-Bus device reservation, file, stdio), device probing, CPU topology reading, thread scheduling, and the worker pool's blocking wake-up (Linux futex). On non-Linux platforms topology discovery reports nothing, threads stay unpinned at normal priority, and blocked workers poll instead of sleeping.
   - `audigma-configurator` — *portable core* (draft, guided setup, assists, config writer) with two frontends: a terminal UI and a one-shot localhost web UI.
     - `web/` — the web frontend (TypeScript); its schema types are generated from the Rust types.
   - `audigma-cli` — the `audigma` binary: subcommands, control socket (platform code isolated in `ipc/platform.rs`), runtime placement wiring, *Linux-only* system tray.

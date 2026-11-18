@@ -197,6 +197,7 @@ fn failing_setup(require: bool) -> audigma_engine::WorkerSetup {
             }
         })),
         require_hook_ok: require,
+        waiter: Default::default(),
     }
 }
 

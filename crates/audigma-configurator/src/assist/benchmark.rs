@@ -20,7 +20,9 @@ use audigma_dsp::fir::HalfBandCascade;
 use audigma_dsp::modulator::Modulator;
 use audigma_dsp::rates::PcmRateHz;
 use audigma_engine::traits::{AudioInput, DecoderInput};
-use audigma_engine::{ChannelWorkerPool, MockAudioInput, OfflinePipeline, TargetDsdConfig};
+use audigma_engine::{
+    ChannelWorkerPool, MockAudioInput, OfflinePipeline, TargetDsdConfig, WorkerSetup,
+};
 use audigma_format::AudioStreamInfo;
 use audigma_format::decoder::AudioDecoder;
 use audigma_settings::Settings;
@@ -391,7 +393,11 @@ pub fn run(
         stages,
         BLOCK_FRAMES,
         target_dsd,
-        None,
+        // Unpinned, but with the platform waiter: the pool must block the way production does.
+        Some(WorkerSetup {
+            waiter: audigma_io::wait::waiter(),
+            ..Default::default()
+        }),
     )
     .map_err(fail)?;
     let mut pool_block = || -> Result<(), BenchmarkError> {

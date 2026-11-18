@@ -68,11 +68,11 @@ If you modify the feed loop, worker pool, device lifecycle, buffering, or rate s
 ## 4. Cross-Platform Contributions
 
 Audigma is designed around pure, portable core crates with platform-specific IO layers:
-- Portable crates: `audigma-dsp`, `audigma-format`, `audigma-settings`, `audigma-log`, and `audigma-configurator` core.
-- OS-specific crate: `audigma-io` (ALSA, PipeWire, D-Bus device reservation).
-- Mostly portable: `audigma-engine` still uses the Linux futex for worker wake-ups, and `audigma-cli` has a Linux-only system tray ([Design.md §2](Design.md)).
+- Portable crates: `audigma-dsp`, `audigma-format`, `audigma-settings`, `audigma-log`, `audigma-engine`, and `audigma-configurator` core.
+- OS-specific crate: `audigma-io` (ALSA, PipeWire, D-Bus device reservation, thread scheduling, the worker pool's futex wake-up).
+- Mostly portable: `audigma-cli` has a Linux-only system tray ([Design.md §2](Design.md)).
 
-Windows and macOS support, and decoupling the engine from the futex, are on the [roadmap](docs/Roadmap.md).
+Windows and macOS support are on the [roadmap](docs/Roadmap.md).
 
 Contributions implementing cross-platform synchronization or new platform backends are warmly welcomed. However, **the requirement for real hardware listening tests is not relaxed for other operating systems**. PRs adding platform backends must include real hardware testing notes, DAC models tested, and behavior reports in the PR description.
 

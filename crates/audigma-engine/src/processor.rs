@@ -313,7 +313,7 @@ impl TileProcessor {
         let is_full = frames == self.tile_baseband_frames;
 
         // Only full-size tiles count as deadline misses. Partial tiles are dominated by
-        // fixed dispatch/futex overhead that does not scale with tile length.
+        // fixed dispatch/wake-up overhead that does not scale with tile length.
         let is_late = is_full && elapsed > budget;
 
         // Reading the monotonic clock is deferred to the rare late path only.

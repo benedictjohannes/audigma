@@ -2,7 +2,8 @@
 //!
 //! Provides:
 //! - Persistent worker threads created once per daemon; channel `c` runs on worker `c % workers`.
-//! - Lock-free synchronization barrier using cache-line aligned atomic flags and Linux futex.
+//! - Lock-free synchronization barrier using cache-line aligned atomic flags; blocking waits go
+//!   through the platform-supplied [`Waiter`].
 //! - Per-thread placement and real-time priority applied through a caller-supplied hook (the
 //!   engine makes no scheduling syscalls), and thread-local hardware FTZ/DAZ denormal guards.
 //! - Zero heap allocation and zero lock contention during steady-state processing.
@@ -11,8 +12,10 @@
 //! - Optional worker-local input decimation, gain, and SRC in the same dispatch.
 
 mod input;
+mod waiter;
 
 pub use input::{InputDspConfig, InputResampling, InputTileControls};
+pub use waiter::{WaitFn, Waiter, WakeFn};
 
 use crate::cpu::ThreadPlacement;
 use crate::lifecycle::FrameGain;
@@ -134,48 +137,6 @@ pub struct TargetDsdConfig {
     pub overload_policy: OverloadPolicy,
     pub seed_base: u64,
 }
-
-#[cfg(target_os = "linux")]
-const FUTEX_WAIT_PRIVATE: libc::c_int = 128; // FUTEX_WAIT (0) | FUTEX_PRIVATE_FLAG (128)
-#[cfg(target_os = "linux")]
-const FUTEX_WAKE_PRIVATE: libc::c_int = 129; // FUTEX_WAKE (1) | FUTEX_PRIVATE_FLAG (128)
-
-#[inline]
-fn futex_wait(atomic: &AtomicU32, expected: u32) {
-    #[cfg(target_os = "linux")]
-    unsafe {
-        let ts = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 20_000_000, // 20 ms fail-safe timeout
-        };
-        libc::syscall(
-            libc::SYS_futex,
-            atomic.as_ptr(),
-            FUTEX_WAIT_PRIVATE,
-            expected,
-            &ts as *const libc::timespec,
-        );
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (atomic, expected);
-        std::thread::yield_now();
-    }
-}
-
-#[inline]
-fn futex_wake(atomic: &AtomicU32) {
-    #[cfg(target_os = "linux")]
-    unsafe {
-        libc::syscall(libc::SYS_futex, atomic.as_ptr(), FUTEX_WAKE_PRIVATE, 1);
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = atomic;
-    }
-}
-
-// Remove OS-specific thread RT / TID implementations from audigma-engine
 
 /// Dedicated 64-byte aligned synchronization and telemetry slot for one channel worker.
 #[repr(align(64))]
@@ -580,7 +541,7 @@ fn build_channel_states(
     ))
 }
 
-/// Spin iterations before a waiting thread falls back to `futex_wait`.
+/// Spin iterations before a waiting thread falls back to a blocking [`Waiter`] wait.
 const WORKER_SPIN_ITERATIONS: u32 = 2048;
 
 /// Per-worker OS setup callback: `(worker index, placement)`. Runs on the worker thread after
@@ -605,6 +566,8 @@ pub struct WorkerSetup {
     /// fails (stopping the workers) if any hook returned an error. When false, hook errors are
     /// only logged by the hook itself.
     pub require_hook_ok: bool,
+    /// Blocking wait/wake for the worker barrier. Defaults to [`Waiter::PORTABLE`].
+    pub waiter: Waiter,
 }
 
 /// Persistent real-time worker pool for multi-channel audio DSP.
@@ -630,6 +593,7 @@ pub struct ChannelWorkerPool {
     dsd_residue_bytes: usize,
     coordinator_spin: bool,
     timings: Arc<PoolTimings>,
+    waiter: Waiter,
 }
 
 impl ChannelWorkerPool {
@@ -715,6 +679,7 @@ impl ChannelWorkerPool {
             });
 
             let thread_hook = setup.hook.clone();
+            let waiter = setup.waiter;
             let ready = ready_tx.clone();
             let worker_timings = Arc::clone(&timings);
             let placement = setup
@@ -754,7 +719,7 @@ impl ChannelWorkerPool {
                             spins += 1;
                         }
                         while sync.target_generation.load(Ordering::Acquire) == current_gen {
-                            futex_wait(&sync.target_generation, current_gen);
+                            waiter.wait(&sync.target_generation, current_gen);
                         }
 
                         current_gen = sync.target_generation.load(Ordering::Acquire);
@@ -805,7 +770,7 @@ impl ChannelWorkerPool {
 
                         sync.completed_generation
                             .store(current_gen, Ordering::Release);
-                        futex_wake(&sync.completed_generation);
+                        waiter.wake_one(&sync.completed_generation);
                     }
                 })
                 .map_err(|e| EngineError::WorkerThread {
@@ -836,6 +801,7 @@ impl ChannelWorkerPool {
             pcm_residue_frames: 0,
             dsd_residue_bytes: 0,
             coordinator_spin,
+            waiter: setup.waiter,
             timings,
         };
 
@@ -1071,7 +1037,7 @@ impl ChannelWorkerPool {
             slot.sync
                 .target_generation
                 .store(next_gen, Ordering::Release);
-            futex_wake(&slot.sync.target_generation);
+            self.waiter.wake_one(&slot.sync.target_generation);
         }
 
         let coordinator_spin_limit = if self.coordinator_spin {
@@ -1093,7 +1059,8 @@ impl ChannelWorkerPool {
                     failed_worker.get_or_insert(ch);
                     break;
                 }
-                futex_wait(&slot.sync.completed_generation, self.current_generation);
+                self.waiter
+                    .wait(&slot.sync.completed_generation, self.current_generation);
             }
         }
 
@@ -1385,7 +1352,7 @@ impl Drop for ChannelWorkerPool {
             slot.sync
                 .target_generation
                 .store(next_gen, Ordering::Release);
-            futex_wake(&slot.sync.target_generation);
+            self.waiter.wake_one(&slot.sync.target_generation);
         }
         for handle in self.thread_handles.drain(..) {
             let _ = handle.join();

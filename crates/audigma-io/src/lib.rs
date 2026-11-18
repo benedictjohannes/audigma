@@ -13,6 +13,7 @@ pub mod runtime;
 #[cfg(target_os = "linux")]
 pub mod sched;
 pub mod stdio;
+pub mod wait;
 
 #[cfg(feature = "pipewire")]
 pub use self::pipewire::{PipeWireError, PipeWirePcmOutput, PipeWireVirtualSink};

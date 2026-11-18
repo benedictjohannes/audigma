@@ -62,5 +62,5 @@ pub use transport::{
 };
 pub use worker::{
     ChannelWorkerPool, InputDspConfig, InputResampling, InputTileControls, TargetDsdConfig,
-    ThreadInitHook, WorkerSetup,
+    ThreadInitHook, WaitFn, Waiter, WakeFn, WorkerSetup,
 };

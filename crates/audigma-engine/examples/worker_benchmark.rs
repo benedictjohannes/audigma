@@ -32,6 +32,45 @@ fn pin_to_cpu(cpu: usize) {
     panic!("CPU affinity is Linux-only (requested CPU {cpu})");
 }
 
+/// Mirrors `audigma_io::wait::waiter` (the engine cannot depend on `audigma-io`).
+fn platform_waiter() -> audigma_engine::Waiter {
+    #[cfg(target_os = "linux")]
+    {
+        use std::sync::atomic::AtomicU32;
+        use std::time::Duration;
+        fn wait(a: &AtomicU32, expected: u32, timeout: Duration) {
+            let ts = libc::timespec {
+                tv_sec: timeout.as_secs() as libc::time_t,
+                tv_nsec: timeout.subsec_nanos() as libc::c_long,
+            };
+            unsafe {
+                libc::syscall(
+                    libc::SYS_futex,
+                    a.as_ptr(),
+                    libc::FUTEX_WAIT | libc::FUTEX_PRIVATE_FLAG,
+                    expected,
+                    &ts as *const libc::timespec,
+                );
+            }
+        }
+        fn wake_one(a: &AtomicU32) {
+            unsafe {
+                libc::syscall(
+                    libc::SYS_futex,
+                    a.as_ptr(),
+                    libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG,
+                    1,
+                );
+            }
+        }
+        audigma_engine::Waiter::new(wait, wake_one)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        audigma_engine::Waiter::PORTABLE
+    }
+}
+
 fn consume_output(bytes: &[u8], read_bytes: bool) {
     if read_bytes {
         black_box(bytes.iter().fold(0u8, |sum, byte| sum ^ byte));
@@ -130,15 +169,19 @@ fn main() {
     let mut pcm;
     let mut dsd;
     let mut process: Box<dyn FnMut()> = if mode == "worker" {
-        // The engine crate has no OS layer, so this example keeps its own affinity helper.
-        let setup = worker_cpus.clone().map(|cpus| audigma_engine::WorkerSetup {
-            placements: Vec::new(),
-            hook: Some(Arc::new(
-                move |ch: usize, _p: &audigma_engine::ThreadPlacement| {
+        // The engine crate has no OS layer, so this example keeps its own affinity helper
+        // and waiter.
+        let hook = worker_cpus
+            .clone()
+            .map(|cpus| -> audigma_engine::ThreadInitHook {
+                Arc::new(move |ch: usize, _p: &audigma_engine::ThreadPlacement| {
                     pin_to_cpu(cpus[ch]);
                     Ok(())
-                },
-            )),
+                })
+            });
+        let setup = Some(audigma_engine::WorkerSetup {
+            hook,
+            waiter: platform_waiter(),
             ..Default::default()
         });
         pool = ChannelWorkerPool::new(
