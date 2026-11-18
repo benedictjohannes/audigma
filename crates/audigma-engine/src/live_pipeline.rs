@@ -232,6 +232,15 @@ pub struct DaemonTelemetry {
     pub volume_mode: DaemonVolumeMode,
     pub is_muted: bool,
     pub preamp_db: f64,
+    /// Modulator profile headroom `L - M` in dB (0 for PCM targets).
+    #[serde(default)]
+    pub profile_headroom_db: f64,
+    /// Decimator gain `[input.dsd] gain_db`; `None` for PCM input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dsd_gain_db: Option<f64>,
+    /// `preamp_db + profile_headroom_db + dsd_gain_db` (volume excluded).
+    #[serde(default)]
+    pub configured_gain_db: f64,
     pub total_input_frames: u64,
     pub total_output_frames: u64,
     pub queue_fill_pct: f64,
@@ -300,6 +309,9 @@ struct TelemetryState {
     output_rate_hz: AtomicU32,
     filter: Mutex<String>,
     preamp_db: AtomicU64,
+    profile_headroom_db: AtomicU64,
+    /// NaN encodes "PCM input" (no decimator).
+    dsd_gain_db: AtomicU64,
     volume_db: AtomicU64,
     volume_percent: AtomicU64,
     total_input_frames: AtomicU64,
@@ -396,6 +408,8 @@ impl DaemonControlHandle {
             output_rate_hz: AtomicU32::new(output_rate),
             filter: Mutex::new(filter.to_string()),
             preamp_db: AtomicU64::new(preamp_db.to_bits()),
+            profile_headroom_db: AtomicU64::new(0.0f64.to_bits()),
+            dsd_gain_db: AtomicU64::new(f64::NAN.to_bits()),
             volume_db: AtomicU64::new(0.0f64.to_bits()),
             volume_percent: AtomicU64::new(100.0f64.to_bits()),
             total_input_frames: AtomicU64::new(0),
@@ -669,6 +683,9 @@ impl DaemonControlHandle {
     #[inline]
     pub fn get_telemetry(&self) -> DaemonTelemetry {
         let device_target = self.telemetry.device_target.lock().unwrap().clone();
+        let preamp_db = load_f64(&self.telemetry.preamp_db);
+        let profile_headroom_db = load_f64(&self.telemetry.profile_headroom_db);
+        let dsd_gain_db = Some(load_f64(&self.telemetry.dsd_gain_db)).filter(|g| !g.is_nan());
         let disconnect_duration_ms = match self
             .telemetry
             .disconnect_duration_ms
@@ -697,7 +714,10 @@ impl DaemonControlHandle {
             volume_percent: load_f64(&self.telemetry.volume_percent),
             volume_mode: self.get_volume_mode(),
             is_muted: self.is_muted(),
-            preamp_db: load_f64(&self.telemetry.preamp_db),
+            preamp_db,
+            profile_headroom_db,
+            dsd_gain_db,
+            configured_gain_db: preamp_db + profile_headroom_db + dsd_gain_db.unwrap_or(0.0),
             total_input_frames: self.telemetry.total_input_frames.load(Ordering::Relaxed),
             total_output_frames: self.telemetry.total_output_frames.load(Ordering::Relaxed),
             queue_fill_pct: load_f64(&self.telemetry.queue_fill_pct),
@@ -760,6 +780,18 @@ impl DaemonControlHandle {
         self.telemetry
             .input_dsd_bit_rate_hz
             .store(bit_rate_hz.unwrap_or(0), Ordering::Relaxed);
+    }
+
+    /// Records the decimator gain applied to the current DSD input (`None` for PCM input).
+    #[inline]
+    pub fn set_input_dsd_gain_db(&self, gain_db: Option<f64>) {
+        store_f64(&self.telemetry.dsd_gain_db, gain_db.unwrap_or(f64::NAN));
+    }
+
+    /// Records the modulator profile headroom (`L - M`; 0 for PCM targets).
+    #[inline]
+    pub fn set_profile_headroom_db(&self, headroom_db: f64) {
+        store_f64(&self.telemetry.profile_headroom_db, headroom_db);
     }
 
     /// Updates the input/output stream rates and target format after a reconfiguration.
@@ -1271,6 +1303,8 @@ impl LivePipeline {
                     });
                     let b_ms = input.buffer_fill_secs().map(|s| s * 1000.0);
                     control.set_input_dsd_bit_rate(input.info().dsd_bit_rate.map(|r| r.get()));
+                    control.set_input_dsd_gain_db(input.dsd_decode_config().map(|c| c.gain_db));
+                    control.set_profile_headroom_db(self.plan.dsp_config.profile_headroom_db);
                     control.update_runtime_stats(
                         total_input_frames,
                         total_output_frames,

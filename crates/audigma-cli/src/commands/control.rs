@@ -130,8 +130,16 @@ fn print_telemetry(telem: &audigma_engine::DaemonTelemetry) {
     let vol_pct = telem.volume_percent;
     let mute_str = if telem.is_muted { " [MUTED]" } else { "" };
     println!(
-        "  Volume:              {:.1} dB ({:.0}%){mute_str} (mode: {}, preamp: {:.1} dB)",
-        telem.volume_db, vol_pct, telem.volume_mode, telem.preamp_db
+        "  Volume:              {:.1} dB ({:.0}%){mute_str} (mode: {})",
+        telem.volume_db, vol_pct, telem.volume_mode
+    );
+    let decimator = telem
+        .dsd_gain_db
+        .map(|g| format!(", decimator {g:.1}"))
+        .unwrap_or_default();
+    println!(
+        "  Configured Gain:     {:.1} dB (preamp {:.1}, modulator headroom {:.1}{decimator})",
+        telem.configured_gain_db, telem.preamp_db, telem.profile_headroom_db
     );
     println!(
         "  Frames In / Out:     {} / {}",
