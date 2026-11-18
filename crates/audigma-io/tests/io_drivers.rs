@@ -72,7 +72,7 @@ fn test_file_audio_input_dsf_reading_and_decimation() {
     // 2. Rewind
     file_in.rewind().expect("rewind");
 
-    // 3. Read PCM decimated frames (with default +6.0 dB Scarlet Book gain, abs <= 2.0)
+    // 3. Read PCM decimated frames (default 0.0 dB gain: unity, abs <= 1.0)
     let mut pcm_l = vec![0.0f64; 256];
     let mut pcm_r = vec![0.0f64; 256];
     let pcm_read = file_in
@@ -80,7 +80,7 @@ fn test_file_audio_input_dsf_reading_and_decimation() {
         .expect("read stereo decimated");
     assert_eq!(pcm_read, 256);
     for &s in &pcm_l {
-        assert!(s.is_finite() && s.abs() <= 2.0);
+        assert!(s.is_finite() && s.abs() <= 1.0);
     }
 
     // 4. Also verify unity (0.0 dB) gain with open_with_dsd_gain

@@ -14,7 +14,7 @@
 │ quantum_frames      512            ││DSD.                                    │
 │ dsd                                ││Used by: run, play.                     │
 │   dsd.max_intermed… (auto)         ││                                        │
-│   dsd.gain_db       6.0            ││                                        │
+│   dsd.gain_db       0.0            ││                                        │
 │▾ Output                            ││                                        │
 │?backend             -              ││                                        │
 │ volume_control      hardware-softw…││                                        │

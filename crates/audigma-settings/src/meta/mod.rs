@@ -22,14 +22,14 @@
 //! key = "dsd.gain_db"                # a leaf; its parent group must exist
 //! summary = "Level alignment applied after DSD decimation."
 //! description = "Paragraphs of prose."
-//! default = 6.0                      # or `default_text` when the default is computed
+//! default = 0.0                      # or `default_text` when the default is computed
 //! range = [-30.0, 30.0]
 //! show_if = { key = "input.allow_dsd", eq = true }
 //! required_if = { key = "output.backend", eq = "alsa" }   # required when this holds
 //! required_for = ["run"]             # required when running one of these commands
 //! applies_to = ["run", "convert"]    # commands the key affects (informational / filtering)
 //! assist = ["alsa-detect"]           # ids from assists.toml
-//! recommended.interactive-desktop = { value = 6.0, why = "keeps DSD and PCM level-matched." }
+//! recommended.interactive-desktop = { value = 0.0, why = "keeps DSD at the same level as direct DSD playback." }
 //!
 //! [[field.options]]                  # enum-like keys only: one entry per allowed value
 //! key = "alsa"                     # numbers and booleans are written as their text: "7", "true"
@@ -977,7 +977,7 @@ mod tests {
         assert_eq!(d("input.channels"), Some(json!(2)));
         assert_eq!(d("input.rate_mode"), Some(json!("dynamic")));
         assert_eq!(d("input.allow_dsd"), Some(json!(true)));
-        assert_eq!(d("input.dsd.gain_db"), Some(json!(6.0)));
+        assert_eq!(d("input.dsd.gain_db"), Some(json!(0.0)));
         assert_eq!(d("output.buffer_ms"), Some(json!(20)));
         assert_eq!(d("output.period_ms"), Some(json!(5)));
         assert_eq!(d("output.device_wait_ms"), Some(json!(-1)));

@@ -201,9 +201,9 @@ default_text = "unset (no cap)"
 key = "dsd.gain_db"
 summary = "Level alignment applied after DSD decimation."
 description = """
-SACD reference level sits 6 dB below full scale in the raw 1-bit stream. The default +6.0 dB brings 0 dB SACD to 0 dBFS PCM, so DSD and PCM tracks play at matched loudness.
+Raw 1-bit DSD decodes to PCM at unity gain (a 100% modulation stream is 0 dBFS), the same level direct DSD playback and PCM playback use. The default 0 dB keeps that level; DSD material at the SACD reference level (50% modulation) therefore peaks around -6 dBFS.
 
 Change it only to deliberately attenuate or boost DSD relative to PCM. Headroom for the result is handled by `[gain]`.
 """
-default = 6.0
+default = 0.0
 range = [-30.0, 30.0]

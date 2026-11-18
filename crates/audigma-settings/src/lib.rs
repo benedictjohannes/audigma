@@ -365,10 +365,10 @@ pub struct DsdInputConfig {
 }
 
 impl DsdInputConfig {
-    /// Resolved decimation normalization gain in decibels (default: +6.0 dB,
-    /// restoring Scarlet Book 50% modulation / 0 dB SACD to 0 dBFS PCM).
+    /// Resolved decimation normalization gain in decibels (default: 0.0 dB, unity:
+    /// a 100% modulation stream decodes to 0 dBFS PCM).
     pub fn resolved_gain_db(&self) -> f64 {
-        self.gain_db.unwrap_or(6.0)
+        self.gain_db.unwrap_or(0.0)
     }
 
     /// Resolved linear gain multiplier corresponding to `resolved_gain_db`.
@@ -555,15 +555,15 @@ impl InputConfig {
         self.dsd.as_ref().and_then(|d| d.max_intermediate_rate_hz)
     }
 
-    /// Returns the resolved DSD decimation gain in dB (defaults to +6.0 dB).
+    /// Returns the resolved DSD decimation gain in dB (defaults to 0.0 dB).
     pub fn dsd_gain_db(&self) -> f64 {
         self.dsd
             .as_ref()
             .map(|d| d.resolved_gain_db())
-            .unwrap_or(6.0)
+            .unwrap_or(0.0)
     }
 
-    /// Returns the resolved DSD decimation linear gain multiplier (defaults to 10^(6/20) ~= 1.99526).
+    /// Returns the resolved DSD decimation linear gain multiplier (defaults to 1.0).
     pub fn dsd_linear_gain(&self) -> f64 {
         10.0_f64.powf(self.dsd_gain_db() / 20.0)
     }

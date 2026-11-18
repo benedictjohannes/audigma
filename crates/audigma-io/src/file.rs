@@ -34,9 +34,9 @@ pub struct FileAudioInput {
 }
 
 impl FileAudioInput {
-    /// Opens an audio file for decoding with default DSD decimation normalization gain (+6.0 dB).
+    /// Opens an audio file for decoding with default DSD decimation normalization gain (0.0 dB, unity).
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, EngineError> {
-        Self::open_with_dsd_gain(path, 6.0)
+        Self::open_with_dsd_gain(path, 0.0)
     }
 
     /// Opens an audio file for decoding with specified DSD decimation gain in dB.

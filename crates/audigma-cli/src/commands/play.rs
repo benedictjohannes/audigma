@@ -141,7 +141,7 @@ pub fn run_play(args: PlayArgs) -> Result<(), CliError> {
             .input
             .as_ref()
             .map(|i| i.dsd_gain_db())
-            .unwrap_or(6.0);
+            .unwrap_or(0.0);
         let max_intermediate = settings.resolved_dsd_max_intermediate_rate_hz();
         let file_input =
             FileAudioInput::open_with_dsd_full_config(&args.input, dsd_gain_db, max_intermediate)?;

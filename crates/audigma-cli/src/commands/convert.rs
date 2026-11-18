@@ -104,7 +104,7 @@ pub fn run_convert(args: ConvertArgs) -> Result<(), CliError> {
             .input
             .as_ref()
             .map(|i| i.dsd_gain_db())
-            .unwrap_or(6.0);
+            .unwrap_or(0.0);
         let max_intermediate = settings.resolved_dsd_max_intermediate_rate_hz();
         Box::new(FileAudioInput::open_with_dsd_full_config(
             &args.input,
