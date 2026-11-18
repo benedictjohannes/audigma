@@ -1,35 +1,24 @@
 //! Output transport framing, carrier emission, device disconnect translation,
 //! and direct bit-exact DSD passthrough (`Design.md §1.6`, `§4.5`).
 
-use std::io::ErrorKind;
-
 use audigma_dsp::config::{DspConfiguration, TargetRateSpec};
 use audigma_format::decoder::AudioStreamInfo;
 use audigma_format::dop::DopPacker;
 use audigma_format::dsd_u32::pack_stereo_dsd_u32_be;
 
 use crate::lifecycle::IdleCarrierFormat;
-use crate::traits::{AudioInput, AudioOutput, EngineError};
+use crate::traits::{AudioInput, AudioOutput, DeviceLost, EngineError};
 
-/// Writes a data buffer to the audio output sink, translating hardware disconnection
-/// OS errors to `EngineError::DeviceDisconnected`.
+/// Writes a data buffer to the audio output sink, translating a backend's [`DeviceLost`]
+/// marker to `EngineError::DeviceDisconnected`.
 #[inline]
 pub fn write_output_all(output: &mut dyn AudioOutput, data: &[u8]) -> Result<(), EngineError> {
-    output.write_all(data).map_err(|e| {
-        let code = e.raw_os_error().unwrap_or(0);
-        if e.kind() == ErrorKind::BrokenPipe
-            || code == libc::ENODEV
-            || code == -libc::ENODEV
-            || code == libc::EBADFD
-            || code == -libc::EBADFD
-            || code == libc::EIO
-            || code == -libc::EIO
-        {
-            EngineError::DeviceDisconnected(e.to_string())
-        } else {
-            EngineError::Io(e)
-        }
-    })
+    output
+        .write_all(data)
+        .map_err(|e| match DeviceLost::find(&e) {
+            Some(lost) => EngineError::DeviceDisconnected(lost.0.clone()),
+            None => EngineError::Io(e),
+        })
 }
 
 /// Packs chronological MSB-first stereo DSD byte slices into the target output transport
@@ -135,4 +124,47 @@ pub fn process_live_dsd_passthrough_tile(
         output,
     )?;
     Ok(Some(frames_written))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{self, ErrorKind, Write};
+
+    struct FailingSink(fn() -> io::Error);
+
+    impl Write for FailingSink {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err((self.0)())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl AudioOutput for FailingSink {}
+
+    #[test]
+    fn device_lost_marker_maps_to_device_disconnected() {
+        let mut sink = FailingSink(|| DeviceLost("gone".into()).into_io());
+        match write_output_all(&mut sink, &[0; 4]) {
+            Err(EngineError::DeviceDisconnected(reason)) => assert_eq!(reason, "gone"),
+            other => panic!("expected DeviceDisconnected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unmarked_errors_stay_io() {
+        // Neither the error kind nor a raw errno is classified by the engine.
+        for make in [
+            (|| io::Error::new(ErrorKind::BrokenPipe, "pipe closed")) as fn() -> io::Error,
+            || io::Error::from_raw_os_error(19), // ENODEV on Linux
+        ] {
+            let mut sink = FailingSink(make);
+            assert!(matches!(
+                write_output_all(&mut sink, &[0; 4]),
+                Err(EngineError::Io(_))
+            ));
+        }
+    }
 }

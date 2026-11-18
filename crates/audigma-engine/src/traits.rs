@@ -60,6 +60,30 @@ pub enum EngineError {
     DeviceDisconnected(String),
 }
 
+/// Marker a backend attaches to an output `io::Error` to report device loss.
+///
+/// `AudioOutput` errors travel as `std::io::Error`, so the backend decides what counts as
+/// device loss (an errno, a removed graph node, ...) and wraps it with [`DeviceLost::into_io`].
+/// The engine looks only for this marker, never at OS error codes, and turns it into
+/// [`EngineError::DeviceDisconnected`]. An `io::ErrorKind` alone would be ambiguous: a closed
+/// stdout pipe is `BrokenPipe` too, but it is not a lost device.
+#[derive(Debug, Error)]
+#[error("{0}")]
+pub struct DeviceLost(pub String);
+
+impl DeviceLost {
+    /// Wraps the marker in an `io::Error` of kind `NotConnected`.
+    pub fn into_io(self) -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::NotConnected, self)
+    }
+
+    /// Returns the marker if `err` carries one.
+    pub fn find(err: &std::io::Error) -> Option<&DeviceLost> {
+        err.get_ref()
+            .and_then(|inner| inner.downcast_ref::<DeviceLost>())
+    }
+}
+
 /// Volume or mute update event received from an audio input driver (e.g. PipeWire props listener).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct VolumeUpdate {

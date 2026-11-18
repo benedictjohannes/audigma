@@ -10,7 +10,7 @@
 use audigma_dsp::{DsdBitRateHz, PcmRateHz};
 use audigma_engine::VolumeUpdate;
 use audigma_engine::queue::TaggedChunk;
-use audigma_engine::traits::{AudioInput, AudioOutput, DsdDecodeConfig, EngineError};
+use audigma_engine::traits::{AudioInput, AudioOutput, DeviceLost, DsdDecodeConfig, EngineError};
 use audigma_format::AudioStreamInfo;
 use audigma_settings::{InputConfig, RateMode};
 use libspa::param::audio::{AudioFormat, AudioInfoRaw};
@@ -2469,10 +2469,7 @@ impl Write for PipeWirePcmOutput {
                     .as_ref()
                     .is_some_and(|p| !p.load(Ordering::Relaxed))
                 {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::NotConnected,
-                        "PipeWire target sink removed",
-                    ));
+                    return Err(DeviceLost("PipeWire target sink removed".into()).into_io());
                 }
                 if start.elapsed() >= std::time::Duration::from_millis(2000) {
                     self.overruns.fetch_add(1, Ordering::Relaxed);

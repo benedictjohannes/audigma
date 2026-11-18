@@ -70,7 +70,7 @@ If you modify the feed loop, worker pool, device lifecycle, buffering, or rate s
 Audigma is designed around pure, portable core crates with platform-specific IO layers:
 - Portable crates: `audigma-dsp`, `audigma-format`, `audigma-settings`, `audigma-log`, and `audigma-configurator` core.
 - OS-specific crate: `audigma-io` (ALSA, PipeWire, D-Bus device reservation).
-- Mostly portable: `audigma-engine` still uses the Linux futex for worker wake-ups and classifies device-loss errnos itself, and `audigma-cli` has a Linux-only system tray ([Design.md §2](Design.md)).
+- Mostly portable: `audigma-engine` still uses the Linux futex for worker wake-ups, and `audigma-cli` has a Linux-only system tray ([Design.md §2](Design.md)).
 
 Windows and macOS support, and decoupling the engine from the futex, are on the [roadmap](docs/Roadmap.md).
 

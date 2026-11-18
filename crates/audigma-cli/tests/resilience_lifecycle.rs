@@ -4,12 +4,12 @@ use audigma_dsp::rates::PcmRateHz;
 use audigma_engine::live_pipeline::{
     DaemonControlHandle, DaemonOutputFormat, DaemonState, LivePipeline,
 };
-use audigma_engine::traits::{AudioOutput, EngineError, MockAudioInput};
+use audigma_engine::traits::{AudioOutput, DeviceLost, EngineError, MockAudioInput};
 use audigma_format::AudioStreamInfo;
 use audigma_io::alsa::{AlsaDeviceWatcher, wait_for_alsa_device};
 use audigma_settings::{OutputContainer, Settings};
 
-use std::io::{ErrorKind, Result as IoResult, Write};
+use std::io::{Result as IoResult, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -35,10 +35,7 @@ impl Write for DisconnectingOutputSink {
     fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
         if self.disconnected || self.bytes_written >= self.bytes_before_disconnect {
             self.disconnected = true;
-            return Err(std::io::Error::new(
-                ErrorKind::BrokenPipe,
-                "mock ALSA device disconnected: ENODEV",
-            ));
+            return Err(DeviceLost("mock ALSA device disconnected: ENODEV".into()).into_io());
         }
 
         let allowable = (self.bytes_before_disconnect - self.bytes_written).min(buf.len());
@@ -51,10 +48,7 @@ impl Write for DisconnectingOutputSink {
 
     fn flush(&mut self) -> IoResult<()> {
         if self.disconnected {
-            return Err(std::io::Error::new(
-                ErrorKind::BrokenPipe,
-                "mock ALSA device disconnected: ENODEV",
-            ));
+            return Err(DeviceLost("mock ALSA device disconnected: ENODEV".into()).into_io());
         }
         Ok(())
     }

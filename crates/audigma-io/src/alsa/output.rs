@@ -15,6 +15,8 @@ use alsa::pcm::{Access, Format, HwParams, PCM, State};
 use alsa::{Direction, ValueOr};
 
 use audigma_dsp::config::SampleFormat;
+#[cfg(feature = "alsa")]
+use audigma_engine::traits::DeviceLost;
 use audigma_engine::traits::{AudioOutput, EngineError};
 use audigma_format::dop::DopContainerFormat;
 use std::io::{ErrorKind, Result as IoResult, Write};
@@ -63,6 +65,15 @@ impl From<AlsaOutputError> for EngineError {
             },
         }
     }
+}
+
+/// Whether an ALSA errno means the device is gone (`docs/backends/ALSA.md §2`).
+///
+/// alsa-lib reports errors as negative errnos and some paths pass them through unnegated,
+/// so both signs are accepted.
+#[cfg(feature = "alsa")]
+fn is_device_lost_errno(code: i32) -> bool {
+    matches!(code.abs(), libc::ENODEV | libc::EBADFD | libc::EIO)
 }
 
 /// The ALSA sample format to open the device with.
@@ -484,8 +495,7 @@ impl AlsaAudioOutput {
         }
 
         self.pcm.drain().map_err(|e| {
-            let code = e.errno();
-            if code == libc::ENODEV || code == libc::EBADFD || code == libc::EIO {
+            if is_device_lost_errno(e.errno()) {
                 AlsaOutputError::DeviceDisconnected(format!("{e}"))
             } else {
                 AlsaOutputError::Alsa(format!("failed to drain PCM stream: {e}"))
@@ -523,15 +533,11 @@ impl AlsaAudioOutput {
                     if self.pcm.state() == State::XRun || e.kind() == ErrorKind::WouldBlock {
                         self.xrun_count += 1;
                         if let Err(prep_err) = self.pcm.prepare() {
-                            let prep_code = prep_err.errno();
-                            if prep_code == libc::ENODEV
-                                || prep_code == libc::EBADFD
-                                || prep_code == libc::EIO
-                            {
-                                return Err(std::io::Error::new(
-                                    ErrorKind::BrokenPipe,
-                                    format!("ALSA device disconnected during recovery: {prep_err}"),
-                                ));
+                            if is_device_lost_errno(prep_err.errno()) {
+                                return Err(DeviceLost(format!(
+                                    "ALSA device disconnected during recovery: {prep_err}"
+                                ))
+                                .into_io());
                             }
                             return Err(std::io::Error::other(format!(
                                 "ALSA XRun recovery failed (prepare error: {prep_err})"
@@ -541,19 +547,10 @@ impl AlsaAudioOutput {
                         continue;
                     } else {
                         // Check for device disconnect / removal errors
-                        if let Some(code) = e.raw_os_error() {
-                            if code == libc::ENODEV
-                                || code == -libc::ENODEV
-                                || code == libc::EBADFD
-                                || code == -libc::EBADFD
-                                || code == libc::EIO
-                                || code == -libc::EIO
-                            {
-                                return Err(std::io::Error::new(
-                                    ErrorKind::BrokenPipe,
-                                    format!("ALSA device disconnected: {e}"),
-                                ));
-                            }
+                        if e.raw_os_error().is_some_and(is_device_lost_errno) {
+                            return Err(
+                                DeviceLost(format!("ALSA device disconnected: {e}")).into_io()
+                            );
                         }
 
                         return Err(e);
@@ -874,6 +871,18 @@ mod tests {
         assert_eq!(cfg.format, AlsaFormatRequest::Exact("S32_LE".into()));
         assert_eq!(cfg.buffer_ms, 20);
         assert_eq!(cfg.period_ms, 5);
+    }
+
+    #[cfg(feature = "alsa")]
+    #[test]
+    fn device_lost_errnos_accept_both_signs() {
+        for code in [libc::ENODEV, libc::EBADFD, libc::EIO] {
+            assert!(is_device_lost_errno(code));
+            assert!(is_device_lost_errno(-code));
+        }
+        assert!(!is_device_lost_errno(libc::EPIPE));
+        assert!(!is_device_lost_errno(-libc::EAGAIN));
+        assert!(!is_device_lost_errno(0));
     }
 
     #[test]

@@ -53,8 +53,8 @@ pub use queue::{AudioSpscQueue, DEFAULT_CHUNK_SAMPLES, TaggedChunk};
 pub use tail::TailManager;
 pub use timing::{PoolTimings, StageStats, TimingReport, TimingTracker};
 pub use traits::{
-    AudioInput, AudioOutput, DecoderInput, DsdDecodeConfig, EngineError, HardwareVolumeBridge,
-    MockAudioInput, SeekableSink, StreamSink, VolumeUpdate,
+    AudioInput, AudioOutput, DecoderInput, DeviceLost, DsdDecodeConfig, EngineError,
+    HardwareVolumeBridge, MockAudioInput, SeekableSink, StreamSink, VolumeUpdate,
 };
 pub use transport::{
     is_dsd_passthrough_eligible, pack_and_write_stereo_dsd, process_live_dsd_passthrough_tile,

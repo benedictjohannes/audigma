@@ -41,4 +41,3 @@ Automates release builds so published binaries embed the full web configurator.
 Remove the last OS-specific code from `crates/audigma-engine`, so it is portable like the other core crates (`Design.md §2`). This is the prerequisite for the Windows and macOS ports above.
 
 1. **Worker wake-up:** put the worker pool's wait/wake barrier behind a small platform-neutral interface. Linux keeps the futex (the zero-allocation, lock-free real-time path); other platforms bring their own address-wait primitive. A portable fallback built on standard-library locks is acceptable for tests only, since it does not meet the real-time requirement of `Design.md §3.4`.
-2. **Device-loss classification:** move the errno classification that decides whether an output error means device loss into the backends (`audigma-io`), so the engine only sees an abstract error kind.
