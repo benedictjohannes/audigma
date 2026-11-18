@@ -193,7 +193,10 @@ impl ClockDriftController {
     /// apply to the next tile.
     ///
     /// During the warm-up the queue is still settling after a cushion refill or pipeline rebuild,
-    /// so neither the estimator nor the rails see those samples. Afterwards a fault is returned
+    /// so neither the estimator nor the rails see those samples. Skipping the rails matters:
+    /// with a 20 ms input cushion the fill dips below the 10 ms rail for a moment after a
+    /// stream start or rate switch while the pipeline primes (observed about 0.3 s in, with the
+    /// device buffer still above 27 ms), which is settling, not a fault. Afterwards a fault is returned
     /// only once the fill has stayed past a rail for `fault_debounce_secs`; until then the
     /// correction is held unchanged.
     pub fn update(&mut self, fill_secs: f64, dt_secs: f64) -> Result<f64, ClockDriftError> {

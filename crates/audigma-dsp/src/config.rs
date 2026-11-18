@@ -215,7 +215,7 @@ pub struct StreamSpec {
     pub target: TargetRateSpec,
 }
 
-/// Concrete, resolved DSP pipeline configuration (`Design.md §2`, `§4.2–§4.4`).
+/// Concrete, resolved DSP pipeline configuration (`Design.md §4.2–§4.4`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DspConfiguration {
     pub phase: FilterPhase,

@@ -3,7 +3,7 @@ import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 import { viteSingleFile } from "vite-plugin-singlefile";
 
-// The audigma server address for the dev proxy (see README of the plan, §6). Fixed at run time:
+// The audigma server address for the dev proxy. Fixed at run time:
 //   audigma configure web --no-open --bind 127.0.0.1:12301   and   bun run dev (port 12302).
 const target = process.env.AUDIGMA_URL ?? "http://127.0.0.1:12301";
 

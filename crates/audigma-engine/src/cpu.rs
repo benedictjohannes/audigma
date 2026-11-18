@@ -14,6 +14,10 @@ pub struct ThreadPlacement {
     /// Real-time priority (1-99). `None` keeps the thread at `SCHED_OTHER`.
     pub rt_priority: Option<u8>,
     /// Whether a DSP worker may busy-spin before sleeping (only sensible on an exclusive physical core).
+    ///
+    /// A spinning worker steals execution slots from whatever shares its core, so it spins only
+    /// when it owns its physical core and no other audigma thread runs on an SMT sibling;
+    /// otherwise it sleeps at once. The dispatcher spins at the barrier only if every worker may.
     pub spin: bool,
 }
 

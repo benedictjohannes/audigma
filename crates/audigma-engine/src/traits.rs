@@ -1,4 +1,4 @@
-//! Abstract audio stream input and output traits (`Design.md §2`, `§3.4`).
+//! Abstract audio stream input and output traits (`Design.md §3.4`).
 //!
 //! Pure Rust abstractions with zero OS or C-FFI dependencies, enabling instant
 //! unit and integration testing with mock streams and in-memory buffers.
@@ -271,7 +271,7 @@ pub trait AudioOutput: Write + Send {
     }
 
     /// The DoP word this sink was opened with, when it negotiated one with a device
-    /// (`output.dop_sample_format = "auto"`, `Design.md §5.2`).
+    /// (`output.dop_sample_format = "auto"`, `docs/backends/ALSA.md §5`).
     ///
     /// DoP packers must write this word when it is `Some`: it is what the device was opened
     /// for. `None` (files, pipes, non-DoP sinks) leaves the configured word in charge.

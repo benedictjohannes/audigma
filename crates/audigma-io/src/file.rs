@@ -1,4 +1,4 @@
-//! File I/O driver (`Design.md §2`, `§5.3`).
+//! File I/O driver (`Design.md §5.3`).
 //!
 //! Provides seekable file-backed implementations of `AudioInput` and `AudioOutput`.
 

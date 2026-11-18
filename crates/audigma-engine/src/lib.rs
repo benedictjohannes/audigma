@@ -1,5 +1,5 @@
 //! `audigma-engine`: Pure-Rust audio pipeline planner, offline converter, and abstract I/O traits
-//! (`Design.md §2`, `§3.4`).
+//! (`Design.md §3.4`).
 //!
 //! Provides:
 //! - Abstract, zero-FFI `AudioInput` and `AudioOutput` stream traits.

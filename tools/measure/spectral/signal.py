@@ -1,6 +1,6 @@
 """Signal-dependent measurements of the production DSD chain.
 
-Every record runs the chain as `audigma run` builds it with the default settings (`Design.md §2`, §4.3-§4.4):
+Every record runs the chain as `audigma run` builds it with the default settings (`Design.md §8.3`, §4.3-§4.4):
 baseband PCM -> profile gain L - M (M = `[gain] dsd_safety_margin_db`, default 0.25) -> `DcBlocker` (1 Hz) -> `HalfBandCascade`
 (linear phase, apodization off) -> `Modulator` with TPDF dither (0.005, the production default), harness mode `chain`.
 Levels are relative to the PCM input's full scale (a 0 dBFS PCM sine reaches the modulator at L - M).

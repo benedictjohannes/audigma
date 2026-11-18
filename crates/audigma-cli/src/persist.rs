@@ -1,5 +1,5 @@
 //! Per-instance persistence of the user volume and mute state (`[runtime] persist_volume`,
-//! `Design.md` §6.1.2).
+//! `Design.md` §6.3).
 //!
 //! The daemon restores `<state dir>/<instance>.state.toml` once at startup and a poller thread
 //! saves it again whenever the volume or mute state changes. Polling the control atomics keeps

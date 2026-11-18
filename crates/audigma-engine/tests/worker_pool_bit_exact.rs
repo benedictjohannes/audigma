@@ -1,5 +1,5 @@
 //! Integration test proving bit-exact output equivalence between sequential
-//! and persistent real-time ChannelWorkerPool DSP execution (`Design.md §1.2`).
+//! and persistent real-time ChannelWorkerPool DSP execution (`Design.md §3.4`).
 
 use audigma_dsp::DcBlocker;
 use audigma_dsp::config::{Apodization, DitherType, FilterPhase, OverloadPolicy};

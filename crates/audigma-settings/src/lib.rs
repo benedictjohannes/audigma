@@ -65,7 +65,7 @@ impl std::fmt::Display for FieldIssue {
     }
 }
 
-/// `[input] backend` options (`Design.md §6.2`).
+/// `[input] backend` options (`Design.md §6`).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -73,7 +73,7 @@ pub enum InputBackend {
     Pipewire,
 }
 
-/// `[output] backend` options (`Design.md §6.2`).
+/// `[output] backend` options (`Design.md §6`).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -82,7 +82,7 @@ pub enum OutputBackend {
     Alsa,
 }
 
-/// `[output] transport` options (`Design.md §6.2`).
+/// `[output] transport` options (`Design.md §6`).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -232,7 +232,7 @@ impl OutputContainer {
     }
 }
 
-/// `[target] rate_family` options (`Design.md §1.1`, `§6.2`).
+/// `[target] rate_family` options (`Design.md §3.2`, `§6`).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum TargetRateFamily {
@@ -270,7 +270,7 @@ impl std::fmt::Display for TargetRateFamily {
     }
 }
 
-/// `[gain] peak_analysis` options (`Design.md §4.4`, `§6.2`).
+/// `[gain] peak_analysis` options (`Design.md §4.4`, `§6`).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum PeakAnalysisMode {
@@ -281,7 +281,7 @@ pub enum PeakAnalysisMode {
     TwoPass,
 }
 
-/// `[resampler] drift_correction` options (`Design.md §1.5`, `§6.2`).
+/// `[resampler] drift_correction` options (`Design.md §1.5`, `§6`).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -294,7 +294,7 @@ pub enum DriftCorrection {
     Off,
 }
 
-/// `[offline] tail_policy` options (`Design.md §6.2`).
+/// `[offline] tail_policy` options (`Design.md §6`).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum TailPolicy {
@@ -305,7 +305,7 @@ pub enum TailPolicy {
     PreserveTail,
 }
 
-/// `[input] rate_mode` options (`Design.md §3.2`, `§6.2`).
+/// `[input] rate_mode` options (`Design.md §3.2`, `§6`).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -327,7 +327,7 @@ pub enum DeviceWaitExpiry {
     Pause,
 }
 
-/// `[output] volume_control` options (`Design.md §1.8`, `§6.2`).
+/// `[output] volume_control` options (`Design.md §1.8`, `§6`).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum VolumeControlMode {
@@ -355,7 +355,7 @@ pub fn is_valid_channel_position(token: &str) -> bool {
         .any(|&p| p == upper || upper.starts_with("UNKNOWN"))
 }
 
-/// `[input] dsd` options (`Design.md §1.6`, `§6.2`).
+/// `[input] dsd` options (`Design.md §1.6`, `§6`).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -453,7 +453,7 @@ impl<'de> Deserialize<'de> for QuantumFrames {
     }
 }
 
-/// `[input]` section (`Design.md §6.2`).
+/// `[input]` section (`Design.md §6`).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -569,7 +569,7 @@ impl InputConfig {
     }
 }
 
-/// `[output]` section (`Design.md §6.2`).
+/// `[output]` section (`Design.md §6`).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -641,7 +641,7 @@ impl OutputConfig {
     }
 }
 
-/// `[target]` section (`Design.md §6.2`).
+/// `[target]` section (`Design.md §6`).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -656,7 +656,7 @@ pub struct TargetConfig {
     pub dither_tpdf_seed: Option<u64>,
 }
 
-/// `[gain]` section (`Design.md §6.2`).
+/// `[gain]` section (`Design.md §6`).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -687,7 +687,7 @@ impl Default for GainConfig {
     }
 }
 
-/// `[resampler]` section (`Design.md §4.2`, `§6.2`).
+/// `[resampler]` section (`Design.md §4.2`, `§6`).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -729,7 +729,7 @@ impl Default for ResamplerConfig {
     }
 }
 
-/// `[offline]` section (`Design.md §6.2`).
+/// `[offline]` section (`Design.md §6`).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

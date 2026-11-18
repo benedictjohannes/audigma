@@ -1,4 +1,4 @@
-//! ALSA audio output driver (`Design.md §1.4`, `§3.3`, `§4.5`, `§5.1–§5.2`).
+//! ALSA audio output driver (`docs/backends/ALSA.md`, `Design.md §3.3`, `§4.5`, `§5.1–§5.2`).
 //!
 //! Provides direct exclusive ALSA hardware egress supporting:
 //! - Native DSD (`DSD_U32_BE` / `DSD_U32_LE`)
@@ -88,7 +88,7 @@ impl AlsaFormatRequest {
     }
 }
 
-/// The ALSA format whose bit placement matches a DoP word layout (`Design.md §5.2`):
+/// The ALSA format whose bit placement matches a DoP word layout (`docs/backends/ALSA.md §5`):
 /// `s24le` is LSB-justified in 32 bits, which is ALSA `S24_LE`, not `S32_LE`.
 pub const fn dop_alsa_format(word: DopContainerFormat) -> &'static str {
     match word {
@@ -287,7 +287,7 @@ impl AlsaAudioOutput {
         })?;
 
         // Negotiate on the handle being opened, so the word cannot change between the
-        // check and the open (`Design.md §5.2`).
+        // check and the open (`docs/backends/ALSA.md §5`).
         let (alsa_format, dop_format) = match &config.format {
             AlsaFormatRequest::Exact(name) => (name.clone(), None),
             AlsaFormatRequest::Dop(candidates) => {

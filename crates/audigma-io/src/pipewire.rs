@@ -1,4 +1,4 @@
-//! Concrete PipeWire audio backends (`Design.md §1.4`, `§3.3`, `§7`).
+//! Concrete PipeWire audio backends (`docs/backends/PipeWire.md`, `Design.md §1.4`, `§3.3`).
 //!
 //! Provides:
 //! - `PipeWireVirtualSink`: Registers a virtual audio sink node (`audigma_sink` with `media.class = "Audio/Sink"`)
@@ -868,6 +868,8 @@ impl PipeWireVirtualSink {
                     // the engine consumes it. It never joins (or switches
                     // between) hardware drivers, so input timing follows the
                     // output and a source's requested size is in its own units.
+                    // Without it `pw-dsdplay` runs about 4x realtime, and the sink is
+                    // missing from KDE's volume control.
                     *pipewire::keys::NODE_DRIVER => "true",
                     // The graph quantum is the size of each pulled cycle.
                     *pipewire::keys::NODE_LATENCY => format!("{init_quantum}/{rate_hz}"),
@@ -2005,7 +2007,7 @@ impl AudioInput for PipeWireVirtualSink {
     }
 }
 
-/// PipeWire high-rate PCM output node (`Design.md §1.4`, `§3.3`).
+/// PipeWire high-rate PCM output node (`docs/backends/PipeWire.md §3`, `Design.md §3.3`).
 ///
 /// Drives high-rate PCM back into the PipeWire graph (`shared-graph` clock),
 /// optionally binding to a target hardware node (`alsa_output...`).

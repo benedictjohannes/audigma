@@ -1,5 +1,5 @@
 //! `audigma-dsp`: Pure numerical processing, strongly typed rate domains, filter/modulator tables,
-//! and PCM/DSD DSP primitives (`Design.md §1`, `§2`, `§4`).
+//! and PCM/DSD DSP primitives (`Design.md §1`, `§4`).
 //!
 //! Zero OS, file, or network I/O dependencies.
 

@@ -1,10 +1,10 @@
-//! Persistent real-time multi-channel worker pool (`Design.md §1.2`).
+//! Persistent real-time multi-channel worker pool (`Design.md §3.4`).
 //!
 //! Provides:
-//! - Dedicated persistent worker threads (1 thread per channel) spawned upon pipeline preparation.
+//! - Persistent worker threads created once per daemon; channel `c` runs on worker `c % workers`.
 //! - Lock-free synchronization barrier using cache-line aligned atomic flags and Linux futex.
-//! - POSIX real-time scheduling priority (`SCHED_FIFO` via `pthread_setschedparam` / `RLIMIT_RTPRIO`)
-//!   and thread-local hardware FTZ/DAZ denormal guards.
+//! - Per-thread placement and real-time priority applied through a caller-supplied hook (the
+//!   engine makes no scheduling syscalls), and thread-local hardware FTZ/DAZ denormal guards.
 //! - Zero heap allocation and zero lock contention during steady-state processing.
 //! - Isolated per-channel FIR cascade and CRFB modulator states.
 //! - Bounded internal DSD subtiles without additional worker synchronization.
@@ -440,6 +440,9 @@ const PRETOUCH_STRIDE_BYTES: usize = 4096;
 
 /// Writes one element per page so first-touch page faults happen at construction, not in
 /// the first tiles. Leaves the contents unchanged (the buffers are zero-filled).
+///
+/// `mlockall` is deliberately not used instead: under a finite `RLIMIT_MEMLOCK` it would
+/// break arena creation.
 fn pretouch<T: Copy + Default>(buf: &mut [T]) {
     let elem = std::mem::size_of::<T>().max(1);
     let step = (PRETOUCH_STRIDE_BYTES / elem).max(1);

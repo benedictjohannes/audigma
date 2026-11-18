@@ -1,5 +1,5 @@
 //! Platform-neutral tray model: what the tray shows and offers, independent of the host
-//! protocol (`Design.md` §6.1.1 `[runtime] systray`).
+//! protocol (`Design.md` §7 `[runtime] systray`).
 
 use audigma_dsp::DsdBitRateHz;
 use audigma_engine::{DaemonOutputFormat, DaemonState, DaemonTelemetry, PauseReason};

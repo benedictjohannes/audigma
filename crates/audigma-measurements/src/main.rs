@@ -433,7 +433,7 @@ fn run_direct_sine(config: &HarnessConfig, modulator: &mut Modulator, f_bit_hz: 
     }
 }
 
-/// Production chain (`Design.md §2`): baseband PCM stimulus -> static gain -> `HalfBandCascade` -> `Modulator`.
+/// Production chain (`Design.md §8.3`): baseband PCM stimulus -> static gain -> `HalfBandCascade` -> `Modulator`.
 ///
 /// The stimulus is a sum of components (`config.tones`: frequency in Hz, 0 = DC, and peak level in dBFS of the
 /// PCM input); an empty list is digital silence. Each tone is coherent with the `config.samples`-bit record

@@ -1,4 +1,4 @@
-//! D-Bus interfaces for real-time thread scheduling and ALSA device reservation (`Design.md §1`, `§3.4`).
+//! D-Bus interfaces for real-time thread scheduling and ALSA device reservation (`docs/backends/ALSA.md §1`, `Design.md §3.4`).
 //!
 //! Provides:
 //! - `rtkit_make_realtime`: RealtimeKit fallback used by `sched::apply`.

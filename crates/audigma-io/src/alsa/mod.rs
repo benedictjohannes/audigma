@@ -1,4 +1,4 @@
-//! ALSA audio interface modules (`Design.md §2`, `§7`).
+//! ALSA audio interface modules (`docs/backends/ALSA.md`, `Design.md §7`).
 
 pub mod mixer;
 pub mod output;

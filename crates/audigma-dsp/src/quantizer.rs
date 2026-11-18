@@ -1,4 +1,4 @@
-//! Shared PCM quantizer (`Design.md §4.2`): scaling, optional TPDF dither, clamping and
+//! Shared PCM quantizer (`Design.md §4.3`): scaling, optional TPDF dither, clamping and
 //! rounding of normalized `f64` samples to the target integer sample format.
 //!
 //! One implementation serves the live loop and every offline writer (WAV, FLAC, raw), so

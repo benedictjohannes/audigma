@@ -165,8 +165,13 @@ pub trait CrfbCore: std::fmt::Debug + Clone + Send + 'static {
     /// resonator stages, `s_k` elsewhere, `b1 u` folded into `w_0`) computed as a depth-3 parallel prefix, and
     /// `gamma_k v` applied as `copysign(gamma_k, v)` (`gamma_k >= 0`). This keeps the decision off a branch and
     /// out of the integrator chain: the loop-carried path is a few FP ops instead of two per stage
-    /// (measured 1.5-1.6x faster per bit than the stage-by-stage form). The operation order is
-    /// mirrored exactly by `tools/design/dsm_analysis.crfb_step` (bit-exact reference).
+    /// (measured 1.5-1.6x faster per bit than the stage-by-stage form, DSD512, baseline `x86-64`
+    /// build). The gain depends on codegen: a branch on `v`, or a sign round trip through integer
+    /// registers, loses most of it (`docs/benchmarks/benchmark.reference.md`).
+    ///
+    /// The operation order is mirrored exactly by `tools/design/dsm_analysis.crfb_step`
+    /// (`simulate_crfb`) and the MSA kernel in `design_crfb.py`; changing it in one place breaks
+    /// the bit-exact check (`Design.md §8`). Synthesis rejects any `gamma_k < 0`.
     ///
     /// Returns the new state and `true` if an overload/NaN condition occurred.
     fn step(coeffs: &Self::Coeffs, state: &Self::State, u: f64, v: f64) -> (Self::State, bool);

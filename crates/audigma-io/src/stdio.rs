@@ -1,4 +1,4 @@
-//! Stdio stream I/O driver (`Design.md §2`, `§5.3`).
+//! Stdio stream I/O driver (`Design.md §5.3`).
 //!
 //! Provides non-seekable stdio stream implementations:
 //! - `StdioAudioInput`: reads raw PCM bytes from `stdin` or a non-seekable pipe.

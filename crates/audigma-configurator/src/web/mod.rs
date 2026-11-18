@@ -3,7 +3,7 @@
 //! The server owns one [`Session`] (draft, guided flow, probe, benchmark) and answers
 //! [`api::handle`]. It binds `127.0.0.1` on a random port by default, requires a random token on
 //! every request and exits after a save, an explicit quit or an idle timeout. There is no `Host`
-//! allowlist and no CORS (see the plan, §7): the token is the access control, and a request with
+//! allowlist and no CORS: the token is the access control, and a request with
 //! an `Origin` must come from the page's own origin.
 //!
 //! Tests build a [`Server`] with a fake [`Backend`] and talk to it over a socket, or call

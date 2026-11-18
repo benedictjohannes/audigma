@@ -24,8 +24,10 @@ pub const DSD_BYTES_PER_DOP_FRAME: usize = 2;
 
 /// Supported ALSA container alignments for DoP v1.1 (`Design.md §5.2`).
 ///
-/// This is also the `output.dop_sample_format` setting: only these three PCM words can carry
-/// the 24-bit DoP word, so any other sample format is rejected when the settings are parsed.
+/// The word that is actually written, so it is always decided and has no `auto`. The setting is
+/// `audigma_settings::DopSampleFormat` (what was asked; may be undecided); its `candidates()` and
+/// `without_device()` are the only bridge between the two, which keeps an undecided word from
+/// ever reaching a packer.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DopContainerFormat {

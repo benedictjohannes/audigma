@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 /// Default capacity for low-frequency RT control event ring buffers.
 pub const DEFAULT_RT_QUEUE_CAPACITY: usize = 256;
 
-/// Fixed-size, allocation-free event queued by RT paths (§8.2).
+/// Fixed-size, allocation-free event queued by RT paths.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RtLogEvent {
     FormatNegotiated {
@@ -36,7 +36,7 @@ pub enum RtLogEvent {
 #[error("RT log queue is full")]
 pub struct RtQueueFullError;
 
-/// RT-safe producer handle (§8.3).
+/// RT-safe producer handle.
 pub struct RtLogProducer {
     producer: rtrb::Producer<RtLogEvent>,
     dropped_events: Arc<AtomicU64>,
@@ -86,7 +86,7 @@ pub fn rt_log_channel(capacity: usize) -> (RtLogProducer, RtLogConsumer, Arc<Ato
     (producer, consumer, dropped)
 }
 
-/// Lock-free error accumulator for high-rate per-buffer audio loop errors (§8.3).
+/// Lock-free error accumulator for high-rate per-buffer audio loop errors.
 #[derive(Debug, Default)]
 pub struct DecimationErrorRecorder {
     count: AtomicU64,

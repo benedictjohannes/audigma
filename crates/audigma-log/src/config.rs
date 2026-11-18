@@ -109,7 +109,7 @@ pub struct LogConfig {
 impl LogConfig {
     /// Resolves final logging configuration from CLI, environment, settings, and defaults.
     ///
-    /// Precedence (§7.4):
+    /// Precedence:
     /// CLI flag > environment variable > Settings > command default.
     pub fn resolve(
         cli_format: Option<LogFormat>,

@@ -1364,7 +1364,7 @@ fn message_list(title: &str, body: &str) -> Popup {
 }
 
 /// The JSON value of option `key`, typed like the key's current value (numbers and booleans
-/// match by decimal text in the metadata, §Decisions 20).
+/// match by decimal text in the metadata).
 fn option_value(key: &str) -> Value {
     if let Ok(i) = key.parse::<i64>() {
         return Value::from(i);

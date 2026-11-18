@@ -31,7 +31,7 @@ fn main() -> ExitCode {
         }
     }
 
-    // 1. Determine command default log level: info for run, warn for short-lived commands (§6.1)
+    // 1. Determine command default log level: info for run, warn for short-lived commands
     let default_level = match &cli.command {
         Commands::Run(_) => audigma_log::LogLevel::Info,
         // Log lines would land on the form's screen.
@@ -39,7 +39,7 @@ fn main() -> ExitCode {
         _ => audigma_log::LogLevel::Warn,
     };
 
-    // 2. Pre-read config file to extract [logging] settings if present (§7.4)
+    // 2. Pre-read config file to extract [logging] settings if present
     let explicit_config = match &cli.command {
         Commands::Run(args) => args.config.as_deref(),
         Commands::Play(args) => args.config.as_deref(),
@@ -71,7 +71,7 @@ fn main() -> ExitCode {
         (None, None)
     };
 
-    // 3. Resolve log configuration with proper precedence (§7.4)
+    // 3. Resolve log configuration with proper precedence
     let log_config = audigma_log::LogConfig::resolve(
         cli.log_format,
         cli.log_level,
@@ -80,7 +80,7 @@ fn main() -> ExitCode {
         default_level,
     );
 
-    // 4. Initialize structured logging with non-blocking writer and guard lifetime (§9)
+    // 4. Initialize structured logging with non-blocking writer and guard lifetime
     let _guard = match audigma_log::init(&log_config) {
         Ok(guard) => Some(guard),
         Err(err) => {

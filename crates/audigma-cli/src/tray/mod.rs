@@ -1,4 +1,4 @@
-//! System tray icon (`[runtime] systray`, `Design.md` §6.1.1).
+//! System tray icon (`[runtime] systray`, `Design.md` §7).
 //!
 //! `model` is platform-neutral (state -> status line and menu); `linux` renders it as a
 //! StatusNotifierItem. Each daemon instance owns its tray.

@@ -1,4 +1,4 @@
-//! Renders the metadata markdown subset (§4.4: paragraphs, `- ` bullets, `` `code` ``,
+//! Renders the metadata markdown subset (paragraphs, `- ` bullets, `` `code` ``,
 //! `*emphasis*`) as wrapped, styled ratatui lines.
 
 use ratatui::style::{Color, Modifier, Style};

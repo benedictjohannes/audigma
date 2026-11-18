@@ -15,7 +15,7 @@ INDEX_PATH = REPORT_DIR / "README.md"
 # Add tools/design to sys.path so design scripts and dsm_analysis import directly.
 sys.path.insert(0, str(REPO_ROOT / "tools" / "design"))
 
-# Quality requirements (Design.md §8.6, DSP quality audit P5). Levels are in-band (20 Hz-20 kHz) dBFS re a full-scale sine.
+# Quality requirements (Design.md §8.6). Levels are in-band (20 Hz-20 kHz) dBFS re a full-scale sine.
 # Anchor 1, audibility: 0 dBFS at ~120 dB SPL peak, so noise and every discrete product stay below ~0 dB SPL.
 AUDIBILITY_DR_A_DB = 120.0
 AUDIBILITY_SPUR_DBFS = -120.0

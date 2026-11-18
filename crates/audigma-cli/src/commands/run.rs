@@ -30,7 +30,7 @@ use super::resolve_config_path;
 use crate::error::CliError;
 use crate::ipc::{ControlServer, Instance};
 
-/// Atomic pointer to the daemon running flag for signal handler shutdown (§9, §13.12).
+/// Atomic pointer to the daemon running flag for signal handler shutdown.
 static DAEMON_RUNNING_PTR: AtomicPtr<AtomicBool> = AtomicPtr::new(std::ptr::null_mut());
 
 extern "C" fn sigint_sigterm_handler(_: libc::c_int) {
@@ -290,7 +290,7 @@ pub fn run_run(args: RunArgs) -> Result<(), CliError> {
         summary.preamp_db,
     );
 
-    // Install SIGINT / SIGTERM handler to stop daemon cleanly (§9, §13.12)
+    // Install SIGINT / SIGTERM handler to stop daemon cleanly
     DAEMON_RUNNING_PTR.store(Arc::as_ptr(&control.running) as *mut _, Ordering::SeqCst);
     unsafe {
         libc::signal(
@@ -553,7 +553,7 @@ fn run_session(
         }
     };
 
-    // Set up and spawn audigma-rt-log drainer thread (§8.4)
+    // Set up and spawn audigma-rt-log drainer thread
     let mut rt_drainer = audigma_log::RtLogDrainer::new();
     if let Some(ref mut input) = input_driver {
         if let Some(consumer) = input.take_rt_consumer() {
