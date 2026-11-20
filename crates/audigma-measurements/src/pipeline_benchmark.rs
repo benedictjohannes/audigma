@@ -17,8 +17,8 @@ use std::io::Write;
 use std::time::Instant;
 
 use audigma_dsp::{
-    Apodization, DitherType, DsdBitRateHz, FilterPhase, OverloadPolicy, PcmRateHz, SampleFormat,
-    TargetRateSpec,
+    Apodization, DitherType, DsdBitRateHz, FilterPhase, ModulatorNtf, OverloadPolicy, PcmRateHz,
+    SampleFormat, TargetRateSpec,
 };
 use audigma_engine::{
     DsdDecodeConfig, FrameGain, InputDspConfig, InputResampling, InputTileControls,
@@ -203,6 +203,7 @@ fn run(a: &Args) {
         TargetRateSpec::Dsd { bit_rate } => Some(TargetDsdConfig {
             bit_rate,
             modulator_order: a.order,
+            modulator_ntf: ModulatorNtf::Reference,
             dither: DitherType::Tpdf,
             // A silently muted modulator would be timed as a fast one: fail instead.
             overload_policy: OverloadPolicy::Error,

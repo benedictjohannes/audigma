@@ -4,7 +4,7 @@
 
 #![allow(clippy::excessive_precision, clippy::approx_constant)]
 
-use crate::config::{Apodization, FilterPhase};
+use crate::config::{Apodization, FilterPhase, ModulatorNtf};
 use crate::rates::DsdBitRateHz;
 
 /// Static 5th-order CRFB Delta-Sigma Modulator coefficient set (Design.md §4.3).
@@ -20,7 +20,7 @@ pub struct CrfbCoefficients {
     pub gamma: [f64; 5],
     /// Input feed-in gain b1 calibrated for exact unity DC STF gain.
     pub b1: f64,
-    /// Out-of-band NTF gain the loop was synthesised for (`design_crfb.py`).
+    /// Out-of-band NTF gain of the design (`tools/design/crfb_designs.json`, Design.md §4.3).
     pub ntf_h_inf: f64,
     /// Measured maximum stable input `L` in dBFS (DC + tone sweep, `design_crfb.measure_msa_dbfs`).
     pub max_stable_input_dbfs: f64,
@@ -44,475 +44,1756 @@ pub struct CrfbCoefficients7 {
     pub gamma: [f64; 7],
     /// Input feed-in gain b1 calibrated for exact unity DC STF gain.
     pub b1: f64,
-    /// Out-of-band NTF gain the loop was synthesised for (`design_crfb.py`).
+    /// Out-of-band NTF gain of the design (`tools/design/crfb_designs.json`, Design.md §4.3).
     pub ntf_h_inf: f64,
     /// Measured maximum stable input `L` in dBFS (DC + tone sweep, `design_crfb.measure_msa_dbfs`).
     pub max_stable_input_dbfs: f64,
 }
 
-/// 5th-order CRFB coefficients for DSD64 (f_bit=2822400 Hz, OSR=70.56).
-pub const CRFB5_DSD64: CrfbCoefficients5 = CrfbCoefficients5 {
+/// 5th-order CRFB, DSD64, `modulator_ntf = "reference"` (f_bit=2822400 Hz, OSR=70.56, H_inf=1.40, anchors missed at every H_inf <= 1.4, baseline kept).
+pub const CRFB5_DSD64_REFERENCE: CrfbCoefficients5 = CrfbCoefficients5 {
     g1: 5.74756260688147336e-04,
     g2: 1.62761800247612776e-03,
     a: [
-        2.64797649221942312e-04,
-        3.88204548465606245e-03,
-        2.88336255145021508e-02,
-        1.46655529838546683e-01,
-        4.90357534336210654e-01,
+        2.64797649223222538e-04,
+        3.88204548466992202e-03,
+        2.88336255145754117e-02,
+        1.46655529838774668e-01,
+        4.90357534336553491e-01,
     ],
     gamma: [
-        2.64797649221942312e-04,
-        4.14684313387800492e-03,
-        3.29804686483801540e-02,
-        1.79635998486926851e-01,
-        6.69993532823137450e-01,
+        2.64797649223222538e-04,
+        4.14684313389314472e-03,
+        3.29804686484685555e-02,
+        1.79635998487243209e-01,
+        6.69993532823796700e-01,
     ],
-    b1: 2.81828677454357720e-04,
+    b1: 2.81828677455680393e-04,
     ntf_h_inf: 1.4,
     max_stable_input_dbfs: -4.0,
 };
 
-/// Backward-compatible alias for 5th-order DSD64 coefficients.
-pub const CRFB_DSD64: CrfbCoefficients = CRFB5_DSD64;
+/// 5th-order CRFB, DSD64, `modulator_ntf = "comfortable"` (f_bit=2822400 Hz, OSR=70.56, H_inf=1.40, anchors missed at every H_inf <= 1.4, baseline kept).
+pub const CRFB5_DSD64_COMFORTABLE: CrfbCoefficients5 = CrfbCoefficients5 {
+    g1: 5.74756260688147336e-04,
+    g2: 1.62761800247612776e-03,
+    a: [
+        2.64797649223222538e-04,
+        3.88204548466992202e-03,
+        2.88336255145754117e-02,
+        1.46655529838774668e-01,
+        4.90357534336553491e-01,
+    ],
+    gamma: [
+        2.64797649223222538e-04,
+        4.14684313389314472e-03,
+        3.29804686484685555e-02,
+        1.79635998487243209e-01,
+        6.69993532823796700e-01,
+    ],
+    b1: 2.81828677455680393e-04,
+    ntf_h_inf: 1.4,
+    max_stable_input_dbfs: -4.0,
+};
 
-/// 5th-order CRFB coefficients for DSD128 (f_bit=5644800 Hz, OSR=141.12).
-pub const CRFB5_DSD128: CrfbCoefficients5 = CrfbCoefficients5 {
+/// 5th-order CRFB, DSD64, `modulator_ntf = "fixed_h_inf_1_4"` (f_bit=2822400 Hz, OSR=70.56, H_inf=1.40, fixed H_inf).
+pub const CRFB5_DSD64_FIXED_H_INF_1_4: CrfbCoefficients5 = CrfbCoefficients5 {
+    g1: 5.74756260688147336e-04,
+    g2: 1.62761800247612776e-03,
+    a: [
+        2.64797649223222538e-04,
+        3.88204548466992202e-03,
+        2.88336255145754117e-02,
+        1.46655529838774668e-01,
+        4.90357534336553491e-01,
+    ],
+    gamma: [
+        2.64797649223222538e-04,
+        4.14684313389314472e-03,
+        3.29804686484685555e-02,
+        1.79635998487243209e-01,
+        6.69993532823796700e-01,
+    ],
+    b1: 2.81828677455680393e-04,
+    ntf_h_inf: 1.4,
+    max_stable_input_dbfs: -4.0,
+};
+
+/// 5th-order CRFB, DSD64, `modulator_ntf = "fixed_h_inf_1_5"` (f_bit=2822400 Hz, OSR=70.56, H_inf=1.50, fixed H_inf).
+pub const CRFB5_DSD64_FIXED_H_INF_1_5: CrfbCoefficients5 = CrfbCoefficients5 {
+    g1: 5.74756260688147336e-04,
+    g2: 1.62761800247612776e-03,
+    a: [
+        6.42369413399023837e-04,
+        7.52728488076771264e-03,
+        4.63960862875368307e-02,
+        1.95993294115453104e-01,
+        5.56044785836769639e-01,
+    ],
+    gamma: [
+        6.42369413399023837e-04,
+        8.16965429416673626e-03,
+        5.45657405817035687e-02,
+        2.50559034697156680e-01,
+        8.06603820533926319e-01,
+    ],
+    b1: 6.69556025262764724e-04,
+    ntf_h_inf: 1.5,
+    max_stable_input_dbfs: -5.75,
+};
+
+/// 5th-order CRFB, DSD128, `modulator_ntf = "reference"` (f_bit=5644800 Hz, OSR=141.12, H_inf=1.34, anchors met).
+pub const CRFB5_DSD128_REFERENCE: CrfbCoefficients5 = CrfbCoefficients5 {
     g1: 1.43694227179747003e-04,
     g2: 4.06945901860744641e-04,
     a: [
-        2.75951186032151734e-04,
-        3.91562665816451785e-03,
-        2.94873241048715269e-02,
-        1.47210713446912361e-01,
-        4.89936374472106473e-01,
+        1.42590350854231548e-04,
+        2.36808965581913281e-03,
+        2.05443201752090951e-02,
+        1.17557461026542034e-01,
+        4.43236407803837773e-01,
     ],
     gamma: [
-        2.75951186032151734e-04,
-        4.19157784419666932e-03,
-        3.36789019490681962e-02,
-        1.80889615395980557e-01,
-        6.70825989868087058e-01,
+        1.42590350854231548e-04,
+        2.51068000667336449e-03,
+        2.30550001818824596e-02,
+        1.40612461208424494e-01,
+        5.83848869012262295e-01,
     ],
-    b1: 2.80216993691115030e-04,
-    ntf_h_inf: 1.4,
-    max_stable_input_dbfs: -4.0,
+    b1: 1.45568369658025706e-04,
+    ntf_h_inf: 1.34,
+    max_stable_input_dbfs: -3.5,
 };
 
-/// Backward-compatible alias for 5th-order DSD128 coefficients.
-pub const CRFB_DSD128: CrfbCoefficients = CRFB5_DSD128;
+/// 5th-order CRFB, DSD128, `modulator_ntf = "comfortable"` (f_bit=5644800 Hz, OSR=141.12, H_inf=1.22, anchors met).
+pub const CRFB5_DSD128_COMFORTABLE: CrfbCoefficients5 = CrfbCoefficients5 {
+    g1: 1.43694227179747003e-04,
+    g2: 4.06945901860744641e-04,
+    a: [
+        2.20523719974880823e-05,
+        5.65450567452328834e-04,
+        7.23670434209342309e-03,
+        6.08973059916295481e-02,
+        3.28322556985188529e-01,
+    ],
+    gamma: [
+        2.20523719974880823e-05,
+        5.87502939449816930e-04,
+        7.82420728154323980e-03,
+        6.87215132731727879e-02,
+        3.97044070258361304e-01,
+    ],
+    b1: 2.31114435518377753e-05,
+    ntf_h_inf: 1.22,
+    max_stable_input_dbfs: -2.25,
+};
 
-/// 5th-order CRFB coefficients for DSD256 (f_bit=11289600 Hz, OSR=282.24).
-pub const CRFB5_DSD256: CrfbCoefficients5 = CrfbCoefficients5 {
+/// 5th-order CRFB, DSD128, `modulator_ntf = "fixed_h_inf_1_4"` (f_bit=5644800 Hz, OSR=141.12, H_inf=1.40, fixed H_inf).
+pub const CRFB5_DSD128_FIXED_H_INF_1_4: CrfbCoefficients5 = CrfbCoefficients5 {
+    g1: 1.43694227179747003e-04,
+    g2: 4.06945901860744641e-04,
+    a: [
+        2.75951186033542115e-04,
+        3.91562665818017026e-03,
+        2.94873241049584643e-02,
+        1.47210713447195024e-01,
+        4.89936374472592640e-01,
+    ],
+    gamma: [
+        2.75951186033542115e-04,
+        4.19157784421371211e-03,
+        3.36789019491721756e-02,
+        1.80889615396367193e-01,
+        6.70825989868959804e-01,
+    ],
+    b1: 2.80216993692517880e-04,
+    ntf_h_inf: 1.4,
+    max_stable_input_dbfs: -4.25,
+};
+
+/// 5th-order CRFB, DSD128, `modulator_ntf = "fixed_h_inf_1_5"` (f_bit=5644800 Hz, OSR=141.12, H_inf=1.50, fixed H_inf).
+pub const CRFB5_DSD128_FIXED_H_INF_1_5: CrfbCoefficients5 = CrfbCoefficients5 {
+    g1: 1.43694227179747003e-04,
+    g2: 4.06945901860744641e-04,
+    a: [
+        6.59616948168318513e-04,
+        7.56481330573650392e-03,
+        4.71114834605668303e-02,
+        1.96425464465582345e-01,
+        5.55677908796314624e-01,
+    ],
+    gamma: [
+        6.59616948168318513e-04,
+        8.22443025390482210e-03,
+        5.53359137144716490e-02,
+        2.51761378180054007e-01,
+        8.07439286976368686e-01,
+    ],
+    b1: 6.66419090072883523e-04,
+    ntf_h_inf: 1.5,
+    max_stable_input_dbfs: -5.75,
+};
+
+/// 5th-order CRFB, DSD256, `modulator_ntf = "reference"` (f_bit=11289600 Hz, OSR=282.24, H_inf=1.22, anchors met).
+pub const CRFB5_DSD256_REFERENCE: CrfbCoefficients5 = CrfbCoefficients5 {
     g1: 3.59238794263028183e-05,
     g2: 1.01739063174344224e-04,
     a: [
-        2.78748253764421092e-04,
-        3.92401442214841082e-03,
-        2.96505866046490041e-02,
-        1.47349771058375684e-01,
-        4.89831035704774598e-01,
+        2.27884407399177296e-05,
+        5.70135882107789742e-04,
+        7.35523884519901760e-03,
+        6.11191371354892210e-02,
+        3.28183841597520676e-01,
     ],
     gamma: [
-        2.78748253764421092e-04,
-        4.20276267591283229e-03,
-        3.38533492805618355e-02,
-        1.81203120338937512e-01,
-        6.71034156043712082e-01,
+        2.27884407399177296e-05,
+        5.92924322847707434e-04,
+        7.94816316804672525e-03,
+        6.90673003035359445e-02,
+        3.97251141901056593e-01,
     ],
-    b1: 2.79815208127285307e-04,
+    b1: 2.30538689199429603e-05,
+    ntf_h_inf: 1.22,
+    max_stable_input_dbfs: -2.25,
+};
+
+/// 5th-order CRFB, DSD256, `modulator_ntf = "comfortable"` (f_bit=11289600 Hz, OSR=282.24, H_inf=1.12, anchors met).
+pub const CRFB5_DSD256_COMFORTABLE: CrfbCoefficients5 = CrfbCoefficients5 {
+    g1: 3.59238794263028183e-05,
+    g2: 1.01739063174344224e-04,
+    a: [
+        1.45333216884725183e-06,
+        6.66579280817921721e-05,
+        1.51324246966023012e-03,
+        2.20753935310176903e-02,
+        2.02860993171487342e-01,
+    ],
+    gamma: [
+        1.45333216884725183e-06,
+        6.81112602506394243e-05,
+        1.58135372991086956e-03,
+        2.36567472609285588e-02,
+        2.26517740432415904e-01,
+    ],
+    b1: 1.50843513777253313e-06,
+    ntf_h_inf: 1.12,
+    max_stable_input_dbfs: -1.75,
+};
+
+/// 5th-order CRFB, DSD256, `modulator_ntf = "fixed_h_inf_1_4"` (f_bit=11289600 Hz, OSR=282.24, H_inf=1.40, fixed H_inf).
+pub const CRFB5_DSD256_FIXED_H_INF_1_4: CrfbCoefficients5 = CrfbCoefficients5 {
+    g1: 3.59238794263028183e-05,
+    g2: 1.01739063174344224e-04,
+    a: [
+        2.78748253766168338e-04,
+        3.92401442216747630e-03,
+        2.96505866047571016e-02,
+        1.47349771058723517e-01,
+        4.89831035705358298e-01,
+    ],
+    gamma: [
+        2.78748253766168338e-04,
+        4.20276267593364464e-03,
+        3.38533492806907463e-02,
+        1.81203120339414270e-01,
+        6.71034156044772567e-01,
+    ],
+    b1: 2.79815208129036456e-04,
     ntf_h_inf: 1.4,
     max_stable_input_dbfs: -4.25,
 };
 
-/// Backward-compatible alias for 5th-order DSD256 coefficients.
-pub const CRFB_DSD256: CrfbCoefficients = CRFB5_DSD256;
+/// 5th-order CRFB, DSD256, `modulator_ntf = "fixed_h_inf_1_5"` (f_bit=11289600 Hz, OSR=282.24, H_inf=1.50, fixed H_inf).
+pub const CRFB5_DSD256_FIXED_H_INF_1_5: CrfbCoefficients5 = CrfbCoefficients5 {
+    g1: 3.59238794263028183e-05,
+    g2: 1.01739063174344224e-04,
+    a: [
+        6.63935781607842296e-04,
+        7.57418675538530130e-03,
+        4.72902062860334760e-02,
+        1.96533729116876277e-01,
+        5.55586147024898280e-01,
+    ],
+    gamma: [
+        6.63935781607842296e-04,
+        8.23812253699314316e-03,
+        5.55283288230266209e-02,
+        2.52062057939902884e-01,
+        8.07648204964801164e-01,
+    ],
+    b1: 6.65636659867113473e-04,
+    ntf_h_inf: 1.5,
+    max_stable_input_dbfs: -5.75,
+};
 
-/// 5th-order CRFB coefficients for DSD512 (f_bit=22579200 Hz, OSR=564.48).
-pub const CRFB5_DSD512: CrfbCoefficients5 = CrfbCoefficients5 {
+/// 5th-order CRFB, DSD512, `modulator_ntf = "reference"` (f_bit=22579200 Hz, OSR=564.48, H_inf=1.15, anchors met).
+pub const CRFB5_DSD512_REFERENCE: CrfbCoefficients5 = CrfbCoefficients5 {
     g1: 8.98099002100138932e-06,
     g2: 2.54349275274901032e-05,
     a: [
-        2.79448062613629462e-04,
-        3.92611089572591707e-03,
-        2.96913920843777240e-02,
-        1.47384551827823562e-01,
-        4.89804697962100910e-01,
+        4.16250467648405983e-06,
+        1.50285178941578679e-04,
+        2.77620698563026385e-03,
+        3.25740304197120745e-02,
+        2.43869344315572195e-01,
     ],
     gamma: [
-        2.79448062613629462e-04,
-        4.20555895833954647e-03,
-        3.38969510427172688e-02,
-        1.81281502870540845e-01,
-        6.71086200832641699e-01,
+        4.16250467648405983e-06,
+        1.54447683618062732e-04,
+        2.93065466924832645e-03,
+        3.55046850889604027e-02,
+        2.79374029404532598e-01,
     ],
-    b1: 2.79714832596142718e-04,
+    b1: 4.18749347099504895e-06,
+    ntf_h_inf: 1.15,
+    max_stable_input_dbfs: -1.75,
+};
+
+/// 5th-order CRFB, DSD512, `modulator_ntf = "comfortable"` (f_bit=22579200 Hz, OSR=564.48, H_inf=1.15, anchors met).
+pub const CRFB5_DSD512_COMFORTABLE: CrfbCoefficients5 = CrfbCoefficients5 {
+    g1: 8.98099002100138932e-06,
+    g2: 2.54349275274901032e-05,
+    a: [
+        4.16250467648405983e-06,
+        1.50285178941578679e-04,
+        2.77620698563026385e-03,
+        3.25740304197120745e-02,
+        2.43869344315572195e-01,
+    ],
+    gamma: [
+        4.16250467648405983e-06,
+        1.54447683618062732e-04,
+        2.93065466924832645e-03,
+        3.55046850889604027e-02,
+        2.79374029404532598e-01,
+    ],
+    b1: 4.18749347099504895e-06,
+    ntf_h_inf: 1.15,
+    max_stable_input_dbfs: -1.75,
+};
+
+/// 5th-order CRFB, DSD512, `modulator_ntf = "fixed_h_inf_1_4"` (f_bit=22579200 Hz, OSR=564.48, H_inf=1.40, fixed H_inf).
+pub const CRFB5_DSD512_FIXED_H_INF_1_4: CrfbCoefficients5 = CrfbCoefficients5 {
+    g1: 8.98099002100138932e-06,
+    g2: 2.54349275274901032e-05,
+    a: [
+        2.79448062615104899e-04,
+        3.92611089574275342e-03,
+        2.96913920844695534e-02,
+        1.47384551828107391e-01,
+        4.89804697962506030e-01,
+    ],
+    gamma: [
+        2.79448062615104899e-04,
+        4.20555895835785822e-03,
+        3.38969510428274098e-02,
+        1.81281502870934808e-01,
+        6.71086200833440838e-01,
+    ],
+    b1: 2.79714832597619022e-04,
     ntf_h_inf: 1.4,
     max_stable_input_dbfs: -4.0,
 };
 
-/// Backward-compatible alias for 5th-order DSD512 coefficients.
-pub const CRFB_DSD512: CrfbCoefficients = CRFB5_DSD512;
+/// 5th-order CRFB, DSD512, `modulator_ntf = "fixed_h_inf_1_5"` (f_bit=22579200 Hz, OSR=564.48, H_inf=1.50, fixed H_inf).
+pub const CRFB5_DSD512_FIXED_H_INF_1_5: CrfbCoefficients5 = CrfbCoefficients5 {
+    g1: 8.98099002100138932e-06,
+    g2: 2.54349275274901032e-05,
+    a: [
+        6.65015923925202325e-04,
+        7.57652957892826062e-03,
+        4.73348790790013296e-02,
+        1.96560809167029671e-01,
+        5.55563203924335669e-01,
+    ],
+    gamma: [
+        6.65015923925202325e-04,
+        8.24154550285346316e-03,
+        5.55764245818547928e-02,
+        2.52137233748884471e-01,
+        8.07700437673220195e-01,
+    ],
+    b1: 6.65441164909620153e-04,
+    ntf_h_inf: 1.5,
+    max_stable_input_dbfs: -6.0,
+};
 
-/// 5th-order CRFB coefficients for DSD64_48 (f_bit=3072000 Hz, OSR=76.80).
-pub const CRFB5_DSD64_48: CrfbCoefficients5 = CrfbCoefficients5 {
+/// 5th-order CRFB, DSD64_48, `modulator_ntf = "reference"` (f_bit=3072000 Hz, OSR=76.80, H_inf=1.40, anchors missed at every H_inf <= 1.4, baseline kept).
+pub const CRFB5_DSD64_48_REFERENCE: CrfbCoefficients5 = CrfbCoefficients5 {
     g1: 4.85156280541465534e-04,
     g2: 1.37390395495851081e-03,
     a: [
-        2.67111493761916497e-04,
-        3.88902980970822366e-03,
-        2.89695916620441307e-02,
-        1.46770795017526073e-01,
-        4.90270015824008198e-01,
+        2.67111493763305034e-04,
+        3.88902980972512854e-03,
+        2.89695916621373166e-02,
+        1.46770795017824474e-01,
+        4.90270015824499250e-01,
     ],
     gamma: [
-        2.67111493761916497e-04,
-        4.15614130347013999e-03,
-        3.31257329655142707e-02,
-        1.79896527983040344e-01,
-        6.70166543807048543e-01,
+        2.67111493763305034e-04,
+        4.15614130348843352e-03,
+        3.31257329656257510e-02,
+        1.79896527983450238e-01,
+        6.70166543807949489e-01,
     ],
-    b1: 2.81493066567700635e-04,
+    b1: 2.81493066569134709e-04,
     ntf_h_inf: 1.4,
     max_stable_input_dbfs: -4.25,
 };
 
-/// Backward-compatible alias for 5th-order DSD64_48 coefficients.
-pub const CRFB_DSD64_48: CrfbCoefficients = CRFB5_DSD64_48;
+/// 5th-order CRFB, DSD64_48, `modulator_ntf = "comfortable"` (f_bit=3072000 Hz, OSR=76.80, H_inf=1.40, anchors met).
+pub const CRFB5_DSD64_48_COMFORTABLE: CrfbCoefficients5 = CrfbCoefficients5 {
+    g1: 4.85156280541465534e-04,
+    g2: 1.37390395495851081e-03,
+    a: [
+        2.67111493763305034e-04,
+        3.88902980972512854e-03,
+        2.89695916621373166e-02,
+        1.46770795017824474e-01,
+        4.90270015824499250e-01,
+    ],
+    gamma: [
+        2.67111493763305034e-04,
+        4.15614130348843352e-03,
+        3.31257329656257510e-02,
+        1.79896527983450238e-01,
+        6.70166543807949489e-01,
+    ],
+    b1: 2.81493066569134709e-04,
+    ntf_h_inf: 1.4,
+    max_stable_input_dbfs: -4.25,
+};
 
-/// 5th-order CRFB coefficients for DSD128_48 (f_bit=6144000 Hz, OSR=153.60).
-pub const CRFB5_DSD128_48: CrfbCoefficients5 = CrfbCoefficients5 {
+/// 5th-order CRFB, DSD64_48, `modulator_ntf = "fixed_h_inf_1_4"` (f_bit=3072000 Hz, OSR=76.80, H_inf=1.40, fixed H_inf).
+pub const CRFB5_DSD64_48_FIXED_H_INF_1_4: CrfbCoefficients5 = CrfbCoefficients5 {
+    g1: 4.85156280541465534e-04,
+    g2: 1.37390395495851081e-03,
+    a: [
+        2.67111493763305034e-04,
+        3.88902980972512854e-03,
+        2.89695916621373166e-02,
+        1.46770795017824474e-01,
+        4.90270015824499250e-01,
+    ],
+    gamma: [
+        2.67111493763305034e-04,
+        4.15614130348843352e-03,
+        3.31257329656257510e-02,
+        1.79896527983450238e-01,
+        6.70166543807949489e-01,
+    ],
+    b1: 2.81493066569134709e-04,
+    ntf_h_inf: 1.4,
+    max_stable_input_dbfs: -4.25,
+};
+
+/// 5th-order CRFB, DSD64_48, `modulator_ntf = "fixed_h_inf_1_5"` (f_bit=3072000 Hz, OSR=76.80, H_inf=1.50, fixed H_inf).
+pub const CRFB5_DSD64_48_FIXED_H_INF_1_5: CrfbCoefficients5 = CrfbCoefficients5 {
+    g1: 4.85156280541465534e-04,
+    g2: 1.37390395495851081e-03,
+    a: [
+        6.45950900512896409e-04,
+        7.53509028685057577e-03,
+        4.65448585976406468e-02,
+        1.96083010075127046e-01,
+        5.55968547487695419e-01,
+    ],
+    gamma: [
+        6.45950900512896409e-04,
+        8.18104118736347197e-03,
+        5.47258997850041187e-02,
+        2.50808909860131157e-01,
+        8.06777457347826576e-01,
+    ],
+    b1: 6.68903016345258903e-04,
+    ntf_h_inf: 1.5,
+    max_stable_input_dbfs: -5.75,
+};
+
+/// 5th-order CRFB, DSD128_48, `modulator_ntf = "reference"` (f_bit=6144000 Hz, OSR=153.60, H_inf=1.32, anchors met).
+pub const CRFB5_DSD128_48_REFERENCE: CrfbCoefficients5 = CrfbCoefficients5 {
     g1: 1.21292748118007054e-04,
     g2: 3.43505487744755200e-04,
     a: [
-        2.76532311729818243e-04,
-        3.91737042384784906e-03,
-        2.95212659407623548e-02,
-        1.47239609976865943e-01,
-        4.89914479880668940e-01,
+        1.11239296639092423e-04,
+        1.95530119209680071e-03,
+        1.79103592604747917e-02,
+        1.07804294598529637e-01,
+        4.26212339554143227e-01,
     ],
     gamma: [
-        2.76532311729818243e-04,
-        4.19390273557766757e-03,
-        3.37151686763400224e-02,
-        1.80954778653205972e-01,
-        6.70869258533874913e-01,
+        1.11239296639092423e-04,
+        2.06654048873589329e-03,
+        1.99768997492106859e-02,
+        1.27781194347740323e-01,
+        5.53993533901883550e-01,
     ],
-    b1: 2.80133439355578675e-04,
+    b1: 1.13429451353325782e-04,
+    ntf_h_inf: 1.32,
+    max_stable_input_dbfs: -3.25,
+};
+
+/// 5th-order CRFB, DSD128_48, `modulator_ntf = "comfortable"` (f_bit=6144000 Hz, OSR=153.60, H_inf=1.18, anchors met).
+pub const CRFB5_DSD128_48_COMFORTABLE: CrfbCoefficients5 = CrfbCoefficients5 {
+    g1: 1.21292748118007054e-04,
+    g2: 3.43505487744755200e-04,
+    a: [
+        9.00126164739415239e-06,
+        2.82359717143608317e-04,
+        4.34628450361165992e-03,
+        4.39557396748523344e-02,
+        2.81982462236109122e-01,
+    ],
+    gamma: [
+        9.00126164739415239e-06,
+        2.91360978791002461e-04,
+        4.63764548240266222e-03,
+        4.85933851572549966e-02,
+        3.30575847393364097e-01,
+    ],
+    b1: 9.54018316057162998e-06,
+    ntf_h_inf: 1.18,
+    max_stable_input_dbfs: -1.75,
+};
+
+/// 5th-order CRFB, DSD128_48, `modulator_ntf = "fixed_h_inf_1_4"` (f_bit=6144000 Hz, OSR=153.60, H_inf=1.40, fixed H_inf).
+pub const CRFB5_DSD128_48_FIXED_H_INF_1_4: CrfbCoefficients5 = CrfbCoefficients5 {
+    g1: 1.21292748118007054e-04,
+    g2: 3.43505487744755200e-04,
+    a: [
+        2.76532311731430397e-04,
+        3.91737042386421531e-03,
+        2.95212659408513808e-02,
+        1.47239609977139169e-01,
+        4.89914479881087273e-01,
+    ],
+    gamma: [
+        2.76532311731430397e-04,
+        4.19390273559564538e-03,
+        3.37151686764470271e-02,
+        1.80954778653586196e-01,
+        6.70869258534673496e-01,
+    ],
+    b1: 2.80133439357201672e-04,
     ntf_h_inf: 1.4,
     max_stable_input_dbfs: -4.0,
 };
 
-/// Backward-compatible alias for 5th-order DSD128_48 coefficients.
-pub const CRFB_DSD128_48: CrfbCoefficients = CRFB5_DSD128_48;
+/// 5th-order CRFB, DSD128_48, `modulator_ntf = "fixed_h_inf_1_5"` (f_bit=6144000 Hz, OSR=153.60, H_inf=1.50, fixed H_inf).
+pub const CRFB5_DSD128_48_FIXED_H_INF_1_5: CrfbCoefficients5 = CrfbCoefficients5 {
+    g1: 1.21292748118007054e-04,
+    g2: 3.43505487744755200e-04,
+    a: [
+        6.60514451986361274e-04,
+        7.56676199809918574e-03,
+        4.71486377748366881e-02,
+        1.96447961535810400e-01,
+        5.55658836174187876e-01,
+    ],
+    gamma: [
+        6.60514451986361274e-04,
+        8.22727645008554734e-03,
+        5.53759142249222319e-02,
+        2.51823875760732618e-01,
+        8.07482711934920494e-01,
+    ],
+    b1: 6.66256391204473708e-04,
+    ntf_h_inf: 1.5,
+    max_stable_input_dbfs: -5.75,
+};
 
-/// 5th-order CRFB coefficients for DSD256_48 (f_bit=12288000 Hz, OSR=307.20).
-pub const CRFB5_DSD256_48: CrfbCoefficients5 = CrfbCoefficients5 {
+/// 5th-order CRFB, DSD256_48, `modulator_ntf = "reference"` (f_bit=12288000 Hz, OSR=307.20, H_inf=1.22, anchors met).
+pub const CRFB5_DSD256_48_REFERENCE: CrfbCoefficients5 = CrfbCoefficients5 {
     g1: 3.03234169070076831e-05,
     g2: 8.58782157031612314e-05,
     a: [
-        2.78893701398823083e-04,
-        3.92445022013045586e-03,
-        2.96590689528833489e-02,
-        1.47357000209583172e-01,
-        4.89825561121567055e-01,
+        2.28268028117032320e-05,
+        5.70379396866385873e-04,
+        7.36139579750102156e-03,
+        6.11306688079983757e-02,
+        3.28176632390618894e-01,
     ],
     gamma: [
-        2.78893701398823083e-04,
-        4.20334392152927911e-03,
-        3.38624128744126271e-02,
-        1.81219413083995806e-01,
-        6.71044974205562861e-01,
+        2.28268028117032320e-05,
+        5.93206199678089153e-04,
+        7.95460199717911050e-03,
+        6.90852708051774844e-02,
+        3.97261903195796351e-01,
     ],
-    b1: 2.79794341276754725e-04,
-    ntf_h_inf: 1.4,
-    max_stable_input_dbfs: -4.0,
+    b1: 2.30508800971281179e-05,
+    ntf_h_inf: 1.22,
+    max_stable_input_dbfs: -2.25,
 };
 
-/// Backward-compatible alias for 5th-order DSD256_48 coefficients.
-pub const CRFB_DSD256_48: CrfbCoefficients = CRFB5_DSD256_48;
-
-/// 5th-order CRFB coefficients for DSD512_48 (f_bit=24576000 Hz, OSR=614.40).
-pub const CRFB5_DSD512_48: CrfbCoefficients5 = CrfbCoefficients5 {
-    g1: 7.58086859420359360e-06,
-    g2: 2.14696691624993719e-05,
+/// 5th-order CRFB, DSD256_48, `modulator_ntf = "comfortable"` (f_bit=12288000 Hz, OSR=307.20, H_inf=1.12, anchors met).
+pub const CRFB5_DSD256_48_COMFORTABLE: CrfbCoefficients5 = CrfbCoefficients5 {
+    g1: 3.03234169070076831e-05,
+    g2: 8.58782157031612314e-05,
     a: [
-        2.79484434905025278e-04,
-        3.92621983627420516e-03,
-        2.96935124769315620e-02,
-        1.47386359429317992e-01,
-        4.89803329257786801e-01,
+        1.46154924876516767e-06,
+        6.67610780733112369e-05,
+        1.51726576068079923e-03,
+        2.20905534019472140e-02,
+        2.02852439132265472e-01,
     ],
     gamma: [
-        2.79484434905025278e-04,
-        4.20570427117923033e-03,
-        3.38992167481107914e-02,
-        1.81285576177428798e-01,
-        6.71088905435215599e-01,
+        1.46154924876516767e-06,
+        6.82226273220764044e-05,
+        1.58548838800287562e-03,
+        2.36760417899500898e-02,
+        2.26528480922215558e-01,
     ],
-    b1: 2.79709617240986297e-04,
+    b1: 1.50808618326908773e-06,
+    ntf_h_inf: 1.12,
+    max_stable_input_dbfs: -1.75,
+};
+
+/// 5th-order CRFB, DSD256_48, `modulator_ntf = "fixed_h_inf_1_4"` (f_bit=12288000 Hz, OSR=307.20, H_inf=1.40, fixed H_inf).
+pub const CRFB5_DSD256_48_FIXED_H_INF_1_4: CrfbCoefficients5 = CrfbCoefficients5 {
+    g1: 3.03234169070076831e-05,
+    g2: 8.58782157031612314e-05,
+    a: [
+        2.78893701400141690e-04,
+        3.92445022014455309e-03,
+        2.96590689529580356e-02,
+        1.47357000209807742e-01,
+        4.89825561121879915e-01,
+    ],
+    gamma: [
+        2.78893701400141690e-04,
+        4.20334392154469473e-03,
+        3.38624128745027286e-02,
+        1.81219413084310471e-01,
+        6.71044974206190359e-01,
+    ],
+    b1: 2.79794341278075608e-04,
     ntf_h_inf: 1.4,
     max_stable_input_dbfs: -4.25,
 };
 
-/// Backward-compatible alias for 5th-order DSD512_48 coefficients.
-pub const CRFB_DSD512_48: CrfbCoefficients = CRFB5_DSD512_48;
-
-/// 7th-order CRFB coefficients for DSD64 (f_bit=2822400 Hz, OSR=70.56).
-pub const CRFB7_DSD64: CrfbCoefficients7 = CrfbCoefficients7 {
-    g1: 3.26506256622671742e-04,
-    g2: 1.08993849530492071e-03,
-    g3: 1.78545603522772822e-03,
+/// 5th-order CRFB, DSD256_48, `modulator_ntf = "fixed_h_inf_1_5"` (f_bit=12288000 Hz, OSR=307.20, H_inf=1.50, fixed H_inf).
+pub const CRFB5_DSD256_48_FIXED_H_INF_1_5: CrfbCoefficients5 = CrfbCoefficients5 {
+    g1: 3.03234169070076831e-05,
+    g2: 8.58782157031612314e-05,
     a: [
-        1.07675193575399742e-06,
-        3.24372318935397248e-05,
-        4.39499388825579144e-04,
-        4.37123389153752998e-03,
-        2.91506118099140697e-02,
-        1.45835131412549279e-01,
-        4.90612219059147259e-01,
+        6.64160290652391055e-04,
+        7.57467376315577347e-03,
+        4.72994924381881648e-02,
+        1.96539357642833562e-01,
+        5.55581378054404218e-01,
     ],
     gamma: [
-        1.07675193575399742e-06,
-        3.35139838292937241e-05,
-        4.73013372654872881e-04,
-        4.84424726419240264e-03,
-        3.39948590741064732e-02,
-        1.79829990486655766e-01,
-        6.70442209545803025e-01,
+        6.64160290652391055e-04,
+        8.23883405380816496e-03,
+        5.55383264919963315e-02,
+        2.52077684134829894e-01,
+        8.07659062189234112e-01,
     ],
-    b1: 1.23093684661515681e-06,
-    ntf_h_inf: 1.4,
-    max_stable_input_dbfs: -4.5,
+    b1: 6.65596019682183470e-04,
+    ntf_h_inf: 1.5,
+    max_stable_input_dbfs: -5.75,
 };
 
-/// 7th-order CRFB coefficients for DSD128 (f_bit=5644800 Hz, OSR=141.12).
-pub const CRFB7_DSD128: CrfbCoefficients7 = CrfbCoefficients7 {
-    g1: 8.16282299476167594e-05,
-    g2: 2.72503188323058865e-04,
-    g3: 4.46413830133884915e-04,
+/// 5th-order CRFB, DSD512_48, `modulator_ntf = "reference"` (f_bit=24576000 Hz, OSR=614.40, H_inf=1.17, anchors met).
+pub const CRFB5_DSD512_48_REFERENCE: CrfbCoefficients5 = CrfbCoefficients5 {
+    g1: 7.58086859420359360e-06,
+    g2: 2.14696691624993719e-05,
     a: [
-        1.17763816300441707e-06,
-        3.30894087362971017e-05,
-        4.66464357364552106e-04,
-        4.46700391653029501e-03,
-        3.00361431905944165e-02,
-        1.46643437403492116e-01,
-        4.90000107180781797e-01,
+        7.33581089537067893e-06,
+        2.34214815630060078e-04,
+        3.84723016039698745e-03,
+        4.02191491533150647e-02,
+        2.69497059826804386e-01,
     ],
     gamma: [
-        1.17763816300441707e-06,
-        3.42670468993015156e-05,
-        5.00731404263853649e-04,
-        4.96773532079414909e-03,
-        3.50038785113885656e-02,
-        1.81647315914880675e-01,
-        6.71647423095662499e-01,
+        7.33581089537067893e-06,
+        2.41550626525430755e-04,
+        4.08878078692241805e-03,
+        4.43079299402374810e-02,
+        3.13804989767041853e-01,
     ],
-    b1: 1.21638781108979656e-06,
-    ntf_h_inf: 1.4,
-    max_stable_input_dbfs: -4.75,
+    b1: 7.36502010467038071e-06,
+    ntf_h_inf: 1.17,
+    max_stable_input_dbfs: -1.75,
 };
 
-/// 7th-order CRFB coefficients for DSD256 (f_bit=11289600 Hz, OSR=282.24).
-pub const CRFB7_DSD256: CrfbCoefficients7 = CrfbCoefficients7 {
-    g1: 2.04071615999001921e-05,
-    g2: 6.81269574014375934e-05,
-    g3: 1.11606571540079358e-04,
+/// 5th-order CRFB, DSD512_48, `modulator_ntf = "comfortable"` (f_bit=24576000 Hz, OSR=614.40, H_inf=1.17, anchors met).
+pub const CRFB5_DSD512_48_COMFORTABLE: CrfbCoefficients5 = CrfbCoefficients5 {
+    g1: 7.58086859420359360e-06,
+    g2: 2.14696691624993719e-05,
     a: [
-        1.20307336810980504e-06,
-        3.32527174089607350e-05,
-        4.73264154935702222e-04,
-        4.49092358713921655e-03,
-        3.02571391909638165e-02,
-        1.46846050406908624e-01,
-        4.89846972647642709e-01,
+        7.33581089537067893e-06,
+        2.34214815630060078e-04,
+        3.84723016039698745e-03,
+        4.02191491533150647e-02,
+        2.69497059826804386e-01,
     ],
     gamma: [
-        1.20307336810980504e-06,
-        3.44557907770705422e-05,
-        5.07719945712772750e-04,
-        4.99864353285198963e-03,
-        3.52557827238158053e-02,
-        1.82101833130724422e-01,
-        6.71948805778367131e-01,
+        7.33581089537067893e-06,
+        2.41550626525430755e-04,
+        4.08878078692241805e-03,
+        4.43079299402374810e-02,
+        3.13804989767041853e-01,
     ],
-    b1: 1.21277348803548944e-06,
-    ntf_h_inf: 1.4,
-    max_stable_input_dbfs: -4.75,
+    b1: 7.36502010467038071e-06,
+    ntf_h_inf: 1.17,
+    max_stable_input_dbfs: -1.75,
 };
 
-/// 7th-order CRFB coefficients for DSD512 (f_bit=22579200 Hz, OSR=564.48).
-pub const CRFB7_DSD512: CrfbCoefficients7 = CrfbCoefficients7 {
-    g1: 5.10179690715872880e-06,
-    g2: 1.70318118710710564e-05,
-    g3: 2.79018375131112606e-05,
+/// 5th-order CRFB, DSD512_48, `modulator_ntf = "fixed_h_inf_1_4"` (f_bit=24576000 Hz, OSR=614.40, H_inf=1.40, fixed H_inf).
+pub const CRFB5_DSD512_48_FIXED_H_INF_1_4: CrfbCoefficients5 = CrfbCoefficients5 {
+    g1: 7.58086859420359360e-06,
+    g2: 2.14696691624993719e-05,
     a: [
-        1.20944551138581402e-06,
-        3.32935610650585568e-05,
-        4.74967754222795459e-04,
-        4.49690210530829474e-03,
-        3.03123639719055718e-02,
-        1.46896737227113605e-01,
-        4.89808682371472681e-01,
+        2.79484434906805267e-04,
+        3.92621983629297053e-03,
+        2.96935124770330849e-02,
+        1.47386359429616087e-01,
+        4.89803329258179543e-01,
     ],
     gamma: [
-        1.20944551138581402e-06,
-        3.45030065764443704e-05,
-        5.09470760799239837e-04,
-        5.00637286610753490e-03,
-        3.53187368380131067e-02,
-        1.82215474065126726e-01,
-        6.72024156436599407e-01,
+        2.79484434906805267e-04,
+        4.20570427119977552e-03,
+        3.38992167482328605e-02,
+        1.81285576177848962e-01,
+        6.71088905436028504e-01,
     ],
-    b1: 1.21187133552038262e-06,
+    b1: 2.79709617242767045e-04,
     ntf_h_inf: 1.4,
-    max_stable_input_dbfs: -4.75,
+    max_stable_input_dbfs: -4.0,
 };
 
-/// 7th-order CRFB coefficients for DSD64_48 (f_bit=3072000 Hz, OSR=76.80).
-pub const CRFB7_DSD64_48: CrfbCoefficients7 = CrfbCoefficients7 {
-    g1: 2.75605610485119001e-04,
-    g2: 9.20031815853539214e-04,
-    g3: 1.50714119423911441e-03,
+/// 5th-order CRFB, DSD512_48, `modulator_ntf = "fixed_h_inf_1_5"` (f_bit=24576000 Hz, OSR=614.40, H_inf=1.50, fixed H_inf).
+pub const CRFB5_DSD512_48_FIXED_H_INF_1_5: CrfbCoefficients5 = CrfbCoefficients5 {
+    g1: 7.58086859420359360e-06,
+    g2: 2.14696691624993719e-05,
     a: [
-        1.09760996396565898e-06,
-        3.25726567322435034e-05,
-        4.45073532074151813e-04,
-        4.39115330354301631e-03,
-        2.93348859610882209e-02,
-        1.46002867110106904e-01,
-        4.90485038802746853e-01,
+        6.65072059501915606e-04,
+        7.57665132055279720e-03,
+        4.73372004653332956e-02,
+        1.96562216564727582e-01,
+        5.55562011630784447e-01,
     ],
     gamma: [
-        1.09760996396565898e-06,
-        3.36702666962091651e-05,
-        4.78743798770360951e-04,
-        4.86989710231337716e-03,
-        3.42047830634015990e-02,
-        1.80207650173508510e-01,
-        6.70692688976255336e-01,
+        6.65072059501915606e-04,
+        8.24172338005471281e-03,
+        5.55789238453880119e-02,
+        2.52141140410115594e-01,
+        8.07703152040900041e-01,
     ],
-    b1: 1.22790049772708983e-06,
-    ntf_h_inf: 1.4,
-    max_stable_input_dbfs: -4.5,
+    b1: 6.65431007020834183e-04,
+    ntf_h_inf: 1.5,
+    max_stable_input_dbfs: -5.75,
 };
 
-/// 7th-order CRFB coefficients for DSD128_48 (f_bit=6144000 Hz, OSR=153.60).
-pub const CRFB7_DSD128_48: CrfbCoefficients7 = CrfbCoefficients7 {
-    g1: 6.89025895130868093e-05,
-    g2: 2.30021181399253649e-04,
-    g3: 3.76820797038046607e-04,
-    a: [
-        1.18291821028431754e-06,
-        3.31233461363085341e-05,
-        4.67875870319525678e-04,
-        4.47197670947734917e-03,
-        3.00820931906890590e-02,
-        1.46685535794194272e-01,
-        4.89968279452054234e-01,
-    ],
-    gamma: [
-        1.18291821028431754e-06,
-        3.43062643465928533e-05,
-        5.02182134666118531e-04,
-        4.97415884414346803e-03,
-        3.50562520348325288e-02,
-        1.81741787829026807e-01,
-        6.71710067281081069e-01,
-    ],
-    b1: 1.21563576828555556e-06,
-    ntf_h_inf: 1.4,
-    max_stable_input_dbfs: -4.75,
-};
-
-/// 7th-order CRFB coefficients for DSD256_48 (f_bit=12288000 Hz, OSR=307.20).
-pub const CRFB7_DSD256_48: CrfbCoefficients7 = CrfbCoefficients7 {
-    g1: 1.72257215595994495e-05,
-    g2: 5.75061220884354185e-05,
-    g3: 9.42074180190211052e-05,
-    a: [
-        1.20439747216089433e-06,
-        3.32612068268481274e-05,
-        4.73618152897079252e-04,
-        4.49216635634267988e-03,
-        3.02686192710679217e-02,
-        1.46856585317945876e-01,
-        4.89839013717180638e-01,
-    ],
-    gamma: [
-        1.20439747216089433e-06,
-        3.44656042990090222e-05,
-        5.08083757196088268e-04,
-        5.00025011353876815e-03,
-        3.52688693846066881e-02,
-        1.82125454702552564e-01,
-        6.71964468419733230e-01,
-    ],
-    b1: 1.21258591592372954e-06,
-    ntf_h_inf: 1.4,
-    max_stable_input_dbfs: -4.75,
-};
-
-/// 7th-order CRFB coefficients for DSD512_48 (f_bit=24576000 Hz, OSR=614.40).
-pub const CRFB7_DSD512_48: CrfbCoefficients7 = CrfbCoefficients7 {
-    g1: 4.30643502635774666e-06,
-    g2: 1.43765821936092664e-05,
-    g3: 2.35519931788275017e-05,
-    a: [
-        1.20977679339740672e-06,
-        3.32956837401409881e-05,
-        4.75056323680777995e-04,
-        4.49721277132608416e-03,
-        3.03152335298689617e-02,
-        1.46899371606580148e-01,
-        4.89806692529549448e-01,
-    ],
-    gamma: [
-        1.20977679339740672e-06,
-        3.45054605335383971e-05,
-        5.09561784214316378e-04,
-        5.00677455554040043e-03,
-        3.53220080854093621e-02,
-        1.82221379691989510e-01,
-        6.72028072221538930e-01,
-    ],
-    b1: 1.21182447017460252e-06,
-    ntf_h_inf: 1.4,
-    max_stable_input_dbfs: -4.75,
-};
-
-/// Looks up the precomputed 5th-order CRFB coefficients for a given DSD bit rate (backward-compatible).
-pub fn get_crfb_coefficients(bit_rate: DsdBitRateHz) -> Option<&'static CrfbCoefficients> {
-    get_crfb5_coefficients(bit_rate)
-}
-
-/// Looks up the precomputed 5th-order CRFB coefficients for a given DSD bit rate.
-pub fn get_crfb5_coefficients(bit_rate: DsdBitRateHz) -> Option<&'static CrfbCoefficients5> {
-    match bit_rate {
-        DsdBitRateHz::DSD64 => Some(&CRFB5_DSD64),
-        DsdBitRateHz::DSD128 => Some(&CRFB5_DSD128),
-        DsdBitRateHz::DSD256 => Some(&CRFB5_DSD256),
-        DsdBitRateHz::DSD512 => Some(&CRFB5_DSD512),
-        DsdBitRateHz::DSD64_48 => Some(&CRFB5_DSD64_48),
-        DsdBitRateHz::DSD128_48 => Some(&CRFB5_DSD128_48),
-        DsdBitRateHz::DSD256_48 => Some(&CRFB5_DSD256_48),
-        DsdBitRateHz::DSD512_48 => Some(&CRFB5_DSD512_48),
+/// Looks up the precomputed 5th-order CRFB coefficients for a DSD bit rate and `modulator_ntf` preset.
+pub fn get_crfb5_coefficients(
+    bit_rate: DsdBitRateHz,
+    ntf: ModulatorNtf,
+) -> Option<&'static CrfbCoefficients5> {
+    match (bit_rate, ntf) {
+        (DsdBitRateHz::DSD64, ModulatorNtf::Reference) => Some(&CRFB5_DSD64_REFERENCE),
+        (DsdBitRateHz::DSD64, ModulatorNtf::Comfortable) => Some(&CRFB5_DSD64_COMFORTABLE),
+        (DsdBitRateHz::DSD64, ModulatorNtf::FixedHInf14) => Some(&CRFB5_DSD64_FIXED_H_INF_1_4),
+        (DsdBitRateHz::DSD64, ModulatorNtf::FixedHInf15) => Some(&CRFB5_DSD64_FIXED_H_INF_1_5),
+        (DsdBitRateHz::DSD128, ModulatorNtf::Reference) => Some(&CRFB5_DSD128_REFERENCE),
+        (DsdBitRateHz::DSD128, ModulatorNtf::Comfortable) => Some(&CRFB5_DSD128_COMFORTABLE),
+        (DsdBitRateHz::DSD128, ModulatorNtf::FixedHInf14) => Some(&CRFB5_DSD128_FIXED_H_INF_1_4),
+        (DsdBitRateHz::DSD128, ModulatorNtf::FixedHInf15) => Some(&CRFB5_DSD128_FIXED_H_INF_1_5),
+        (DsdBitRateHz::DSD256, ModulatorNtf::Reference) => Some(&CRFB5_DSD256_REFERENCE),
+        (DsdBitRateHz::DSD256, ModulatorNtf::Comfortable) => Some(&CRFB5_DSD256_COMFORTABLE),
+        (DsdBitRateHz::DSD256, ModulatorNtf::FixedHInf14) => Some(&CRFB5_DSD256_FIXED_H_INF_1_4),
+        (DsdBitRateHz::DSD256, ModulatorNtf::FixedHInf15) => Some(&CRFB5_DSD256_FIXED_H_INF_1_5),
+        (DsdBitRateHz::DSD512, ModulatorNtf::Reference) => Some(&CRFB5_DSD512_REFERENCE),
+        (DsdBitRateHz::DSD512, ModulatorNtf::Comfortable) => Some(&CRFB5_DSD512_COMFORTABLE),
+        (DsdBitRateHz::DSD512, ModulatorNtf::FixedHInf14) => Some(&CRFB5_DSD512_FIXED_H_INF_1_4),
+        (DsdBitRateHz::DSD512, ModulatorNtf::FixedHInf15) => Some(&CRFB5_DSD512_FIXED_H_INF_1_5),
+        (DsdBitRateHz::DSD64_48, ModulatorNtf::Reference) => Some(&CRFB5_DSD64_48_REFERENCE),
+        (DsdBitRateHz::DSD64_48, ModulatorNtf::Comfortable) => Some(&CRFB5_DSD64_48_COMFORTABLE),
+        (DsdBitRateHz::DSD64_48, ModulatorNtf::FixedHInf14) => {
+            Some(&CRFB5_DSD64_48_FIXED_H_INF_1_4)
+        }
+        (DsdBitRateHz::DSD64_48, ModulatorNtf::FixedHInf15) => {
+            Some(&CRFB5_DSD64_48_FIXED_H_INF_1_5)
+        }
+        (DsdBitRateHz::DSD128_48, ModulatorNtf::Reference) => Some(&CRFB5_DSD128_48_REFERENCE),
+        (DsdBitRateHz::DSD128_48, ModulatorNtf::Comfortable) => Some(&CRFB5_DSD128_48_COMFORTABLE),
+        (DsdBitRateHz::DSD128_48, ModulatorNtf::FixedHInf14) => {
+            Some(&CRFB5_DSD128_48_FIXED_H_INF_1_4)
+        }
+        (DsdBitRateHz::DSD128_48, ModulatorNtf::FixedHInf15) => {
+            Some(&CRFB5_DSD128_48_FIXED_H_INF_1_5)
+        }
+        (DsdBitRateHz::DSD256_48, ModulatorNtf::Reference) => Some(&CRFB5_DSD256_48_REFERENCE),
+        (DsdBitRateHz::DSD256_48, ModulatorNtf::Comfortable) => Some(&CRFB5_DSD256_48_COMFORTABLE),
+        (DsdBitRateHz::DSD256_48, ModulatorNtf::FixedHInf14) => {
+            Some(&CRFB5_DSD256_48_FIXED_H_INF_1_4)
+        }
+        (DsdBitRateHz::DSD256_48, ModulatorNtf::FixedHInf15) => {
+            Some(&CRFB5_DSD256_48_FIXED_H_INF_1_5)
+        }
+        (DsdBitRateHz::DSD512_48, ModulatorNtf::Reference) => Some(&CRFB5_DSD512_48_REFERENCE),
+        (DsdBitRateHz::DSD512_48, ModulatorNtf::Comfortable) => Some(&CRFB5_DSD512_48_COMFORTABLE),
+        (DsdBitRateHz::DSD512_48, ModulatorNtf::FixedHInf14) => {
+            Some(&CRFB5_DSD512_48_FIXED_H_INF_1_4)
+        }
+        (DsdBitRateHz::DSD512_48, ModulatorNtf::FixedHInf15) => {
+            Some(&CRFB5_DSD512_48_FIXED_H_INF_1_5)
+        }
         _ => None,
     }
 }
 
-/// Looks up the precomputed 7th-order CRFB coefficients for a given DSD bit rate.
-pub fn get_crfb7_coefficients(bit_rate: DsdBitRateHz) -> Option<&'static CrfbCoefficients7> {
-    match bit_rate {
-        DsdBitRateHz::DSD64 => Some(&CRFB7_DSD64),
-        DsdBitRateHz::DSD128 => Some(&CRFB7_DSD128),
-        DsdBitRateHz::DSD256 => Some(&CRFB7_DSD256),
-        DsdBitRateHz::DSD512 => Some(&CRFB7_DSD512),
-        DsdBitRateHz::DSD64_48 => Some(&CRFB7_DSD64_48),
-        DsdBitRateHz::DSD128_48 => Some(&CRFB7_DSD128_48),
-        DsdBitRateHz::DSD256_48 => Some(&CRFB7_DSD256_48),
-        DsdBitRateHz::DSD512_48 => Some(&CRFB7_DSD512_48),
+/// 7th-order CRFB, DSD64, `modulator_ntf = "reference"` (f_bit=2822400 Hz, OSR=70.56, H_inf=1.40, anchors missed at every H_inf <= 1.4, baseline kept).
+pub const CRFB7_DSD64_REFERENCE: CrfbCoefficients7 = CrfbCoefficients7 {
+    g1: 3.26506256622671742e-04,
+    g2: 1.08993849530492071e-03,
+    g3: 1.78545603522772822e-03,
+    a: [
+        1.07675193577041695e-06,
+        3.24372318931528950e-05,
+        4.39499388821186932e-04,
+        4.37123389148888659e-03,
+        2.91506118095365072e-02,
+        1.45835131410387397e-01,
+        4.90612219051850373e-01,
+    ],
+    gamma: [
+        1.07675193577041695e-06,
+        3.35139838289233132e-05,
+        4.73013372650110252e-04,
+        4.84424726413899658e-03,
+        3.39948590736755055e-02,
+        1.79829990484062896e-01,
+        6.70442209535913269e-01,
+    ],
+    b1: 1.23093684663000318e-06,
+    ntf_h_inf: 1.4,
+    max_stable_input_dbfs: -4.5,
+};
+
+/// 7th-order CRFB, DSD64, `modulator_ntf = "comfortable"` (f_bit=2822400 Hz, OSR=70.56, H_inf=1.29, anchors met).
+pub const CRFB7_DSD64_COMFORTABLE: CrfbCoefficients7 = CrfbCoefficients7 {
+    g1: 3.26506256622671742e-04,
+    g2: 1.08993849530492071e-03,
+    g3: 1.78545603522772822e-03,
+    a: [
+        1.48148956580812700e-07,
+        6.55686127079745036e-06,
+        1.14234094176137555e-04,
+        1.56910135447555919e-03,
+        1.37282890258497332e-02,
+        9.18372733791341100e-02,
+        4.00036025179450694e-01,
+    ],
+    gamma: [
+        1.48148956580812700e-07,
+        6.70501022737826300e-06,
+        1.20939104403515823e-04,
+        1.69004045887907500e-03,
+        1.54183294847288089e-02,
+        1.07255602863862917e-01,
+        5.07291628043313625e-01,
+    ],
+    b1: 1.90586793352187381e-07,
+    ntf_h_inf: 1.29,
+    max_stable_input_dbfs: -3.0,
+};
+
+/// 7th-order CRFB, DSD64, `modulator_ntf = "fixed_h_inf_1_4"` (f_bit=2822400 Hz, OSR=70.56, H_inf=1.40, fixed H_inf).
+pub const CRFB7_DSD64_FIXED_H_INF_1_4: CrfbCoefficients7 = CrfbCoefficients7 {
+    g1: 3.26506256622671742e-04,
+    g2: 1.08993849530492071e-03,
+    g3: 1.78545603522772822e-03,
+    a: [
+        1.07675193577041695e-06,
+        3.24372318931528950e-05,
+        4.39499388821186932e-04,
+        4.37123389148888659e-03,
+        2.91506118095365072e-02,
+        1.45835131410387397e-01,
+        4.90612219051850373e-01,
+    ],
+    gamma: [
+        1.07675193577041695e-06,
+        3.35139838289233132e-05,
+        4.73013372650110252e-04,
+        4.84424726413899658e-03,
+        3.39948590736755055e-02,
+        1.79829990484062896e-01,
+        6.70442209535913269e-01,
+    ],
+    b1: 1.23093684663000318e-06,
+    ntf_h_inf: 1.4,
+    max_stable_input_dbfs: -4.5,
+};
+
+/// 7th-order CRFB, DSD64, `modulator_ntf = "fixed_h_inf_1_5"` (f_bit=2822400 Hz, OSR=70.56, H_inf=1.50, fixed H_inf).
+pub const CRFB7_DSD64_FIXED_H_INF_1_5: CrfbCoefficients7 = CrfbCoefficients7 {
+    g1: 3.26506256622671742e-04,
+    g2: 1.08993849530492071e-03,
+    g3: 1.78545603522772822e-03,
+    a: [
+        3.87903874351701629e-06,
+        9.21523592504010014e-05,
+        1.04211194671196606e-03,
+        8.43667118426403954e-03,
+        4.69172421335458598e-02,
+        1.94996941803231294e-01,
+        5.56266644161856005e-01,
+    ],
+    gamma: [
+        3.87903874351701629e-06,
+        9.60313979939180168e-05,
+        1.13814334470588416e-03,
+        9.57481452896992435e-03,
+        5.64920566625157841e-02,
+        2.51488998465747071e-01,
+        8.07755642627603132e-01,
+    ],
+    b1: 4.23634478284466678e-06,
+    ntf_h_inf: 1.5,
+    max_stable_input_dbfs: -6.5,
+};
+
+/// 7th-order CRFB, DSD128, `modulator_ntf = "reference"` (f_bit=5644800 Hz, OSR=141.12, H_inf=1.24, anchors met).
+pub const CRFB7_DSD128_REFERENCE: CrfbCoefficients7 = CrfbCoefficients7 {
+    g1: 8.16282299476167594e-05,
+    g2: 2.72503188323058865e-04,
+    g3: 4.46413830133884915e-04,
+    a: [
+        5.50492017014198707e-08,
+        2.59166026071847785e-06,
+        5.71725329259749096e-05,
+        8.77570564806271348e-04,
+        9.17545722006906338e-03,
+        6.95786413271511778e-02,
+        3.49896078340922456e-01,
+    ],
+    gamma: [
+        5.50492017014198707e-08,
+        2.64670946241989776e-06,
+        5.98192423883948078e-05,
+        9.37389807194666204e-04,
+        1.01128470272637289e-02,
+        7.96914883544149050e-02,
+        4.29587566695337375e-01,
+    ],
+    b1: 5.99236672751262647e-08,
+    ntf_h_inf: 1.24,
+    max_stable_input_dbfs: -2.5,
+};
+
+/// 7th-order CRFB, DSD128, `modulator_ntf = "comfortable"` (f_bit=5644800 Hz, OSR=141.12, H_inf=1.13, anchors met).
+pub const CRFB7_DSD128_COMFORTABLE: CrfbCoefficients7 = CrfbCoefficients7 {
+    g1: 8.16282299476167594e-05,
+    g2: 2.72503188323058865e-04,
+    g3: 4.46413830133884915e-04,
+    a: [
+        9.40178940699049082e-10,
+        9.25789467199150739e-08,
+        3.41332265371495416e-06,
+        9.92467395591177407e-05,
+        1.81384725639840744e-03,
+        2.49084575542131911e-02,
+        2.17166738865740727e-01,
+    ],
+    gamma: [
+        9.40178940699049082e-10,
+        9.35191256606141199e-08,
+        3.50684177937556813e-06,
+        1.02753581338493305e-04,
+        1.91660083773690076e-03,
+        2.68250583919500928e-02,
+        2.43991797257690823e-01,
+    ],
+    b1: 1.26130602763539499e-09,
+    ntf_h_inf: 1.13,
+    max_stable_input_dbfs: -2.0,
+};
+
+/// 7th-order CRFB, DSD128, `modulator_ntf = "fixed_h_inf_1_4"` (f_bit=5644800 Hz, OSR=141.12, H_inf=1.40, fixed H_inf).
+pub const CRFB7_DSD128_FIXED_H_INF_1_4: CrfbCoefficients7 = CrfbCoefficients7 {
+    g1: 8.16282299476167594e-05,
+    g2: 2.72503188323058865e-04,
+    g3: 4.46413830133884915e-04,
+    a: [
+        1.17763816284342131e-06,
+        3.30894087312068810e-05,
+        4.66464357298618628e-04,
+        4.46700391595889271e-03,
+        3.00361431873385730e-02,
+        1.46643437391703269e-01,
+        4.90000107158171661e-01,
+    ],
+    gamma: [
+        1.17763816284342131e-06,
+        3.42670468940503044e-05,
+        5.00731404192668946e-04,
+        4.96773532015156154e-03,
+        3.50038785074901354e-02,
+        1.81647315899193418e-01,
+        6.71647423057365023e-01,
+    ],
+    b1: 1.21638781092334611e-06,
+    ntf_h_inf: 1.4,
+    max_stable_input_dbfs: -4.75,
+};
+
+/// 7th-order CRFB, DSD128, `modulator_ntf = "fixed_h_inf_1_5"` (f_bit=5644800 Hz, OSR=141.12, H_inf=1.50, fixed H_inf).
+pub const CRFB7_DSD128_FIXED_H_INF_1_5: CrfbCoefficients7 = CrfbCoefficients7 {
+    g1: 8.16282299476167594e-05,
+    g2: 2.72503188323058865e-04,
+    g3: 4.46413830133884915e-04,
+    a: [
+        4.10561130870495171e-06,
+        9.32250150821484506e-05,
+        1.08370881826680464e-03,
+        8.55028832769406770e-03,
+        4.78713618771473975e-02,
+        1.95626892023529203e-01,
+        5.55733426673063580e-01,
+    ],
+    gamma: [
+        4.10561130870495171e-06,
+        9.73306263908534032e-05,
+        1.18103944465765796e-03,
+        9.73132777235172566e-03,
+        5.76026896494991197e-02,
+        2.53229581673028337e-01,
+        8.08963008346091916e-01,
+    ],
+    b1: 4.19514290807590016e-06,
+    ntf_h_inf: 1.5,
+    max_stable_input_dbfs: -7.0,
+};
+
+/// 7th-order CRFB, DSD256, `modulator_ntf = "reference"` (f_bit=11289600 Hz, OSR=282.24, H_inf=1.13, anchors met).
+pub const CRFB7_DSD256_REFERENCE: CrfbCoefficients7 = CrfbCoefficients7 {
+    g1: 2.04071615999001921e-05,
+    g2: 6.81269574014375934e-05,
+    g3: 1.11606571540079358e-04,
+    a: [
+        1.16859666702079004e-09,
+        9.80651331340047326e-08,
+        3.89033482971246384e-06,
+        1.04947551862197863e-04,
+        1.93072415005382764e-03,
+        2.53207978204917535e-02,
+        2.16931681503639173e-01,
+    ],
+    gamma: [
+        1.16859666702079004e-09,
+        9.92337298010255289e-08,
+        3.98956855951348902e-06,
+        1.08937120421711357e-04,
+        2.03966127047553901e-03,
+        2.73604590909672929e-02,
+        2.44292140594606466e-01,
+    ],
+    b1: 1.25070526156641796e-09,
+    ntf_h_inf: 1.13,
+    max_stable_input_dbfs: -2.0,
+};
+
+/// 7th-order CRFB, DSD256, `modulator_ntf = "comfortable"` (f_bit=11289600 Hz, OSR=282.24, H_inf=1.13, anchors met).
+pub const CRFB7_DSD256_COMFORTABLE: CrfbCoefficients7 = CrfbCoefficients7 {
+    g1: 2.04071615999001921e-05,
+    g2: 6.81269574014375934e-05,
+    g3: 1.11606571540079358e-04,
+    a: [
+        1.16859666702079004e-09,
+        9.80651331340047326e-08,
+        3.89033482971246384e-06,
+        1.04947551862197863e-04,
+        1.93072415005382764e-03,
+        2.53207978204917535e-02,
+        2.16931681503639173e-01,
+    ],
+    gamma: [
+        1.16859666702079004e-09,
+        9.92337298010255289e-08,
+        3.98956855951348902e-06,
+        1.08937120421711357e-04,
+        2.03966127047553901e-03,
+        2.73604590909672929e-02,
+        2.44292140594606466e-01,
+    ],
+    b1: 1.25070526156641796e-09,
+    ntf_h_inf: 1.13,
+    max_stable_input_dbfs: -2.0,
+};
+
+/// 7th-order CRFB, DSD256, `modulator_ntf = "fixed_h_inf_1_4"` (f_bit=11289600 Hz, OSR=282.24, H_inf=1.40, fixed H_inf).
+pub const CRFB7_DSD256_FIXED_H_INF_1_4: CrfbCoefficients7 = CrfbCoefficients7 {
+    g1: 2.04071615999001921e-05,
+    g2: 6.81269574014375934e-05,
+    g3: 1.11606571540079358e-04,
+    a: [
+        1.20307336796509560e-06,
+        3.32527174046563101e-05,
+        4.73264154884671644e-04,
+        4.49092358674439956e-03,
+        3.02571391888763787e-02,
+        1.46846050399896511e-01,
+        4.89846972634793376e-01,
+    ],
+    gamma: [
+        1.20307336796509560e-06,
+        3.44557907726214034e-05,
+        5.07719945657293041e-04,
+        4.99864353240169271e-03,
+        3.52557827212780714e-02,
+        1.82101833121174589e-01,
+        6.71948805755967937e-01,
+    ],
+    b1: 1.21277348788973582e-06,
+    ntf_h_inf: 1.4,
+    max_stable_input_dbfs: -4.75,
+};
+
+/// 7th-order CRFB, DSD256, `modulator_ntf = "fixed_h_inf_1_5"` (f_bit=11289600 Hz, OSR=282.24, H_inf=1.50, fixed H_inf).
+pub const CRFB7_DSD256_FIXED_H_INF_1_5: CrfbCoefficients7 = CrfbCoefficients7 {
+    g1: 2.04071615999001921e-05,
+    g2: 6.81269574014375934e-05,
+    g3: 1.11606571540079358e-04,
+    a: [
+        4.16250005145200625e-06,
+        9.34932287838650836e-05,
+        1.09416195712354293e-03,
+        8.57865598257225200e-03,
+        4.81095913046756876e-02,
+        1.95784834113717665e-01,
+        5.55600029529968897e-01,
+    ],
+    gamma: [
+        4.16250005145200625e-06,
+        9.76557288353170898e-05,
+        1.19181768595885999e-03,
+        9.77047366853111242e-03,
+        5.78800649732068018e-02,
+        2.53664899086924467e-01,
+        8.09264928616893364e-01,
+    ],
+    b1: 4.18489576323484447e-06,
+    ntf_h_inf: 1.5,
+    max_stable_input_dbfs: -7.0,
+};
+
+/// 7th-order CRFB, DSD512, `modulator_ntf = "reference"` (f_bit=22579200 Hz, OSR=564.48, H_inf=1.10, anchors met).
+pub const CRFB7_DSD512_REFERENCE: CrfbCoefficients7 = CrfbCoefficients7 {
+    g1: 5.10179690715872880e-06,
+    g2: 1.70318118710710564e-05,
+    g3: 2.79018375131112606e-05,
+    a: [
+        2.18704517882462613e-10,
+        2.30552366259922743e-08,
+        1.19338543855394556e-06,
+        4.07883595262721193e-05,
+        9.62853561422488745e-04,
+        1.59956906873094315e-02,
+        1.73574427786528596e-01,
+    ],
+    gamma: [
+        2.18704517882462613e-10,
+        2.32739411438747382e-08,
+        1.21665937969782033e-06,
+        4.20050189059699379e-05,
+        1.00485858032845865e-03,
+        1.70005492676378912e-02,
+        1.90574977054166483e-01,
+    ],
+    b1: 2.24877013933319108e-10,
+    ntf_h_inf: 1.1,
+    max_stable_input_dbfs: -2.0,
+};
+
+/// 7th-order CRFB, DSD512, `modulator_ntf = "comfortable"` (f_bit=22579200 Hz, OSR=564.48, H_inf=1.10, anchors met).
+pub const CRFB7_DSD512_COMFORTABLE: CrfbCoefficients7 = CrfbCoefficients7 {
+    g1: 5.10179690715872880e-06,
+    g2: 1.70318118710710564e-05,
+    g3: 2.79018375131112606e-05,
+    a: [
+        2.18704517882462613e-10,
+        2.30552366259922743e-08,
+        1.19338543855394556e-06,
+        4.07883595262721193e-05,
+        9.62853561422488745e-04,
+        1.59956906873094315e-02,
+        1.73574427786528596e-01,
+    ],
+    gamma: [
+        2.18704517882462613e-10,
+        2.32739411438747382e-08,
+        1.21665937969782033e-06,
+        4.20050189059699379e-05,
+        1.00485858032845865e-03,
+        1.70005492676378912e-02,
+        1.90574977054166483e-01,
+    ],
+    b1: 2.24877013933319108e-10,
+    ntf_h_inf: 1.1,
+    max_stable_input_dbfs: -2.0,
+};
+
+/// 7th-order CRFB, DSD512, `modulator_ntf = "fixed_h_inf_1_4"` (f_bit=22579200 Hz, OSR=564.48, H_inf=1.40, fixed H_inf).
+pub const CRFB7_DSD512_FIXED_H_INF_1_4: CrfbCoefficients7 = CrfbCoefficients7 {
+    g1: 5.10179690715872880e-06,
+    g2: 1.70318118710710564e-05,
+    g3: 2.79018375131112606e-05,
+    a: [
+        1.20944551118341020e-06,
+        3.32935610601692522e-05,
+        4.74967754166084801e-04,
+        4.49690210490710611e-03,
+        3.03123639699742764e-02,
+        1.46896737221602403e-01,
+        4.89808682366442649e-01,
+    ],
+    gamma: [
+        1.20944551118341020e-06,
+        3.45030065713526656e-05,
+        5.09470760737437494e-04,
+        5.00637286564454328e-03,
+        3.53187368356188205e-02,
+        1.82215474057221216e-01,
+        6.72024156423663865e-01,
+    ],
+    b1: 1.21187133531768933e-06,
+    ntf_h_inf: 1.4,
+    max_stable_input_dbfs: -4.75,
+};
+
+/// 7th-order CRFB, DSD512, `modulator_ntf = "fixed_h_inf_1_5"` (f_bit=22579200 Hz, OSR=564.48, H_inf=1.50, fixed H_inf).
+pub const CRFB7_DSD512_FIXED_H_INF_1_5: CrfbCoefficients7 = CrfbCoefficients7 {
+    g1: 5.10179690715872880e-06,
+    g2: 1.70318118710710564e-05,
+    g3: 2.79018375131112606e-05,
+    a: [
+        4.17673757047243335e-06,
+        9.35602853039886237e-05,
+        1.09677860526063270e-03,
+        8.58574562662220778e-03,
+        4.81691298410681507e-02,
+        1.95824348062165948e-01,
+        5.55566674430021723e-01,
+    ],
+    gamma: [
+        4.17673757047243335e-06,
+        9.77370228744610630e-05,
+        1.19451562813509379e-03,
+        9.78026125475730222e-03,
+        5.79493910958254546e-02,
+        2.53773739157991396e-01,
+        8.09340413588013119e-01,
+    ],
+    b1: 4.18233729906828404e-06,
+    ntf_h_inf: 1.5,
+    max_stable_input_dbfs: -7.25,
+};
+
+/// 7th-order CRFB, DSD64_48, `modulator_ntf = "reference"` (f_bit=3072000 Hz, OSR=76.80, H_inf=1.40, anchors missed at every H_inf <= 1.4, baseline kept).
+pub const CRFB7_DSD64_48_REFERENCE: CrfbCoefficients7 = CrfbCoefficients7 {
+    g1: 2.75605610485119001e-04,
+    g2: 9.20031815853539214e-04,
+    g3: 1.50714119423911441e-03,
+    a: [
+        1.09760996393649224e-06,
+        3.25726567320598395e-05,
+        4.45073532071238616e-04,
+        4.39115330353055233e-03,
+        2.93348859611814797e-02,
+        1.46002867111256651e-01,
+        4.90485038808002982e-01,
+    ],
+    gamma: [
+        1.09760996393649224e-06,
+        3.36702666959963294e-05,
+        4.78743798767234925e-04,
+        4.86989710229778720e-03,
+        3.42047830634792660e-02,
+        1.80207650174735917e-01,
+        6.70692688982738927e-01,
+    ],
+    b1: 1.22790049769714574e-06,
+    ntf_h_inf: 1.4,
+    max_stable_input_dbfs: -4.5,
+};
+
+/// 7th-order CRFB, DSD64_48, `modulator_ntf = "comfortable"` (f_bit=3072000 Hz, OSR=76.80, H_inf=1.27, anchors met).
+pub const CRFB7_DSD64_48_COMFORTABLE: CrfbCoefficients7 = CrfbCoefficients7 {
+    g1: 2.75605610485119001e-04,
+    g2: 9.20031815853539214e-04,
+    g3: 1.50714119423911441e-03,
+    a: [
+        9.73046110481839210e-08,
+        4.57577811110831708e-06,
+        8.55197802611898253e-05,
+        1.24749119421107332e-03,
+        1.16394392202760245e-02,
+        8.25452646095339304e-02,
+        3.80836180747420872e-01,
+    ],
+    gamma: [
+        9.73046110481839210e-08,
+        4.67308272215650119e-06,
+        9.01928629833463299e-05,
+        1.33768405719441956e-03,
+        1.29771232774704443e-02,
+        9.55223878870043730e-02,
+        4.76358568634425272e-01,
+    ],
+    b1: 1.23971247754338361e-07,
+    ntf_h_inf: 1.27,
+    max_stable_input_dbfs: -2.75,
+};
+
+/// 7th-order CRFB, DSD64_48, `modulator_ntf = "fixed_h_inf_1_4"` (f_bit=3072000 Hz, OSR=76.80, H_inf=1.40, fixed H_inf).
+pub const CRFB7_DSD64_48_FIXED_H_INF_1_4: CrfbCoefficients7 = CrfbCoefficients7 {
+    g1: 2.75605610485119001e-04,
+    g2: 9.20031815853539214e-04,
+    g3: 1.50714119423911441e-03,
+    a: [
+        1.09760996393649224e-06,
+        3.25726567320598395e-05,
+        4.45073532071238616e-04,
+        4.39115330353055233e-03,
+        2.93348859611814797e-02,
+        1.46002867111256651e-01,
+        4.90485038808002982e-01,
+    ],
+    gamma: [
+        1.09760996393649224e-06,
+        3.36702666959963294e-05,
+        4.78743798767234925e-04,
+        4.86989710229778720e-03,
+        3.42047830634792660e-02,
+        1.80207650174735917e-01,
+        6.70692688982738927e-01,
+    ],
+    b1: 1.22790049769714574e-06,
+    ntf_h_inf: 1.4,
+    max_stable_input_dbfs: -4.5,
+};
+
+/// 7th-order CRFB, DSD64_48, `modulator_ntf = "fixed_h_inf_1_5"` (f_bit=3072000 Hz, OSR=76.80, H_inf=1.50, fixed H_inf).
+pub const CRFB7_DSD64_48_FIXED_H_INF_1_5: CrfbCoefficients7 = CrfbCoefficients7 {
+    g1: 2.75605610485119001e-04,
+    g2: 9.20031815853539214e-04,
+    g3: 1.50714119423911441e-03,
+    a: [
+        3.92600564117211350e-06,
+        9.23753002012335912e-05,
+        1.05073000863780352e-03,
+        8.46030760299400393e-03,
+        4.71157279397390466e-02,
+        1.95127646831700446e-01,
+        5.56155856020716488e-01,
+    ],
+    gamma: [
+        3.92600564117211350e-06,
+        9.63013058424057073e-05,
+        1.14703131448020920e-03,
+        9.60733891747421291e-03,
+        5.67230668572132612e-02,
+        2.51850713688913708e-01,
+        8.08006569709630140e-01,
+    ],
+    b1: 4.22775221037562064e-06,
+    ntf_h_inf: 1.5,
+    max_stable_input_dbfs: -6.5,
+};
+
+/// 7th-order CRFB, DSD128_48, `modulator_ntf = "reference"` (f_bit=6144000 Hz, OSR=153.60, H_inf=1.18, anchors met).
+pub const CRFB7_DSD128_48_REFERENCE: CrfbCoefficients7 = CrfbCoefficients7 {
+    g1: 6.89025895130868093e-05,
+    g2: 2.30021181399253649e-04,
+    g3: 3.76820797038046607e-04,
+    a: [
+        8.86966327877185009e-09,
+        5.65491526847231358e-07,
+        1.61293758064079597e-05,
+        3.26973998495446794e-04,
+        4.43416344003347458e-03,
+        4.37478855166660852e-02,
+        2.82058192559174359e-01,
+    ],
+    gamma: [
+        8.86966327877185009e-09,
+        5.74361190126003236e-07,
+        1.67037369965339634e-05,
+        3.43677735491980765e-04,
+        4.77784117552545497e-03,
+        4.85257266921915384e-02,
+        3.30583919251365876e-01,
+    ],
+    b1: 1.00529808625288105e-08,
+    ntf_h_inf: 1.18,
+    max_stable_input_dbfs: -2.25,
+};
+
+/// 7th-order CRFB, DSD128_48, `modulator_ntf = "comfortable"` (f_bit=6144000 Hz, OSR=153.60, H_inf=1.13, anchors met).
+pub const CRFB7_DSD128_48_COMFORTABLE: CrfbCoefficients7 = CrfbCoefficients7 {
+    g1: 6.89025895130868093e-05,
+    g2: 2.30021181399253649e-04,
+    g3: 3.76820797038046607e-04,
+    a: [
+        9.86753799082046139e-10,
+        9.37104441019393358e-08,
+        3.51093788168160297e-06,
+        1.00428171722252027e-04,
+        1.83816845450253635e-03,
+        2.49941403232721258e-02,
+        2.17117890898381682e-01,
+    ],
+    gamma: [
+        9.86753799082046139e-10,
+        9.46971979010213756e-08,
+        3.60563507958262455e-06,
+        1.04033806801834649e-04,
+        1.94220226130437101e-03,
+        2.69363425845764969e-02,
+        2.44054233482958183e-01,
+    ],
+    b1: 1.25909642685536055e-09,
+    ntf_h_inf: 1.13,
+    max_stable_input_dbfs: -2.0,
+};
+
+/// 7th-order CRFB, DSD128_48, `modulator_ntf = "fixed_h_inf_1_4"` (f_bit=6144000 Hz, OSR=153.60, H_inf=1.40, fixed H_inf).
+pub const CRFB7_DSD128_48_FIXED_H_INF_1_4: CrfbCoefficients7 = CrfbCoefficients7 {
+    g1: 6.89025895130868093e-05,
+    g2: 2.30021181399253649e-04,
+    g3: 3.76820797038046607e-04,
+    a: [
+        1.18291821035544057e-06,
+        3.31233461377501774e-05,
+        4.67875870330257003e-04,
+        4.47197670952159676e-03,
+        3.00820931908347342e-02,
+        1.46685535794983501e-01,
+        4.89968279455070155e-01,
+    ],
+    gamma: [
+        1.18291821035544057e-06,
+        3.43062643481056203e-05,
+        5.02182134678362643e-04,
+        4.97415884419995930e-03,
+        3.50562520350346934e-02,
+        1.81741787830018209e-01,
+        6.71710067285088419e-01,
+    ],
+    b1: 1.21563576835742037e-06,
+    ntf_h_inf: 1.4,
+    max_stable_input_dbfs: -4.75,
+};
+
+/// 7th-order CRFB, DSD128_48, `modulator_ntf = "fixed_h_inf_1_5"` (f_bit=6144000 Hz, OSR=153.60, H_inf=1.50, fixed H_inf).
+pub const CRFB7_DSD128_48_FIXED_H_INF_1_5: CrfbCoefficients7 = CrfbCoefficients7 {
+    g1: 6.89025895130868093e-05,
+    g2: 2.30021181399253649e-04,
+    g3: 3.76820797038046607e-04,
+    a: [
+        4.11742838263862430e-06,
+        9.32807655826958592e-05,
+        1.08587988277306308e-03,
+        8.55618615677562581e-03,
+        4.79208912521667252e-02,
+        1.95659707620114726e-01,
+        5.55705701200595259e-01,
+    ],
+    gamma: [
+        4.11742838263862430e-06,
+        9.73981939653344810e-05,
+        1.18327807673839760e-03,
+        9.73946423351402385e-03,
+        5.76603554856807490e-02,
+        2.53320063105795468e-01,
+        8.09025764306390727e-01,
+    ],
+    b1: 4.19301113812028618e-06,
+    ntf_h_inf: 1.5,
+    max_stable_input_dbfs: -6.75,
+};
+
+/// 7th-order CRFB, DSD256_48, `modulator_ntf = "reference"` (f_bit=12288000 Hz, OSR=307.20, H_inf=1.10, anchors met).
+pub const CRFB7_DSD256_48_REFERENCE: CrfbCoefficients7 = CrfbCoefficients7 {
+    g1: 1.72257215595994495e-05,
+    g2: 5.75061220884354185e-05,
+    g3: 9.42074180190211052e-05,
+    a: [
+        2.04682847267009307e-10,
+        2.26170924175167336e-08,
+        1.14523827302684066e-06,
+        4.00476122585377849e-05,
+        9.43914565500922472e-04,
+        1.59068141414166198e-02,
+        1.73623544540609021e-01,
+    ],
+    gamma: [
+        2.04682847267009307e-10,
+        2.28217752647837420e-08,
+        1.16806004829162435e-06,
+        4.12156723068294071e-05,
+        9.85130237807751866e-04,
+        1.68919443792243731e-02,
+        1.90515488919833387e-01,
+    ],
+    b1: 2.25361632584674208e-10,
+    ntf_h_inf: 1.1,
+    max_stable_input_dbfs: -2.0,
+};
+
+/// 7th-order CRFB, DSD256_48, `modulator_ntf = "comfortable"` (f_bit=12288000 Hz, OSR=307.20, H_inf=1.10, anchors met).
+pub const CRFB7_DSD256_48_COMFORTABLE: CrfbCoefficients7 = CrfbCoefficients7 {
+    g1: 1.72257215595994495e-05,
+    g2: 5.75061220884354185e-05,
+    g3: 9.42074180190211052e-05,
+    a: [
+        2.04682847267009307e-10,
+        2.26170924175167336e-08,
+        1.14523827302684066e-06,
+        4.00476122585377849e-05,
+        9.43914565500922472e-04,
+        1.59068141414166198e-02,
+        1.73623544540609021e-01,
+    ],
+    gamma: [
+        2.04682847267009307e-10,
+        2.28217752647837420e-08,
+        1.16806004829162435e-06,
+        4.12156723068294071e-05,
+        9.85130237807751866e-04,
+        1.68919443792243731e-02,
+        1.90515488919833387e-01,
+    ],
+    b1: 2.25361632584674208e-10,
+    ntf_h_inf: 1.1,
+    max_stable_input_dbfs: -2.0,
+};
+
+/// 7th-order CRFB, DSD256_48, `modulator_ntf = "fixed_h_inf_1_4"` (f_bit=12288000 Hz, OSR=307.20, H_inf=1.40, fixed H_inf).
+pub const CRFB7_DSD256_48_FIXED_H_INF_1_4: CrfbCoefficients7 = CrfbCoefficients7 {
+    g1: 1.72257215595994495e-05,
+    g2: 5.75061220884354185e-05,
+    g3: 9.42074180190211052e-05,
+    a: [
+        1.20439747182122798e-06,
+        3.32612068214412857e-05,
+        4.73618152837339496e-04,
+        4.49216635591963634e-03,
+        3.02686192690253542e-02,
+        1.46856585311786469e-01,
+        4.89839013709885474e-01,
+    ],
+    gamma: [
+        1.20439747182122798e-06,
+        3.44656042932625135e-05,
+        5.08083757130602023e-04,
+        5.00025011305023880e-03,
+        3.52688693820755947e-02,
+        1.82125454693862071e-01,
+        6.71964468403747572e-01,
+    ],
+    b1: 1.21258591558303214e-06,
+    ntf_h_inf: 1.4,
+    max_stable_input_dbfs: -4.75,
+};
+
+/// 7th-order CRFB, DSD256_48, `modulator_ntf = "fixed_h_inf_1_5"` (f_bit=12288000 Hz, OSR=307.20, H_inf=1.50, fixed H_inf).
+pub const CRFB7_DSD256_48_FIXED_H_INF_1_5: CrfbCoefficients7 = CrfbCoefficients7 {
+    g1: 1.72257215595994495e-05,
+    g2: 5.75061220884354185e-05,
+    g3: 9.42074180190211052e-05,
+    a: [
+        4.16545902258599770e-06,
+        9.35071673552305015e-05,
+        1.09470575485092988e-03,
+        8.58012974288238812e-03,
+        4.81219678768256831e-02,
+        1.95793046724866304e-01,
+        5.55593096371252759e-01,
+    ],
+    gamma: [
+        4.16545902258599770e-06,
+        9.76726263778165000e-05,
+        1.19237838122874629e-03,
+        9.77250812411113376e-03,
+        5.78944760009368203e-02,
+        2.53687522725803138e-01,
+        8.09280619097055842e-01,
+    ],
+    b1: 4.18436383982986351e-06,
+    ntf_h_inf: 1.5,
+    max_stable_input_dbfs: -7.0,
+};
+
+/// 7th-order CRFB, DSD512_48, `modulator_ntf = "reference"` (f_bit=24576000 Hz, OSR=614.40, H_inf=1.12, anchors met).
+pub const CRFB7_DSD512_48_REFERENCE: CrfbCoefficients7 = CrfbCoefficients7 {
+    g1: 4.30643502635774666e-06,
+    g2: 1.43765821936092664e-05,
+    g3: 2.35519931788275017e-05,
+    a: [
+        7.30029256968723980e-10,
+        6.39260087623289928e-08,
+        2.78542375000469808e-06,
+        7.96743218789971937e-05,
+        1.58273614428933586e-03,
+        2.21137426312835485e-02,
+        2.02822967380308250e-01,
+    ],
+    gamma: [
+        7.30029256968723980e-10,
+        6.46560380192977124e-08,
+        2.85007978802399558e-06,
+        8.25244016670211884e-05,
+        1.66526054595635695e-03,
+        2.37790031772399067e-02,
+        2.26601970557548160e-01,
+    ],
+    b1: 7.42122789185343458e-10,
+    ntf_h_inf: 1.12,
+    max_stable_input_dbfs: -2.0,
+};
+
+/// 7th-order CRFB, DSD512_48, `modulator_ntf = "comfortable"` (f_bit=24576000 Hz, OSR=614.40, H_inf=1.12, anchors met).
+pub const CRFB7_DSD512_48_COMFORTABLE: CrfbCoefficients7 = CrfbCoefficients7 {
+    g1: 4.30643502635774666e-06,
+    g2: 1.43765821936092664e-05,
+    g3: 2.35519931788275017e-05,
+    a: [
+        7.30029256968723980e-10,
+        6.39260087623289928e-08,
+        2.78542375000469808e-06,
+        7.96743218789971937e-05,
+        1.58273614428933586e-03,
+        2.21137426312835485e-02,
+        2.02822967380308250e-01,
+    ],
+    gamma: [
+        7.30029256968723980e-10,
+        6.46560380192977124e-08,
+        2.85007978802399558e-06,
+        8.25244016670211884e-05,
+        1.66526054595635695e-03,
+        2.37790031772399067e-02,
+        2.26601970557548160e-01,
+    ],
+    b1: 7.42122789185343458e-10,
+    ntf_h_inf: 1.12,
+    max_stable_input_dbfs: -2.0,
+};
+
+/// 7th-order CRFB, DSD512_48, `modulator_ntf = "fixed_h_inf_1_4"` (f_bit=24576000 Hz, OSR=614.40, H_inf=1.40, fixed H_inf).
+pub const CRFB7_DSD512_48_FIXED_H_INF_1_4: CrfbCoefficients7 = CrfbCoefficients7 {
+    g1: 4.30643502635774666e-06,
+    g2: 1.43765821936092664e-05,
+    g3: 2.35519931788275017e-05,
+    a: [
+        1.20977679300176568e-06,
+        3.32956837330112204e-05,
+        4.75056323603348124e-04,
+        4.49721277078716022e-03,
+        3.03152335271265755e-02,
+        1.46899371597121187e-01,
+        4.89806692510510677e-01,
+    ],
+    gamma: [
+        1.20977679300176568e-06,
+        3.45054605260129837e-05,
+        5.09561784129361115e-04,
+        5.00677455491652101e-03,
+        3.53220080820430965e-02,
+        1.82221379679164297e-01,
+        6.72028072189674974e-01,
+    ],
+    b1: 1.21182446977862796e-06,
+    ntf_h_inf: 1.4,
+    max_stable_input_dbfs: -4.75,
+};
+
+/// 7th-order CRFB, DSD512_48, `modulator_ntf = "fixed_h_inf_1_5"` (f_bit=24576000 Hz, OSR=614.40, H_inf=1.50, fixed H_inf).
+pub const CRFB7_DSD512_48_FIXED_H_INF_1_5: CrfbCoefficients7 = CrfbCoefficients7 {
+    g1: 4.30643502635774666e-06,
+    g2: 1.43765821936092664e-05,
+    g3: 2.35519931788275017e-05,
+    a: [
+        4.17747760773070738e-06,
+        9.35637700174638931e-05,
+        1.09691461923154304e-03,
+        8.58611402393378090e-03,
+        4.81722236260975212e-02,
+        1.95826401768247504e-01,
+        5.55564941043438232e-01,
+    ],
+    gamma: [
+        4.17747760773070738e-06,
+        9.77412476251945987e-05,
+        1.19465586685673763e-03,
+        9.78076989079051939e-03,
+        5.79529935168880406e-02,
+        2.53779395285135545e-01,
+        8.09344336328573721e-01,
+    ],
+    b1: 4.18220438250788474e-06,
+    ntf_h_inf: 1.5,
+    max_stable_input_dbfs: -7.0,
+};
+
+/// Looks up the precomputed 7th-order CRFB coefficients for a DSD bit rate and `modulator_ntf` preset.
+pub fn get_crfb7_coefficients(
+    bit_rate: DsdBitRateHz,
+    ntf: ModulatorNtf,
+) -> Option<&'static CrfbCoefficients7> {
+    match (bit_rate, ntf) {
+        (DsdBitRateHz::DSD64, ModulatorNtf::Reference) => Some(&CRFB7_DSD64_REFERENCE),
+        (DsdBitRateHz::DSD64, ModulatorNtf::Comfortable) => Some(&CRFB7_DSD64_COMFORTABLE),
+        (DsdBitRateHz::DSD64, ModulatorNtf::FixedHInf14) => Some(&CRFB7_DSD64_FIXED_H_INF_1_4),
+        (DsdBitRateHz::DSD64, ModulatorNtf::FixedHInf15) => Some(&CRFB7_DSD64_FIXED_H_INF_1_5),
+        (DsdBitRateHz::DSD128, ModulatorNtf::Reference) => Some(&CRFB7_DSD128_REFERENCE),
+        (DsdBitRateHz::DSD128, ModulatorNtf::Comfortable) => Some(&CRFB7_DSD128_COMFORTABLE),
+        (DsdBitRateHz::DSD128, ModulatorNtf::FixedHInf14) => Some(&CRFB7_DSD128_FIXED_H_INF_1_4),
+        (DsdBitRateHz::DSD128, ModulatorNtf::FixedHInf15) => Some(&CRFB7_DSD128_FIXED_H_INF_1_5),
+        (DsdBitRateHz::DSD256, ModulatorNtf::Reference) => Some(&CRFB7_DSD256_REFERENCE),
+        (DsdBitRateHz::DSD256, ModulatorNtf::Comfortable) => Some(&CRFB7_DSD256_COMFORTABLE),
+        (DsdBitRateHz::DSD256, ModulatorNtf::FixedHInf14) => Some(&CRFB7_DSD256_FIXED_H_INF_1_4),
+        (DsdBitRateHz::DSD256, ModulatorNtf::FixedHInf15) => Some(&CRFB7_DSD256_FIXED_H_INF_1_5),
+        (DsdBitRateHz::DSD512, ModulatorNtf::Reference) => Some(&CRFB7_DSD512_REFERENCE),
+        (DsdBitRateHz::DSD512, ModulatorNtf::Comfortable) => Some(&CRFB7_DSD512_COMFORTABLE),
+        (DsdBitRateHz::DSD512, ModulatorNtf::FixedHInf14) => Some(&CRFB7_DSD512_FIXED_H_INF_1_4),
+        (DsdBitRateHz::DSD512, ModulatorNtf::FixedHInf15) => Some(&CRFB7_DSD512_FIXED_H_INF_1_5),
+        (DsdBitRateHz::DSD64_48, ModulatorNtf::Reference) => Some(&CRFB7_DSD64_48_REFERENCE),
+        (DsdBitRateHz::DSD64_48, ModulatorNtf::Comfortable) => Some(&CRFB7_DSD64_48_COMFORTABLE),
+        (DsdBitRateHz::DSD64_48, ModulatorNtf::FixedHInf14) => {
+            Some(&CRFB7_DSD64_48_FIXED_H_INF_1_4)
+        }
+        (DsdBitRateHz::DSD64_48, ModulatorNtf::FixedHInf15) => {
+            Some(&CRFB7_DSD64_48_FIXED_H_INF_1_5)
+        }
+        (DsdBitRateHz::DSD128_48, ModulatorNtf::Reference) => Some(&CRFB7_DSD128_48_REFERENCE),
+        (DsdBitRateHz::DSD128_48, ModulatorNtf::Comfortable) => Some(&CRFB7_DSD128_48_COMFORTABLE),
+        (DsdBitRateHz::DSD128_48, ModulatorNtf::FixedHInf14) => {
+            Some(&CRFB7_DSD128_48_FIXED_H_INF_1_4)
+        }
+        (DsdBitRateHz::DSD128_48, ModulatorNtf::FixedHInf15) => {
+            Some(&CRFB7_DSD128_48_FIXED_H_INF_1_5)
+        }
+        (DsdBitRateHz::DSD256_48, ModulatorNtf::Reference) => Some(&CRFB7_DSD256_48_REFERENCE),
+        (DsdBitRateHz::DSD256_48, ModulatorNtf::Comfortable) => Some(&CRFB7_DSD256_48_COMFORTABLE),
+        (DsdBitRateHz::DSD256_48, ModulatorNtf::FixedHInf14) => {
+            Some(&CRFB7_DSD256_48_FIXED_H_INF_1_4)
+        }
+        (DsdBitRateHz::DSD256_48, ModulatorNtf::FixedHInf15) => {
+            Some(&CRFB7_DSD256_48_FIXED_H_INF_1_5)
+        }
+        (DsdBitRateHz::DSD512_48, ModulatorNtf::Reference) => Some(&CRFB7_DSD512_48_REFERENCE),
+        (DsdBitRateHz::DSD512_48, ModulatorNtf::Comfortable) => Some(&CRFB7_DSD512_48_COMFORTABLE),
+        (DsdBitRateHz::DSD512_48, ModulatorNtf::FixedHInf14) => {
+            Some(&CRFB7_DSD512_48_FIXED_H_INF_1_4)
+        }
+        (DsdBitRateHz::DSD512_48, ModulatorNtf::FixedHInf15) => {
+            Some(&CRFB7_DSD512_48_FIXED_H_INF_1_5)
+        }
         _ => None,
     }
 }
@@ -3358,62 +4639,65 @@ pub const SRC_ASRC_PHASES: usize = 256;
 mod tests {
     use super::*;
 
+    const ALL_RATES: [DsdBitRateHz; 8] = [
+        DsdBitRateHz::DSD64,
+        DsdBitRateHz::DSD128,
+        DsdBitRateHz::DSD256,
+        DsdBitRateHz::DSD512,
+        DsdBitRateHz::DSD64_48,
+        DsdBitRateHz::DSD128_48,
+        DsdBitRateHz::DSD256_48,
+        DsdBitRateHz::DSD512_48,
+    ];
+
     #[test]
     fn test_crfb_coefficient_lookups() {
-        assert!(get_crfb_coefficients(DsdBitRateHz::DSD64).is_some());
-        assert!(get_crfb_coefficients(DsdBitRateHz::DSD128).is_some());
-        assert!(get_crfb_coefficients(DsdBitRateHz::DSD256).is_some());
-        assert!(get_crfb_coefficients(DsdBitRateHz::DSD512).is_some());
-        assert!(get_crfb_coefficients(DsdBitRateHz::DSD64_48).is_some());
-        assert!(get_crfb_coefficients(DsdBitRateHz::DSD128_48).is_some());
-        assert!(get_crfb_coefficients(DsdBitRateHz::DSD256_48).is_some());
-        assert!(get_crfb_coefficients(DsdBitRateHz::DSD512_48).is_some());
+        for rate in ALL_RATES {
+            for ntf in ModulatorNtf::ALL {
+                let c5 = get_crfb5_coefficients(rate, ntf).unwrap();
+                assert!(c5.g1 > 0.0 && c5.g2 > 0.0 && c5.b1 > 0.0);
+                assert_eq!(c5.a.len(), 5);
+                assert!(c5.a.iter().all(|&a| a > 0.0));
 
-        let dsd256 = get_crfb_coefficients(DsdBitRateHz::DSD256).unwrap();
-        assert!(dsd256.g1 > 0.0);
-        assert!(dsd256.g2 > 0.0);
-        assert!(dsd256.b1 > 0.0);
-        assert_eq!(dsd256.a.len(), 5);
-        for &a_val in &dsd256.a {
-            assert!(a_val > 0.0);
+                let c7 = get_crfb7_coefficients(rate, ntf).unwrap();
+                assert!(c7.g1 > 0.0 && c7.g2 > 0.0 && c7.g3 > 0.0 && c7.b1 > 0.0);
+                assert_eq!(c7.a.len(), 7);
+                assert!(c7.a.iter().all(|&a| a > 0.0));
+            }
         }
+    }
 
-        let dsd512 = get_crfb_coefficients(DsdBitRateHz::DSD512).unwrap();
-        assert!(dsd512.g1 > 0.0);
-        assert!(dsd512.g2 > 0.0);
-        assert!(dsd512.b1 > 0.0);
-        assert_eq!(dsd512.a.len(), 5);
-        for &a_val in &dsd512.a {
-            assert!(a_val > 0.0);
-        }
-
-        assert!(get_crfb7_coefficients(DsdBitRateHz::DSD64).is_some());
-        assert!(get_crfb7_coefficients(DsdBitRateHz::DSD128).is_some());
-        assert!(get_crfb7_coefficients(DsdBitRateHz::DSD256).is_some());
-        assert!(get_crfb7_coefficients(DsdBitRateHz::DSD512).is_some());
-        assert!(get_crfb7_coefficients(DsdBitRateHz::DSD64_48).is_some());
-        assert!(get_crfb7_coefficients(DsdBitRateHz::DSD128_48).is_some());
-        assert!(get_crfb7_coefficients(DsdBitRateHz::DSD256_48).is_some());
-        assert!(get_crfb7_coefficients(DsdBitRateHz::DSD512_48).is_some());
-
-        let dsd256_7 = get_crfb7_coefficients(DsdBitRateHz::DSD256).unwrap();
-        assert!(dsd256_7.g1 > 0.0);
-        assert!(dsd256_7.g2 > 0.0);
-        assert!(dsd256_7.g3 > 0.0);
-        assert!(dsd256_7.b1 > 0.0);
-        assert_eq!(dsd256_7.a.len(), 7);
-        for &a_val in &dsd256_7.a {
-            assert!(a_val > 0.0);
-        }
-
-        let dsd512_7 = get_crfb7_coefficients(DsdBitRateHz::DSD512).unwrap();
-        assert!(dsd512_7.g1 > 0.0);
-        assert!(dsd512_7.g2 > 0.0);
-        assert!(dsd512_7.g3 > 0.0);
-        assert!(dsd512_7.b1 > 0.0);
-        assert_eq!(dsd512_7.a.len(), 7);
-        for &a_val in &dsd512_7.a {
-            assert!(a_val > 0.0);
+    /// Every preset keeps `L` at or above the `H_inf = 1.40` baseline and never uses an out-of-band gain
+    /// above it; the fixed presets are exactly 1.40 / 1.50 (`Design.md §4.3`).
+    #[test]
+    fn test_ntf_presets_never_fall_below_baseline() {
+        for rate in ALL_RATES {
+            let base5 = get_crfb5_coefficients(rate, ModulatorNtf::FixedHInf14).unwrap();
+            let base7 = get_crfb7_coefficients(rate, ModulatorNtf::FixedHInf14).unwrap();
+            assert_eq!(base5.ntf_h_inf, 1.4);
+            assert_eq!(base7.ntf_h_inf, 1.4);
+            assert_eq!(
+                get_crfb5_coefficients(rate, ModulatorNtf::FixedHInf15)
+                    .unwrap()
+                    .ntf_h_inf,
+                1.5
+            );
+            assert_eq!(
+                get_crfb7_coefficients(rate, ModulatorNtf::FixedHInf15)
+                    .unwrap()
+                    .ntf_h_inf,
+                1.5
+            );
+            for ntf in [ModulatorNtf::Reference, ModulatorNtf::Comfortable] {
+                let c5 = get_crfb5_coefficients(rate, ntf).unwrap();
+                let c7 = get_crfb7_coefficients(rate, ntf).unwrap();
+                assert!(
+                    c5.ntf_h_inf <= 1.4 && c5.max_stable_input_dbfs >= base5.max_stable_input_dbfs
+                );
+                assert!(
+                    c7.ntf_h_inf <= 1.4 && c7.max_stable_input_dbfs >= base7.max_stable_input_dbfs
+                );
+            }
         }
     }
 
@@ -3429,20 +4713,13 @@ mod tests {
                 assert!(gk >= 0.0);
             }
         }
-        for rate in [
-            DsdBitRateHz::DSD64,
-            DsdBitRateHz::DSD128,
-            DsdBitRateHz::DSD256,
-            DsdBitRateHz::DSD512,
-            DsdBitRateHz::DSD64_48,
-            DsdBitRateHz::DSD128_48,
-            DsdBitRateHz::DSD256_48,
-            DsdBitRateHz::DSD512_48,
-        ] {
-            let c5 = get_crfb5_coefficients(rate).unwrap();
-            check(&c5.a, &c5.gamma);
-            let c7 = get_crfb7_coefficients(rate).unwrap();
-            check(&c7.a, &c7.gamma);
+        for rate in ALL_RATES {
+            for ntf in ModulatorNtf::ALL {
+                let c5 = get_crfb5_coefficients(rate, ntf).unwrap();
+                check(&c5.a, &c5.gamma);
+                let c7 = get_crfb7_coefficients(rate, ntf).unwrap();
+                check(&c7.a, &c7.gamma);
+            }
         }
     }
 

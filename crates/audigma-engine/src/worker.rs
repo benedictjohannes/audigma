@@ -22,7 +22,7 @@ use crate::lifecycle::FrameGain;
 use crate::timing::PoolTimings;
 use crate::traits::EngineError;
 use audigma_dsp::DcBlocker;
-use audigma_dsp::config::{Apodization, DitherType, FilterPhase, OverloadPolicy};
+use audigma_dsp::config::{Apodization, DitherType, FilterPhase, ModulatorNtf, OverloadPolicy};
 use audigma_dsp::fir::HalfBandCascade;
 use audigma_dsp::ftz::ScopedFtzDaz;
 use audigma_dsp::modulator::Modulator;
@@ -133,6 +133,7 @@ fn process_dsd_tile(
 pub struct TargetDsdConfig {
     pub bit_rate: DsdBitRateHz,
     pub modulator_order: u8,
+    pub modulator_ntf: ModulatorNtf,
     pub dither: DitherType,
     pub overload_policy: OverloadPolicy,
     pub seed_base: u64,
@@ -500,6 +501,7 @@ fn build_channel_states(
         let modulator = if let Some(dsd_cfg) = target_dsd {
             let mut m = Modulator::new(
                 dsd_cfg.modulator_order,
+                dsd_cfg.modulator_ntf,
                 dsd_cfg.bit_rate,
                 dsd_cfg.dither,
                 dsd_cfg.overload_policy,
@@ -1380,9 +1382,14 @@ mod tests {
                         stages,
                         subtile_frames,
                     );
-                    let mut expected_mod =
-                        Modulator::new(order, DsdBitRateHz::DSD512, DitherType::Tpdf, policy)
-                            .unwrap();
+                    let mut expected_mod = Modulator::new(
+                        order,
+                        ModulatorNtf::Reference,
+                        DsdBitRateHz::DSD512,
+                        DitherType::Tpdf,
+                        policy,
+                    )
+                    .unwrap();
                     let mut actual_mod = expected_mod.clone();
                     let mut expected_pcm = vec![0.0; 97 * mult];
                     let mut actual_pcm = expected_pcm.clone();
@@ -1479,6 +1486,7 @@ mod tests {
         let dsd_cfg = TargetDsdConfig {
             bit_rate: BIT_RATE,
             modulator_order: 5,
+            modulator_ntf: ModulatorNtf::Reference,
             dither: DitherType::Tpdf,
             overload_policy: OverloadPolicy::MuteRecover,
             seed_base: 12345,
@@ -1502,6 +1510,7 @@ mod tests {
             HalfBandCascade::new(FilterPhase::Linear, Apodization::Off, STAGES, FRAMES);
         let mut seq_mod_l = Modulator::new(
             dsd_cfg.modulator_order,
+            dsd_cfg.modulator_ntf,
             BIT_RATE,
             dsd_cfg.dither,
             dsd_cfg.overload_policy,
@@ -1510,6 +1519,7 @@ mod tests {
         seq_mod_l.set_dither_seed(12345);
         let mut seq_mod_r = Modulator::new(
             dsd_cfg.modulator_order,
+            dsd_cfg.modulator_ntf,
             BIT_RATE,
             dsd_cfg.dither,
             dsd_cfg.overload_policy,
@@ -1582,6 +1592,7 @@ mod tests {
         let dsd_cfg = TargetDsdConfig {
             bit_rate: BIT_RATE,
             modulator_order: 7,
+            modulator_ntf: ModulatorNtf::Reference,
             dither: DitherType::Tpdf,
             overload_policy: OverloadPolicy::MuteRecover,
             seed_base: 98765,
@@ -1604,6 +1615,7 @@ mod tests {
             HalfBandCascade::new(FilterPhase::Linear, Apodization::Off, STAGES, FRAMES);
         let mut seq_mod_l = Modulator::new(
             dsd_cfg.modulator_order,
+            dsd_cfg.modulator_ntf,
             BIT_RATE,
             dsd_cfg.dither,
             dsd_cfg.overload_policy,
@@ -1612,6 +1624,7 @@ mod tests {
         seq_mod_l.set_dither_seed(98765);
         let mut seq_mod_r = Modulator::new(
             dsd_cfg.modulator_order,
+            dsd_cfg.modulator_ntf,
             BIT_RATE,
             dsd_cfg.dither,
             dsd_cfg.overload_policy,

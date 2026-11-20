@@ -17,20 +17,25 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
-from dsm_analysis import FLOOR_MARGIN_DB, analysis_floor_snr_db
-
-from .analysis import SPUR_LOCAL_BINS, analyze_components, spur_prominence_noise_db
-from .common import (
+from dsm_analysis import (
     AUDIBILITY_DR_A_DB,
     AUDIBILITY_SPUR_DBFS,
+    FLOOR_MARGIN_DB,
+    SPUR_LOCAL_BINS,
+    TRANSPARENCY_NOISE_DBFS,
+    TRANSPARENCY_SPUR_DBFS,
+    analysis_floor_snr_db,
+    analyze_components,
+    spur_prominence_noise_db,
+)
+
+from .common import (
     CHAIN_FLATNESS_DB,
     DIRECT_RATES,
     N_SAMPLES,
     ORDERS,
     TIER_EXCEPTIONS,
     TMP_DIR,
-    TRANSPARENCY_NOISE_DBFS,
-    TRANSPARENCY_SPUR_DBFS,
     Section,
     quality_tier,
     run_harness,

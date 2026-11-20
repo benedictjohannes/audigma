@@ -8,7 +8,9 @@ at most 0.01 dB. Method check: compiled banks must equal `design_src.py`.
 
 import numpy as np
 
-from .common import FILTER_PASSBAND_DEV_DB, TRANSPARENCY_SPUR_DBFS, Section, run_harness
+from dsm_analysis import TRANSPARENCY_SPUR_DBFS
+
+from .common import FILTER_PASSBAND_DEV_DB, Section, run_harness
 from .linear import load_f64, tone_metrics
 
 try:

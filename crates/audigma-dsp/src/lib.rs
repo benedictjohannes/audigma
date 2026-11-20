@@ -17,13 +17,13 @@ pub mod volume;
 pub use tables::{
     CrfbCoefficients, CrfbCoefficients5, CrfbCoefficients7, HALFBAND_MAX_STAGES, HalfBandTaps,
     SRC_ASRC_PHASES, SRC_CUTOFF, SRC_KAISER_BETA, SRC_PASS_EDGE, SRC_STOP_EDGE, SRC_TAPS_UNITY,
-    get_crfb_coefficients, get_crfb5_coefficients, get_crfb7_coefficients,
-    get_halfband_minimum_taps, get_halfband_odd_taps, get_interpolation_stage_filter,
+    get_crfb5_coefficients, get_crfb7_coefficients, get_halfband_minimum_taps,
+    get_halfband_odd_taps, get_interpolation_stage_filter,
 };
 
 pub use config::{
-    Apodization, DitherType, DspConfiguration, FilterPhase, OverloadPolicy, SampleFormat,
-    StreamSpec, TargetFormat, TargetRateSpec,
+    Apodization, DitherType, DspConfiguration, FilterPhase, ModulatorNtf, OverloadPolicy,
+    SampleFormat, StreamSpec, TargetFormat, TargetRateSpec,
 };
 pub use dc_blocker::{DC_BLOCKER_CORNER_HZ, DcBlocker};
 pub use defaults::{

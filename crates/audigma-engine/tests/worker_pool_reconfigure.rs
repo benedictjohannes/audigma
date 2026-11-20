@@ -1,7 +1,7 @@
 //! A persistent `ChannelWorkerPool` reconfigured for a new rate must keep its
 //! worker threads and produce output identical to a freshly built pool.
 
-use audigma_dsp::config::{Apodization, DitherType, FilterPhase, OverloadPolicy};
+use audigma_dsp::config::{Apodization, DitherType, FilterPhase, ModulatorNtf, OverloadPolicy};
 use audigma_dsp::rates::DsdBitRateHz;
 use audigma_engine::worker::{ChannelWorkerPool, TargetDsdConfig};
 use std::sync::Arc;
@@ -21,6 +21,7 @@ fn dsd_cfg(rate: DsdBitRateHz) -> TargetDsdConfig {
     TargetDsdConfig {
         bit_rate: rate,
         modulator_order: 5,
+        modulator_ntf: ModulatorNtf::Reference,
         dither: DitherType::Tpdf,
         overload_policy: OverloadPolicy::MuteRecover,
         seed_base: 7,

@@ -195,6 +195,51 @@ pub enum OverloadPolicy {
     Error,
 }
 
+/// Modulator noise-transfer-function preset (`Design.md §4.3`): which precomputed design (out-of-band gain
+/// $H_\infty$, hence input limit `L`) a modulator order and DSD rate uses. TOML: `[resampler] modulator_ntf`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum ModulatorNtf {
+    /// Highest input limit that still meets the quality anchors of `Design.md §8.6`.
+    #[default]
+    #[serde(rename = "reference")]
+    Reference,
+    /// Highest input limit that still meets the first anchor only.
+    #[serde(rename = "comfortable")]
+    Comfortable,
+    /// Fixed $H_\infty = 1.40$.
+    #[serde(rename = "fixed_h_inf_1_4")]
+    FixedHInf14,
+    /// Fixed $H_\infty = 1.50$.
+    #[serde(rename = "fixed_h_inf_1_5")]
+    FixedHInf15,
+}
+
+impl ModulatorNtf {
+    /// Every preset, default first.
+    pub const ALL: [Self; 4] = [
+        Self::Reference,
+        Self::Comfortable,
+        Self::FixedHInf14,
+        Self::FixedHInf15,
+    ];
+
+    /// The TOML name (`"reference"`, `"comfortable"`, `"fixed_h_inf_1_4"`, `"fixed_h_inf_1_5"`).
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Reference => "reference",
+            Self::Comfortable => "comfortable",
+            Self::FixedHInf14 => "fixed_h_inf_1_4",
+            Self::FixedHInf15 => "fixed_h_inf_1_5",
+        }
+    }
+
+    /// Resolves a TOML name.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.name() == name)
+    }
+}
+
 /// Resolved target rate for a prepared DSP pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TargetRateSpec {
@@ -221,6 +266,7 @@ pub struct DspConfiguration {
     pub phase: FilterPhase,
     pub apodization: Apodization,
     pub modulator_order: u8,
+    pub modulator_ntf: ModulatorNtf,
     pub preamp_db: f64,
     pub user_volume_db: f64,
     pub profile_headroom_db: f64,
@@ -247,6 +293,7 @@ impl DspConfiguration {
             phase,
             apodization,
             modulator_order: crate::defaults::DEFAULT_MODULATOR_ORDER,
+            modulator_ntf: ModulatorNtf::Reference,
             preamp_db,
             user_volume_db,
             profile_headroom_db: 0.0,
@@ -265,7 +312,11 @@ impl DspConfiguration {
         bit_rate: DsdBitRateHz,
         safety_margin_db: f64,
     ) -> Result<(), crate::modulator::ModulatorError> {
-        let limit = crate::modulator::max_stable_input_dbfs(self.modulator_order, bit_rate)?;
+        let limit = crate::modulator::max_stable_input_dbfs(
+            self.modulator_order,
+            bit_rate,
+            self.modulator_ntf,
+        )?;
         self.max_stable_input_dbfs = limit;
         self.safety_margin_db = safety_margin_db;
         self.profile_headroom_db = limit - safety_margin_db;
@@ -355,7 +406,8 @@ mod tests {
 
         cfg.apply_modulator_limits(DsdBitRateHz::DSD64, 0.25)
             .unwrap();
-        let l = crate::modulator::max_stable_input_dbfs(5, DsdBitRateHz::DSD64).unwrap();
+        let l = crate::modulator::max_stable_input_dbfs(5, DsdBitRateHz::DSD64, cfg.modulator_ntf)
+            .unwrap();
         let m = cfg.safety_margin_db;
         assert_eq!(cfg.max_stable_input_dbfs, l);
         assert!((cfg.total_configured_gain_db() - (l - m)).abs() < 1e-12);
@@ -384,11 +436,19 @@ mod tests {
             DsdBitRateHz::DSD256_48,
         ] {
             for order in [5u8, 7] {
-                cfg.modulator_order = order;
-                cfg.apply_modulator_limits(rate, 0.25).unwrap();
-                let l = crate::modulator::max_stable_input_dbfs(order, rate).unwrap();
-                assert_eq!(cfg.max_stable_input_dbfs, l);
-                assert!(l < -3.0 && l > -6.0, "implausible limit {l} dBFS");
+                for ntf in [
+                    ModulatorNtf::Reference,
+                    ModulatorNtf::Comfortable,
+                    ModulatorNtf::FixedHInf14,
+                    ModulatorNtf::FixedHInf15,
+                ] {
+                    cfg.modulator_order = order;
+                    cfg.modulator_ntf = ntf;
+                    cfg.apply_modulator_limits(rate, 0.25).unwrap();
+                    let l = crate::modulator::max_stable_input_dbfs(order, rate, ntf).unwrap();
+                    assert_eq!(cfg.max_stable_input_dbfs, l);
+                    assert!(l < -1.0 && l > -8.0, "implausible limit {l} dBFS");
+                }
             }
         }
         cfg.modulator_order = 6;

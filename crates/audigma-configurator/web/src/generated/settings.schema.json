@@ -373,6 +373,15 @@
       },
       "additionalProperties": false
     },
+    "ModulatorNtf": {
+      "type": "string",
+      "enum": [
+        "reference",
+        "comfortable",
+        "fixed_h_inf_1_4",
+        "fixed_h_inf_1_5"
+      ]
+    },
     "OfflineConfig": {
       "type": "object",
       "properties": {
@@ -592,6 +601,10 @@
           ],
           "format": "uint32",
           "minimum": 0
+        },
+        "modulator_ntf": {
+          "$ref": "#/$defs/ModulatorNtf",
+          "default": "reference"
         },
         "modulator_order": {
           "type": "integer",

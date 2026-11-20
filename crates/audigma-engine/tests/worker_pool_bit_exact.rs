@@ -2,7 +2,7 @@
 //! and persistent real-time ChannelWorkerPool DSP execution (`Design.md §3.4`).
 
 use audigma_dsp::DcBlocker;
-use audigma_dsp::config::{Apodization, DitherType, FilterPhase, OverloadPolicy};
+use audigma_dsp::config::{Apodization, DitherType, FilterPhase, ModulatorNtf, OverloadPolicy};
 use audigma_dsp::fir::HalfBandCascade;
 use audigma_dsp::modulator::Modulator;
 use audigma_dsp::rates::DsdBitRateHz;
@@ -72,6 +72,7 @@ fn test_dsd_subtiles_partial_tiles_modes_and_reset() {
                 let config = TargetDsdConfig {
                     bit_rate: rate,
                     modulator_order: order,
+                    modulator_ntf: ModulatorNtf::Reference,
                     dither,
                     overload_policy: OverloadPolicy::MuteRecover,
                     seed_base: 424242,
@@ -80,8 +81,14 @@ fn test_dsd_subtiles_partial_tiles_modes_and_reset() {
                     ChannelWorkerPool::new(1, phase, apodization, 9, 512, Some(config), None)
                         .unwrap();
                 let mut cascade = HalfBandCascade::new(phase, apodization, 9, 512);
-                let mut modulator =
-                    Modulator::new(order, rate, dither, OverloadPolicy::MuteRecover).unwrap();
+                let mut modulator = Modulator::new(
+                    order,
+                    ModulatorNtf::Reference,
+                    rate,
+                    dither,
+                    OverloadPolicy::MuteRecover,
+                )
+                .unwrap();
                 modulator.set_dither_seed(424242);
                 // DSD-configured pools remove DC ahead of the cascade.
                 let mut blocker = DcBlocker::production(rate.get() as f64 / 512.0);
@@ -231,6 +238,7 @@ fn verify_stereo_dsd_bit_exact(
     let dsd_cfg = TargetDsdConfig {
         bit_rate,
         modulator_order: order,
+        modulator_ntf: ModulatorNtf::Reference,
         dither: DitherType::Tpdf,
         overload_policy: OverloadPolicy::MuteRecover,
         seed_base: SEED_BASE,
@@ -251,11 +259,23 @@ fn verify_stereo_dsd_bit_exact(
         HalfBandCascade::new(FilterPhase::Linear, Apodization::Off, stages, FRAMES);
     let mut seq_cascade_r =
         HalfBandCascade::new(FilterPhase::Linear, Apodization::Off, stages, FRAMES);
-    let mut seq_mod_l =
-        Modulator::new(order, bit_rate, dsd_cfg.dither, dsd_cfg.overload_policy).unwrap();
+    let mut seq_mod_l = Modulator::new(
+        order,
+        ModulatorNtf::Reference,
+        bit_rate,
+        dsd_cfg.dither,
+        dsd_cfg.overload_policy,
+    )
+    .unwrap();
     seq_mod_l.set_dither_seed(SEED_BASE);
-    let mut seq_mod_r =
-        Modulator::new(order, bit_rate, dsd_cfg.dither, dsd_cfg.overload_policy).unwrap();
+    let mut seq_mod_r = Modulator::new(
+        order,
+        ModulatorNtf::Reference,
+        bit_rate,
+        dsd_cfg.dither,
+        dsd_cfg.overload_policy,
+    )
+    .unwrap();
     seq_mod_r.set_dither_seed(SEED_BASE.wrapping_add(1));
     let baseband_hz = bit_rate.get() as f64 / (1usize << stages) as f64;
     let mut seq_dc_l = DcBlocker::production(baseband_hz);

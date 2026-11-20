@@ -10,7 +10,7 @@
 //! - Overload protection (`OverloadPolicy::MuteRecover` and `OverloadPolicy::Error`),
 //!   resetting integrators and substituting balanced DSD idle (`0x69`) upon instability.
 
-use crate::config::{DitherType, OverloadPolicy};
+use crate::config::{DitherType, ModulatorNtf, OverloadPolicy};
 use crate::defaults::{DSD_IDLE_BYTE, DSD_IDLE_U32_BE};
 use crate::rates::DsdBitRateHz;
 use crate::tables::{CrfbCoefficients5, CrfbCoefficients7};
@@ -581,16 +581,21 @@ pub enum Modulator {
     Order7(CrfbModulator7),
 }
 
-/// Measured maximum stable input `L` (dBFS) of the modulator for `order` at `bit_rate` (`Design.md §4.3-§4.4`).
+/// Measured maximum stable input `L` (dBFS) of the modulator for `order` at `bit_rate` and NTF preset `ntf`
+/// (`Design.md §4.3-§4.4`).
 ///
-/// Generated per rate and order by `tools/design/design_crfb.py` (DC + tone level sweep); the headroom
-/// inequality subtracts the safety margin `M` from it.
-pub fn max_stable_input_dbfs(order: u8, bit_rate: DsdBitRateHz) -> Result<f64, ModulatorError> {
+/// Measured per design by `tools/design/design_crfb.py` and stored in `tools/design/crfb_designs.json`
+/// (DC + tone level sweep); the headroom inequality subtracts the safety margin `M` from it.
+pub fn max_stable_input_dbfs(
+    order: u8,
+    bit_rate: DsdBitRateHz,
+    ntf: ModulatorNtf,
+) -> Result<f64, ModulatorError> {
     match order {
-        5 => crate::tables::get_crfb5_coefficients(bit_rate)
+        5 => crate::tables::get_crfb5_coefficients(bit_rate, ntf)
             .map(|c| c.max_stable_input_dbfs)
             .ok_or(ModulatorError::UnsupportedRate { bit_rate, order }),
-        7 => crate::tables::get_crfb7_coefficients(bit_rate)
+        7 => crate::tables::get_crfb7_coefficients(bit_rate, ntf)
             .map(|c| c.max_stable_input_dbfs)
             .ok_or(ModulatorError::UnsupportedRate { bit_rate, order }),
         other => Err(ModulatorError::UnsupportedOrder(other)),
@@ -598,16 +603,17 @@ pub fn max_stable_input_dbfs(order: u8, bit_rate: DsdBitRateHz) -> Result<f64, M
 }
 
 impl Modulator {
-    /// Creates a new modulator for the given order, target bit rate, dither, and overload policy.
+    /// Creates a new modulator for the given order, NTF preset, target bit rate, dither, and overload policy.
     pub fn new(
         order: u8,
+        ntf: ModulatorNtf,
         bit_rate: DsdBitRateHz,
         dither_type: DitherType,
         overload_policy: OverloadPolicy,
     ) -> Result<Self, ModulatorError> {
         match order {
             5 => {
-                let coeffs = crate::tables::get_crfb5_coefficients(bit_rate)
+                let coeffs = crate::tables::get_crfb5_coefficients(bit_rate, ntf)
                     .ok_or(ModulatorError::UnsupportedRate { bit_rate, order: 5 })?;
                 Ok(Self::Order5(CrfbModulator5::new(
                     *coeffs,
@@ -616,7 +622,7 @@ impl Modulator {
                 )))
             }
             7 => {
-                let coeffs = crate::tables::get_crfb7_coefficients(bit_rate)
+                let coeffs = crate::tables::get_crfb7_coefficients(bit_rate, ntf)
                     .ok_or(ModulatorError::UnsupportedRate { bit_rate, order: 7 })?;
                 Ok(Self::Order7(CrfbModulator7::new(
                     *coeffs,
@@ -726,7 +732,7 @@ impl Modulator {
 mod tests {
     use super::*;
     use crate::rates::DsdBitRateHz;
-    use crate::tables::{get_crfb_coefficients, get_crfb7_coefficients};
+    use crate::tables::{get_crfb5_coefficients, get_crfb7_coefficients};
 
     fn check_core_overload_detection<C: CrfbCore>(coeffs: C::Coeffs) {
         let values = [
@@ -765,10 +771,10 @@ mod tests {
     #[test]
     fn test_overload_reduction_rejects_nonfinite_states() {
         check_core_overload_detection::<CrfbCore5>(
-            *get_crfb_coefficients(DsdBitRateHz::DSD512).unwrap(),
+            *get_crfb5_coefficients(DsdBitRateHz::DSD512, ModulatorNtf::Reference).unwrap(),
         );
         check_core_overload_detection::<CrfbCore7>(
-            *get_crfb7_coefficients(DsdBitRateHz::DSD512).unwrap(),
+            *get_crfb7_coefficients(DsdBitRateHz::DSD512, ModulatorNtf::Reference).unwrap(),
         );
     }
 
@@ -777,6 +783,7 @@ mod tests {
         for order in [5, 7] {
             let mut error = Modulator::new(
                 order,
+                ModulatorNtf::Reference,
                 DsdBitRateHz::DSD512,
                 DitherType::Tpdf,
                 OverloadPolicy::Error,
@@ -791,6 +798,7 @@ mod tests {
 
             let mut recover = Modulator::new(
                 order,
+                ModulatorNtf::Reference,
                 DsdBitRateHz::DSD512,
                 DitherType::Tpdf,
                 OverloadPolicy::MuteRecover,
@@ -808,7 +816,7 @@ mod tests {
 
     #[test]
     fn test_modulator_silence_stability_order5() {
-        let coeffs = *get_crfb_coefficients(DsdBitRateHz::DSD64).unwrap();
+        let coeffs = *get_crfb5_coefficients(DsdBitRateHz::DSD64, ModulatorNtf::Reference).unwrap();
         let mut mod_loop =
             CrfbModulator::new(coeffs, DitherType::Tpdf, OverloadPolicy::MuteRecover);
 
@@ -836,7 +844,8 @@ mod tests {
 
     #[test]
     fn test_modulator_silence_stability_order7() {
-        let coeffs = *get_crfb7_coefficients(DsdBitRateHz::DSD128).unwrap();
+        let coeffs =
+            *get_crfb7_coefficients(DsdBitRateHz::DSD128, ModulatorNtf::Reference).unwrap();
         let mut mod_loop =
             CrfbModulator7::new(coeffs, DitherType::Tpdf, OverloadPolicy::MuteRecover);
 
@@ -865,7 +874,8 @@ mod tests {
 
     #[test]
     fn test_modulator_tone_within_headroom_order5() {
-        let coeffs = *get_crfb_coefficients(DsdBitRateHz::DSD128).unwrap();
+        let coeffs =
+            *get_crfb5_coefficients(DsdBitRateHz::DSD128, ModulatorNtf::Reference).unwrap();
         let mut mod_loop = CrfbModulator::new(coeffs, DitherType::Tpdf, OverloadPolicy::Error);
 
         let f_bit = 5_644_800.0;
@@ -885,7 +895,8 @@ mod tests {
 
     #[test]
     fn test_modulator_tone_within_headroom_order7() {
-        let coeffs = *get_crfb7_coefficients(DsdBitRateHz::DSD128).unwrap();
+        let coeffs =
+            *get_crfb7_coefficients(DsdBitRateHz::DSD128, ModulatorNtf::Reference).unwrap();
         let mut mod_loop = CrfbModulator7::new(coeffs, DitherType::Tpdf, OverloadPolicy::Error);
 
         let f_bit = 5_644_800.0;
@@ -905,7 +916,8 @@ mod tests {
 
     #[test]
     fn test_modulator_tone_within_headroom_dsd512_order5() {
-        let coeffs = *get_crfb_coefficients(DsdBitRateHz::DSD512).unwrap();
+        let coeffs =
+            *get_crfb5_coefficients(DsdBitRateHz::DSD512, ModulatorNtf::Reference).unwrap();
         let mut mod_loop = CrfbModulator::new(coeffs, DitherType::Tpdf, OverloadPolicy::Error);
 
         let f_bit = 22_579_200.0;
@@ -925,7 +937,8 @@ mod tests {
 
     #[test]
     fn test_modulator_tone_within_headroom_dsd512_order7() {
-        let coeffs = *get_crfb7_coefficients(DsdBitRateHz::DSD512).unwrap();
+        let coeffs =
+            *get_crfb7_coefficients(DsdBitRateHz::DSD512, ModulatorNtf::Reference).unwrap();
         let mut mod_loop = CrfbModulator7::new(coeffs, DitherType::Tpdf, OverloadPolicy::Error);
 
         let f_bit = 22_579_200.0;
@@ -945,7 +958,7 @@ mod tests {
 
     #[test]
     fn test_modulator_overload_and_recovery_order5() {
-        let coeffs = *get_crfb_coefficients(DsdBitRateHz::DSD64).unwrap();
+        let coeffs = *get_crfb5_coefficients(DsdBitRateHz::DSD64, ModulatorNtf::Reference).unwrap();
         let mut mod_err = CrfbModulator::new(coeffs, DitherType::None, OverloadPolicy::Error);
 
         let overload_signal = [5.0; 32];
@@ -966,7 +979,8 @@ mod tests {
 
     #[test]
     fn test_modulator_overload_and_recovery_order7() {
-        let coeffs = *get_crfb7_coefficients(DsdBitRateHz::DSD128).unwrap();
+        let coeffs =
+            *get_crfb7_coefficients(DsdBitRateHz::DSD128, ModulatorNtf::Reference).unwrap();
         let mut mod_err = CrfbModulator7::new(coeffs, DitherType::None, OverloadPolicy::Error);
 
         let overload_signal = [5.0; 4096];
@@ -991,6 +1005,7 @@ mod tests {
     fn test_modulator_enum_dispatch() {
         let mod5 = Modulator::new(
             5,
+            ModulatorNtf::Reference,
             DsdBitRateHz::DSD64,
             DitherType::Tpdf,
             OverloadPolicy::MuteRecover,
@@ -1001,6 +1016,7 @@ mod tests {
 
         let mod7 = Modulator::new(
             7,
+            ModulatorNtf::Reference,
             DsdBitRateHz::DSD128,
             DitherType::Tpdf,
             OverloadPolicy::MuteRecover,
@@ -1011,6 +1027,7 @@ mod tests {
 
         let mod5_512 = Modulator::new(
             5,
+            ModulatorNtf::Reference,
             DsdBitRateHz::DSD512,
             DitherType::Tpdf,
             OverloadPolicy::MuteRecover,
@@ -1021,6 +1038,7 @@ mod tests {
 
         let mod7_512 = Modulator::new(
             7,
+            ModulatorNtf::Reference,
             DsdBitRateHz::DSD512,
             DitherType::Tpdf,
             OverloadPolicy::MuteRecover,
@@ -1031,6 +1049,7 @@ mod tests {
 
         let mod5_512_48 = Modulator::new(
             5,
+            ModulatorNtf::Reference,
             DsdBitRateHz::DSD512_48,
             DitherType::Tpdf,
             OverloadPolicy::MuteRecover,
@@ -1041,6 +1060,7 @@ mod tests {
 
         let mod7_512_48 = Modulator::new(
             7,
+            ModulatorNtf::Reference,
             DsdBitRateHz::DSD512_48,
             DitherType::Tpdf,
             OverloadPolicy::MuteRecover,
@@ -1051,6 +1071,7 @@ mod tests {
 
         let mod_bad = Modulator::new(
             6,
+            ModulatorNtf::Reference,
             DsdBitRateHz::DSD128,
             DitherType::Tpdf,
             OverloadPolicy::MuteRecover,

@@ -1,7 +1,7 @@
 //! Worker count is decoupled from channel count: channels map round-robin onto workers
 //! (`channel % workers`) and the output is identical to one worker per channel.
 
-use audigma_dsp::config::{Apodization, DitherType, FilterPhase, OverloadPolicy};
+use audigma_dsp::config::{Apodization, DitherType, FilterPhase, ModulatorNtf, OverloadPolicy};
 use audigma_dsp::rates::DsdBitRateHz;
 use audigma_engine::timing::{MaxSlot, TimingTracker};
 use audigma_engine::worker::{ChannelWorkerPool, TargetDsdConfig};
@@ -16,6 +16,7 @@ fn dsd_cfg() -> TargetDsdConfig {
     TargetDsdConfig {
         bit_rate: DsdBitRateHz::DSD64,
         modulator_order: 5,
+        modulator_ntf: ModulatorNtf::Reference,
         dither: DitherType::Tpdf,
         overload_policy: OverloadPolicy::MuteRecover,
         seed_base: 11,

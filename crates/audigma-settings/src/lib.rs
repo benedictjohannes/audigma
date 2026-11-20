@@ -2,8 +2,8 @@
 //! pipeline resolution, and architectural invariant validation (`Design.md §6`).
 
 use audigma_dsp::{
-    Apodization, DitherType, DsdMultiplier, DspConfiguration, FilterPhase, OverloadPolicy,
-    PcmRateHz, RateFamily, SampleFormat, StreamSpec, TargetFormat, TargetRateSpec,
+    Apodization, DitherType, DsdMultiplier, DspConfiguration, FilterPhase, ModulatorNtf,
+    OverloadPolicy, PcmRateHz, RateFamily, SampleFormat, StreamSpec, TargetFormat, TargetRateSpec,
 };
 use audigma_format::{DopContainerFormat, DsfPadMode};
 use serde::{Deserialize, Serialize};
@@ -698,6 +698,9 @@ pub struct ResamplerConfig {
     pub apodization: Apodization,
     #[serde(default = "default_modulator_order")]
     pub modulator_order: u8,
+    /// Noise-transfer-function preset of the modulator (`Design.md §4.3`).
+    #[serde(default)]
+    pub modulator_ntf: ModulatorNtf,
     /// Input-side drift correction against the output clock (`Design.md §1.5`).
     #[serde(default)]
     pub drift_correction: DriftCorrection,
@@ -723,6 +726,7 @@ impl Default for ResamplerConfig {
             phase: FilterPhase::Linear,
             apodization: Apodization::Off,
             modulator_order: 5,
+            modulator_ntf: ModulatorNtf::Reference,
             drift_correction: DriftCorrection::Auto,
             max_clock_drift_ppm: None,
         }
@@ -1619,6 +1623,7 @@ impl Settings {
         }
         dsp_config.dither_tpdf_seed = target.dither_tpdf_seed;
         dsp_config.modulator_order = resampler.modulator_order;
+        dsp_config.modulator_ntf = resampler.modulator_ntf;
         // The input limit and headroom belong to the selected modulator (order and bit rate). PCM output
         // has no modulator, so only full scale limits it (the default: no headroom, L = 0 dBFS).
         if let TargetRateSpec::Dsd { bit_rate } = target_spec {
@@ -2037,6 +2042,32 @@ modulator_order = 7
             .explain_for_input_rate(PcmRateHz::PCM_44100)
             .unwrap();
         assert_eq!(plan.dsp_config.modulator_order, 7);
+    }
+
+    #[test]
+    fn test_modulator_ntf_toml_propagation_and_limit() {
+        let toml = |ntf: &str| {
+            format!(
+                "schema_version = 1\n\n[output]\nbackend = \"alsa\"\ndevice = \"hw:0,0\"\n\n[target]\nformat = \"dsd\"\ndsd_rate = \"dsd256\"\n\n[resampler]\n{ntf}\n"
+            )
+        };
+        let plan_for = |ntf: &str| {
+            Settings::from_toml_str(&toml(ntf))
+                .unwrap()
+                .explain_for_input_rate(PcmRateHz::PCM_44100)
+                .unwrap()
+                .dsp_config
+        };
+        let default = plan_for("");
+        assert_eq!(default.modulator_ntf, ModulatorNtf::Reference);
+        let fixed = plan_for("modulator_ntf = \"fixed_h_inf_1_5\"");
+        assert_eq!(fixed.modulator_ntf, ModulatorNtf::FixedHInf15);
+        // The preset selects the design, hence the input limit the headroom is derived from.
+        assert!(default.max_stable_input_dbfs > fixed.max_stable_input_dbfs);
+        assert!(
+            Settings::from_toml_str(&toml("modulator_ntf = \"loud\"")).is_err(),
+            "unknown preset must be rejected"
+        );
     }
 
     fn margin_toml(extra: &str) -> String {

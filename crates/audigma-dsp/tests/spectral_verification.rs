@@ -4,7 +4,7 @@ use std::f64::consts::PI;
 
 use audigma_dsp::{
     Apodization, CrfbModulator, CrfbModulator7, DitherType, DsdBitRateHz, FilterPhase,
-    HalfBandCascade, Modulator, OverloadPolicy, ScopedFtzDaz, get_crfb_coefficients,
+    HalfBandCascade, Modulator, ModulatorNtf, OverloadPolicy, ScopedFtzDaz, get_crfb5_coefficients,
     get_crfb7_coefficients,
 };
 
@@ -23,7 +23,7 @@ fn test_all_rates_silence_stability() {
     ];
 
     for rate in rates {
-        let coeffs = *get_crfb_coefficients(rate)
+        let coeffs = *get_crfb5_coefficients(rate, ModulatorNtf::Reference)
             .unwrap_or_else(|| panic!("Missing coefficients for rate {:?}", rate));
         let mut modulator =
             CrfbModulator::new(coeffs, DitherType::Tpdf, OverloadPolicy::MuteRecover);
@@ -78,7 +78,7 @@ fn test_all_rates_dc_bias_stability() {
     ];
 
     for rate in rates {
-        let coeffs = *get_crfb_coefficients(rate).unwrap();
+        let coeffs = *get_crfb5_coefficients(rate, ModulatorNtf::Reference).unwrap();
         let mut modulator =
             CrfbModulator::new(coeffs, DitherType::Tpdf, OverloadPolicy::MuteRecover);
 
@@ -107,7 +107,7 @@ fn test_all_rates_dc_bias_stability() {
 #[test]
 fn test_overload_policy_recovery() {
     let _ftz = ScopedFtzDaz::new();
-    let coeffs = *get_crfb_coefficients(DsdBitRateHz::DSD64).unwrap();
+    let coeffs = *get_crfb5_coefficients(DsdBitRateHz::DSD64, ModulatorNtf::Reference).unwrap();
 
     // Error policy
     let mut mod_err = CrfbModulator::new(coeffs, DitherType::None, OverloadPolicy::Error);
@@ -140,7 +140,8 @@ fn test_cascade_and_modulator_end_to_end_filters() {
     for phase in [FilterPhase::Linear, FilterPhase::Minimum] {
         for apodization in Apodization::ALL {
             let mut cascade = HalfBandCascade::new(phase, apodization, 6, 64); // 64x to DSD64
-            let coeffs = *get_crfb_coefficients(DsdBitRateHz::DSD64).unwrap();
+            let coeffs =
+                *get_crfb5_coefficients(DsdBitRateHz::DSD64, ModulatorNtf::Reference).unwrap();
             let mut modulator =
                 CrfbModulator::new(coeffs, DitherType::Tpdf, OverloadPolicy::MuteRecover);
 
@@ -188,7 +189,7 @@ fn test_all_rates_silence_stability_order7() {
     ];
 
     for rate in rates {
-        let coeffs = *get_crfb7_coefficients(rate)
+        let coeffs = *get_crfb7_coefficients(rate, ModulatorNtf::Reference)
             .unwrap_or_else(|| panic!("Missing 7th-order coefficients for rate {:?}", rate));
         let mut modulator =
             CrfbModulator7::new(coeffs, DitherType::Tpdf, OverloadPolicy::MuteRecover);
@@ -236,6 +237,7 @@ fn test_cascade_and_modulator7_end_to_end_phases() {
         let mut cascade = HalfBandCascade::new(phase, Apodization::Off, 7, 64);
         let mut modulator = Modulator::new(
             7,
+            ModulatorNtf::Reference,
             DsdBitRateHz::DSD128,
             DitherType::Tpdf,
             OverloadPolicy::MuteRecover,
@@ -279,6 +281,7 @@ fn test_cascade_and_modulator_dsd512_end_to_end() {
         let mut cascade = HalfBandCascade::new(FilterPhase::Linear, Apodization::Off, 9, 64);
         let mut modulator = Modulator::new(
             order,
+            ModulatorNtf::Reference,
             DsdBitRateHz::DSD512,
             DitherType::Tpdf,
             OverloadPolicy::MuteRecover,

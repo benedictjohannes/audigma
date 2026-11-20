@@ -11,8 +11,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use audigma_dsp::{
-    Apodization, DitherType, DsdBitRateHz, FilterPhase, HalfBandCascade, Modulator, OverloadPolicy,
-    ScopedFtzDaz,
+    Apodization, DitherType, DsdBitRateHz, FilterPhase, HalfBandCascade, Modulator, ModulatorNtf,
+    OverloadPolicy, ScopedFtzDaz,
 };
 use audigma_engine::worker::{ChannelWorkerPool, TargetDsdConfig};
 
@@ -157,6 +157,7 @@ fn main() {
     let config = TargetDsdConfig {
         bit_rate: rate,
         modulator_order: order,
+        modulator_ntf: ModulatorNtf::Reference,
         dither: DitherType::Tpdf,
         overload_policy: OverloadPolicy::Error,
         seed_base: 424242,
@@ -206,8 +207,14 @@ fn main() {
             .collect::<Vec<_>>();
         modulators = (0..channels)
             .map(|ch| {
-                let mut m =
-                    Modulator::new(order, rate, config.dither, config.overload_policy).unwrap();
+                let mut m = Modulator::new(
+                    order,
+                    ModulatorNtf::Reference,
+                    rate,
+                    config.dither,
+                    config.overload_policy,
+                )
+                .unwrap();
                 m.set_dither_seed(config.seed_base + ch as u64);
                 m
             })

@@ -16,7 +16,7 @@ const DEFAULT_BENCH_BLOCKS: usize = 20_000;
 
 use audigma_dsp::{
     Apodization, DC_BLOCKER_CORNER_HZ, DcBlocker, DitherType, DsdBitRateHz, FilterPhase,
-    HalfBandCascade, Modulator, OverloadPolicy, STABILITY_THRESHOLD, ScopedFtzDaz,
+    HalfBandCascade, Modulator, ModulatorNtf, OverloadPolicy, STABILITY_THRESHOLD, ScopedFtzDaz,
 };
 
 #[derive(Debug, Clone)]
@@ -24,6 +24,8 @@ struct HarnessConfig {
     mode: String,
     rate: String,
     order: u8,
+    /// `[resampler] modulator_ntf` preset (`--ntf`, default `reference`).
+    ntf: ModulatorNtf,
     phase: FilterPhase,
     apodization: Apodization,
     samples: usize,
@@ -52,6 +54,7 @@ fn parse_args() -> HarnessConfig {
         mode: "direct-sine".to_string(),
         rate: "dsd64".to_string(),
         order: 5,
+        ntf: ModulatorNtf::Reference,
         phase: FilterPhase::Linear,
         apodization: Apodization::Off,
         samples: 1_048_576,
@@ -82,6 +85,11 @@ fn parse_args() -> HarnessConfig {
             "--order" => {
                 i += 1;
                 config.order = args[i].parse().expect("Invalid order");
+            }
+            "--ntf" => {
+                i += 1;
+                config.ntf = ModulatorNtf::from_name(&args[i])
+                    .unwrap_or_else(|| panic!("Unknown modulator NTF preset: {}", args[i]));
             }
             "--phase" => {
                 i += 1;
@@ -306,6 +314,7 @@ fn main() {
 
     let mut modulator = Modulator::new(
         config.order,
+        config.ntf,
         bit_rate,
         config.dither,
         config.overload_policy,
@@ -458,7 +467,7 @@ fn run_chain(
     );
     let n_bb = (n / multiplier) as i64;
 
-    let limit_dbfs = audigma_dsp::max_stable_input_dbfs(config.order, bit_rate)
+    let limit_dbfs = audigma_dsp::max_stable_input_dbfs(config.order, bit_rate, config.ntf)
         .unwrap_or_else(|e| panic!("no input limit: {e}"));
     let gain_db = config.margin_db.map_or(0.0, |m| limit_dbfs - m);
     let gain = 10.0_f64.powf(gain_db / 20.0);
@@ -836,7 +845,7 @@ fn run_input_limit(
     f_bit_hz: u32,
 ) {
     const TILE_BITS: usize = 4096;
-    let limit = audigma_dsp::max_stable_input_dbfs(config.order, bit_rate)
+    let limit = audigma_dsp::max_stable_input_dbfs(config.order, bit_rate, config.ntf)
         .unwrap_or_else(|e| panic!("no input limit: {e}"));
     let amp = 10f64.powf(limit / 20.0);
     let mut tile = [0.0f64; TILE_BITS];

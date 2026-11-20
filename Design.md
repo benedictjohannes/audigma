@@ -198,11 +198,31 @@ decode / unpack / DSD decimation
 
 ### 4.3 1-Bit Delta-Sigma Modulator (CRFB)
 - **Topology:** `f64` 5th-order Cascade of Resonators with Feedback (**CRFB**) as the baseline modulator for `DSD64`, `DSD128`, `DSD256`, and `DSD512` (`[resampler] modulator_order = 7` optional).
-- **NTF Synthesis:** Offline Schreier-style NTF synthesis (`tools/design/`) using $\text{OSR} = f_{\text{bit}} / (2 \cdot B)$ with optimized resonator zeros in the 0–20 kHz audio band (roots of the Legendre polynomial of the loop order, which minimise integrated in-band noise), Butterworth-prototype poles tuned to $H_\infty = 1.40$ for every rate and order (1.30 buys about 1 dB of MSA for about 17 dB of in-band SNR; 1.50 lowers the MSA to about -5 dBFS), unscaled (all `c = 1`; `f64` states need no dynamic-range scaling) and verified against maximum stable input amplitude ($L\text{ dBFS}$) across DC, coherent tones, multitone bursts, and silence.
+- **NTF Synthesis:** Offline Schreier-style NTF synthesis (`tools/design/`) using $\text{OSR} = f_{\text{bit}} / (2 \cdot B)$ with optimized resonator zeros in the 0–20 kHz audio band (roots of the Legendre polynomial of the loop order, which minimise integrated in-band noise), Butterworth-prototype poles tuned to an out-of-band gain $H_\infty$ chosen per order, rate and NTF preset, unscaled (all `c = 1`; `f64` states need no dynamic-range scaling) and verified against maximum stable input amplitude ($L\text{ dBFS}$) across DC, coherent tones, multitone bursts, and silence.
+- **NTF presets (`[resampler] modulator_ntf`):** a lower $H_\infty$ gives up in-band noise shaping for a higher input limit $L$ (1.30 instead of 1.40 buys about 1 dB of $L$ for about 17 dB of in-band SNR; 1.50 lowers $L$ to about -5 dBFS). Every order, rate and preset has its own measured design:
+  - `reference` (default): over $H_\infty$ from 1.40 down to 1.10 in 0.01 steps, the designs that meet anchors 1 and 2 (§8.6) and keep $L$ at least that of $H_\infty = 1.40$; of these the highest $L$, and among designs with that $L$ (it is measured on a 0.25 dB grid) the highest $H_\infty$, which keeps the most noise shaping for no loss of $L$.
+  - `comfortable`: the same with anchor 1 only.
+  - When no design meets a preset's anchors (`reference` at DSD64), the preset uses $H_\infty = 1.40$; the shortfall is listed in §8.6. The targeted presets never use $H_\infty$ above 1.40, so they never lower $L$.
+  - `fixed_h_inf_1_4`, `fixed_h_inf_1_5`: $H_\infty$ fixed at 1.40 / 1.50, no anchor check.
+  - $L$ of every swept design is robust, not one climb: the lowest climb result (§4.3 input limit) within $\pm 0.02$ of its $H_\infty$ (neighbouring climbs differ by up to 0.5 dB, so the best single climb is biased upwards), then confirmed at that level for every input-limit stimulus with 8 further TPDF dither sequences and in every anchor record; it is lowered in 0.25 dB steps until it holds. The anchors are measured at the final $L$.
+  - The anchors are checked on the modulator alone with the production stimuli of the signal report (§8.3, dither on: the 1 kHz level sweep at the default $M$ plus 0 dBFS at $M = 0$, silence, SMPTE, CCIF), with the same reductions and analysis-floor rule. DC offsets are left out: the DC blocker (§4.1) removes them ahead of the modulator.
 - **Comparator:** the decision is the sign bit of the quantizer input $y$ (state plus dither): $v = \operatorname{copysign}(1, y)$, so $y = -0.0$ decides $-1$. The loop's floating-point operation order is fixed so the output is bit-exact with the Python design reference (§8).
 - **PCM quantizer:** one quantizer serves the live loop and the offline WAV, FLAC and raw writers. Integer targets (`s16le`, `s24le`, `s24_3le`, `s32le`) are scaled to the format's positive full scale, dithered iff `target.dither = tpdf` (peak 0.5 LSB, one stream per channel seeded from `dither_tpdf_seed`, default 12345), clamped and rounded; `s24le` words carry 24-bit codes. Float targets are written verbatim. FLAC quantizes as the format's own depth: `s16le` → 16, `s24le` and `s24_3le` → 24, `s32le` → 32 bit; float formats have no FLAC representation.
 - **Dither:** Optional TPDF dither (amplitude 0.005) injected prior to the 1-bit quantizer. Measured, it has no effect on in-band noise or spurs at that amplitude (`signal.md`); it is kept as harmless. DC idle tones are removed by the DC blocker (§4.1), not by the dither.
-- **Input Limit & Baseline Headroom:** The input limit $L$ belongs to the modulator (order and DSD rate): every coefficient table carries its measured $L$ and its $H_\infty$. $L$ is measured with DC and 50 Hz–20 kHz sines, level raised in 0.25 dB steps from -8 dBFS, $2^{21}$ samples each, without dither and with two TPDF dither sequences (production dithers), unstable when any state exceeds the overload bound (50); $L$ is one 0.25 dB guard step below the last level stable in every trial (at the edge itself stability is statistical; DC is the hardest stimulus). The modulator report runs the production modulator at exactly $L$ for the same stimuli and fails on any overload. Current values: 5th order -4.0 to -4.25 dBFS, 7th order -4.5 to -4.75 dBFS (`docs/measurements/modulator.md` lists them). For DSD targets the baseline headroom is $L - M$, so a 0 dBFS PCM peak reaches the modulator at $L - M$; `config explain` reports $L$ for the resolved target and the total attenuation (`preamp_db + volume_db + profile_headroom_db`).
+- **Input Limit & Baseline Headroom:** The input limit $L$ belongs to the modulator (order, DSD rate and NTF preset): every coefficient table carries its measured $L$ and its $H_\infty$. $L$ is measured with DC and 50 Hz–20 kHz sines, level raised in 0.25 dB steps from -6 dBFS (lowered in 0.25 dB steps instead when -6 dBFS is already unstable), $2^{21}$ samples each, without dither and with two TPDF dither sequences (production dithers), unstable when any state exceeds the overload bound (50); this climb gives one 0.25 dB guard step below the last level stable in every trial (at the edge itself stability is statistical; DC is the hardest stimulus), and the tables carry the robust $L$ derived from it (NTF presets above). The modulator report runs the production modulator at exactly $L$ for the same stimuli and fails on any overload. Current values (dBFS, `tools/design/crfb_designs.json`):
+
+  | Order | Preset | DSD64 | DSD128 | DSD256 | DSD512 | DSD64_48 | DSD128_48 | DSD256_48 | DSD512_48 |
+  |---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
+  | 5 | `reference` | -4.00 | -3.50 | -2.25 | -1.75 | -4.25 | -3.25 | -2.25 | -1.75 |
+  | 5 | `comfortable` | -4.00 | -2.25 | -1.75 | -1.75 | -4.25 | -1.75 | -1.75 | -1.75 |
+  | 5 | `fixed_h_inf_1_4` | -4.00 | -4.25 | -4.25 | -4.00 | -4.25 | -4.00 | -4.25 | -4.00 |
+  | 5 | `fixed_h_inf_1_5` | -5.75 | -5.75 | -5.75 | -6.00 | -5.75 | -5.75 | -5.75 | -5.75 |
+  | 7 | `reference` | -4.50 | -2.50 | -2.00 | -2.00 | -4.50 | -2.25 | -2.00 | -2.00 |
+  | 7 | `comfortable` | -3.00 | -2.00 | -2.00 | -2.00 | -2.75 | -2.00 | -2.00 | -2.00 |
+  | 7 | `fixed_h_inf_1_4` | -4.50 | -4.75 | -4.75 | -4.75 | -4.50 | -4.75 | -4.75 | -4.75 |
+  | 7 | `fixed_h_inf_1_5` | -6.50 | -7.00 | -7.00 | -7.25 | -6.50 | -6.75 | -7.00 | -7.00 |
+
+  For DSD targets the baseline headroom is $L - M$, so a 0 dBFS PCM peak reaches the modulator at $L - M$; `config explain` reports $L$ for the resolved target and the total attenuation (`preamp_db + volume_db + profile_headroom_db`).
 
 ### 4.4 Headroom Inequality, Two-Pass Offline Peak Analysis & Live Overload Protection
 - **Required Attenuation Equation:** Given a predicted or measured post-interpolation peak of $P\text{ dBFS}$, the selected modulator's maximum stable input limit $L\text{ dBFS}$ (§4.3, e.g. $-4.0\text{ dBFS}$ for the 5th order at DSD64), and a safety margin $M\text{ dB}$ (`[gain] dsd_safety_margin_db`: exactly `0`, `0.25` or `0.5`; default `0.25`; DSD targets only: sets the profile headroom `L - M` and the two-pass gain; PCM targets use `M = 0`; `0` is proven for the measured stimuli, not arbitrary inter-sample peaks, and overloads fall back to the overload policy), the total applied pre-modulator gain must satisfy:
@@ -411,6 +431,7 @@ dsd_safety_margin_db = 0.25   # 0 | 0.25 | 0.5
 phase = "minimum"
 apodization = "off"
 modulator_order = 5
+modulator_ntf = "reference"
 drift_correction = "auto"   # auto: correct a free-running input on ALSA output; "on": also observe (estimate only) a demand-driven input
 max_clock_drift_ppm = 500
 ```
@@ -436,6 +457,7 @@ overload_policy = "error"
 phase = "linear"
 apodization = "off"
 modulator_order = 5
+modulator_ntf = "reference"
 
 [offline]
 tail_policy = "trim-to-duration"
@@ -468,6 +490,7 @@ overload_policy = "error"
 phase = "linear"
 apodization = "off"
 modulator_order = 5
+modulator_ntf = "reference"
 ```
 
 ---
@@ -536,6 +559,7 @@ Every filter setting and modulator order is verified by automated measurements i
    - **Anchor 1, audibility:** assuming 0 dBFS reproduces at ~120 dB SPL peak, noise and every discrete product must stay below the threshold of hearing (~0 dB SPL): DR (A) (AES17, A-weighted THD+N at -60 dBFS) $\ge 120\text{ dB}$, every in-band spur $\le -120\text{ dBFS}$.
    - **Anchor 2, 24-bit transparency:** the DSP must not be the bottleneck for 24-bit sources. A TPDF-dithered 24-bit quantizer has $-141.5\text{ dBFS}$ in-band noise, so in-band noise, harmonic and IMD levels and every spur $\le -141\text{ dBFS}$ at every stimulus.
    - **Production chain tiers (`signal.md`):** tier A = DSD64 (both families), anchor 1; tier B = DSD128 and above, anchors 1 and 2. Chain flatness for tones above 10 kHz: within 0.02 dB (A) / 0.01 dB (B) of the requested level (the modulator's signal transfer function lifts 19–20 kHz by +0.011 dB (5th) / +0.015 dB (7th) at DSD64); tones up to 10 kHz within 0.01 dB (method check). **Documented exception:** DSD64 (44.1 kHz family) with the 5th-order modulator, the default order, reaches DR (A) ≈ 118 dB, about 1.6 dB short of anchor 1; it meets the spur requirement, and the 48 kHz family (≈ 122 dB) and the 7th order (≈ 137 dB) pass. The default is not changed. Anchor 2 is out of reach at DSD64 for either order (7th order in-band noise ≈ -135 dBFS).
+   - **NTF preset shortfalls (§4.3):** `reference` misses anchor 2 at DSD64 (both orders, both families) and keeps $H_\infty = 1.40$ there; `comfortable` misses anchor 1 at DSD64 (44.1 kHz family) with the 5th order (the exception above) and keeps $H_\infty = 1.40$ there. Every other order, rate and targeted preset meets its anchors on the modulator-alone check.
    - **Linear stages:** these run ahead of every target, so they are held to the stricter anchor where their errors land in band. Resampler: everything unwanted in 20 Hz–20 kHz (images, aliases, interpolation error; for an input above the output Nyquist also its alias when it lands in band) $\le -141\text{ dB}$ re the input tone, and passband deviation $\le 0.01\text{ dB}$. The margin is small and accepted: the worst case, a full-scale 20 kHz tone through a near-unity ratio (ASRC, 44.1k → 48k), puts its image at the stopband edge, where it folds back to ~20 kHz at -141.4 dB (0.4 dB margin, from the slack of the 140 dB design goal); realistic content has far less energy at 20 kHz (at -6 dBFS the error is -147 dBFS). Interpolation cascade: passband deviation $\le 0.01\text{ dB}$ with apodization `off` (apodizing settings roll off by design), and image rejection $\ge 120\text{ dB}$: its images lie above 24.1 kHz and never in band, so they are held to anchor 1 as if they were audible. The 140 dB filter target of §4.2 is a design goal above that requirement.
    - **Units:** spurs are gated in absolute dBFS (a spur's audibility does not depend on the test tone, and silence and DC offsets have no tone to refer to); THD and IMD stay ratios (dBc). Values within 10 dB of the analysis floor count as that bound.
    - **Not gated:** ultrasonic noise (no DAC or amplifier limit is assumed), modulator-only and cascade + modulator records without gain staging or dither (`modulator.md`, `cascade.md`: stability and bit-exactness only). The TPDF dither (0.005) has no measurable effect on noise or spurs but is kept as harmless.

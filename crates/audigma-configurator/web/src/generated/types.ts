@@ -81,6 +81,7 @@ export interface ResamplerConfig {
 apodization?: ("off" | "gentle" | 18000 | 18500 | 19000 | 20000)
 drift_correction?: ("off" | "auto" | "on")
 max_clock_drift_ppm?: (number | null)
+modulator_ntf?: ("reference" | "comfortable" | "fixed_h_inf_1_4" | "fixed_h_inf_1_5")
 modulator_order?: number
 phase?: ("linear" | "minimum")
 }

@@ -92,6 +92,42 @@ summary = "Higher-order noise shaping; about 10% more CPU."
 description = "In our measurements it costs about 10 percent more CPU and shows no consistent benefit at any rate."
 
 [[field]]
+key = "modulator_ntf"
+summary = "Noise-shaping design of the modulator: trades in-band noise for output level."
+description = """
+This setting only applies to DSD targets; PCM targets ignore it. A lower out-of-band gain lets the modulator accept a louder input, so the DSD stream needs less attenuation, at the cost of in-band noise shaping. Each preset is a separate design for every modulator order and DSD rate.
+
+At DSD64 the presets with quality checks find no design that meets them, so they use the same design as `fixed_h_inf_1_4`.
+"""
+default = "reference"
+show_if = { key = "target.format", eq = "dsd" }
+
+[[field.options]]
+key = "reference"
+label = "Reference"
+summary = "Loudest design that still meets the reference noise and spur targets."
+description = "The highest input level at which dynamic range stays at or above 120 dB (A-weighted), spurs stay at or below -120 dBFS, and noise, harmonic and intermodulation levels and spurs stay at or below -141 dBFS."
+
+[[field.options]]
+key = "comfortable"
+label = "Comfortable"
+summary = "Louder than Reference; only the dynamic-range and spur target is kept."
+description = "The highest input level at which dynamic range stays at or above 120 dB (A-weighted) and spurs stay at or below -120 dBFS. The stricter -141 dBFS targets of Reference are not checked."
+
+[[field.options]]
+key = "fixed_h_inf_1_4"
+label = "Fixed 1.40"
+summary = "Out-of-band gain 1.40 at every rate, no quality check."
+description = "The conservative design: out-of-band gain 1.40 at every order and rate."
+
+[[field.options]]
+key = "fixed_h_inf_1_5"
+label = "Fixed 1.50"
+summary = "Out-of-band gain 1.50 at every rate, no quality check."
+description = "Out-of-band gain 1.50 at every order and rate. Lowers the input limit by 1 to 2 dB against 1.40."
+caution = "Quieter than the other presets."
+
+[[field]]
 key = "drift_correction"
 summary = "Whether the input is resampled to follow the output clock."
 description = """

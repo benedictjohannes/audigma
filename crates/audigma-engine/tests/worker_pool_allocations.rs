@@ -4,7 +4,9 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use audigma_dsp::PcmRateHz;
-use audigma_dsp::{Apodization, DitherType, DsdBitRateHz, FilterPhase, OverloadPolicy};
+use audigma_dsp::{
+    Apodization, DitherType, DsdBitRateHz, FilterPhase, ModulatorNtf, OverloadPolicy,
+};
 use audigma_engine::lifecycle::FrameGain;
 use audigma_engine::traits::DsdDecodeConfig;
 use audigma_engine::worker::{ChannelWorkerPool, TargetDsdConfig};
@@ -56,6 +58,7 @@ fn test_dsd_subtiles_allocate_nothing_in_steady_state() {
             Some(TargetDsdConfig {
                 bit_rate: DsdBitRateHz::DSD512,
                 modulator_order: order,
+                modulator_ntf: ModulatorNtf::Reference,
                 dither: DitherType::Tpdf,
                 overload_policy: OverloadPolicy::MuteRecover,
                 seed_base: 424242,
@@ -98,6 +101,7 @@ fn check_input_dsp_allocations() {
             Some(TargetDsdConfig {
                 bit_rate: DsdBitRateHz::DSD512_48,
                 modulator_order: order,
+                modulator_ntf: ModulatorNtf::Reference,
                 dither: DitherType::Tpdf,
                 overload_policy: OverloadPolicy::MuteRecover,
                 seed_base: 424242,

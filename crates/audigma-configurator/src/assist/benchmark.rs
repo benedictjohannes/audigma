@@ -15,7 +15,7 @@
 //! is bounded (the synthetic signal is [`BenchmarkParams::seconds`] long, at several times real
 //! time), so a cancel during it takes effect when it ends.
 
-use audigma_dsp::config::{DitherType, OverloadPolicy, TargetRateSpec};
+use audigma_dsp::config::{DitherType, ModulatorNtf, OverloadPolicy, TargetRateSpec};
 use audigma_dsp::fir::HalfBandCascade;
 use audigma_dsp::modulator::Modulator;
 use audigma_dsp::rates::PcmRateHz;
@@ -206,11 +206,13 @@ fn check_cancel(cancel: &AtomicBool) -> Result<(), BenchmarkError> {
 
 fn new_modulator(
     order: u8,
+    ntf: ModulatorNtf,
     bit_rate: audigma_dsp::rates::DsdBitRateHz,
     seed: u64,
 ) -> Result<Modulator, BenchmarkError> {
     let mut m = Modulator::new(
         order,
+        ntf,
         bit_rate,
         DitherType::Tpdf,
         OverloadPolicy::MuteRecover,
@@ -338,8 +340,18 @@ pub fn run(
     let mut dsd_bytes_r = vec![0u8; tile_expanded / 8];
     let mut seq_mods = match dsd_rate {
         Some(bit_rate) => Some((
-            new_modulator(plan.dsp_config.modulator_order, bit_rate, 12345)?,
-            new_modulator(plan.dsp_config.modulator_order, bit_rate, 12346)?,
+            new_modulator(
+                plan.dsp_config.modulator_order,
+                plan.dsp_config.modulator_ntf,
+                bit_rate,
+                12345,
+            )?,
+            new_modulator(
+                plan.dsp_config.modulator_order,
+                plan.dsp_config.modulator_ntf,
+                bit_rate,
+                12346,
+            )?,
         )),
         None => None,
     };
@@ -382,6 +394,7 @@ pub fn run(
     let target_dsd = dsd_rate.map(|bit_rate| TargetDsdConfig {
         bit_rate,
         modulator_order: plan.dsp_config.modulator_order,
+        modulator_ntf: plan.dsp_config.modulator_ntf,
         dither: DitherType::Tpdf,
         overload_policy: OverloadPolicy::MuteRecover,
         seed_base: 12345,

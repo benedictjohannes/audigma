@@ -15,13 +15,6 @@ INDEX_PATH = REPORT_DIR / "README.md"
 # Add tools/design to sys.path so design scripts and dsm_analysis import directly.
 sys.path.insert(0, str(REPO_ROOT / "tools" / "design"))
 
-# Quality requirements (Design.md §8.6). Levels are in-band (20 Hz-20 kHz) dBFS re a full-scale sine.
-# Anchor 1, audibility: 0 dBFS at ~120 dB SPL peak, so noise and every discrete product stay below ~0 dB SPL.
-AUDIBILITY_DR_A_DB = 120.0
-AUDIBILITY_SPUR_DBFS = -120.0
-# Anchor 2, 24-bit transparency: a TPDF-dithered 24-bit quantizer's in-band noise is -141.5 dBFS.
-TRANSPARENCY_NOISE_DBFS = -141.0
-TRANSPARENCY_SPUR_DBFS = -141.0
 # Linear stages (cascade with apodization off, resampler): passband deviation 0-20 kHz.
 FILTER_PASSBAND_DEV_DB = 0.01
 # Production chain, tones above 10 kHz: the modulator's STF lifts 19-20 kHz at DSD64 (+0.011 / +0.015 dB, 5th / 7th).

@@ -4,7 +4,9 @@
 use audigma_dsp::DcBlocker;
 use audigma_dsp::fir::{HalfBandCascade, HalfBandDecimationCascade, PolyphaseResampler};
 use audigma_dsp::modulator::Modulator;
-use audigma_dsp::{Apodization, DitherType, DsdBitRateHz, FilterPhase, OverloadPolicy, PcmRateHz};
+use audigma_dsp::{
+    Apodization, DitherType, DsdBitRateHz, FilterPhase, ModulatorNtf, OverloadPolicy, PcmRateHz,
+};
 use audigma_engine::decimator::ChannelDecimatorPool;
 use audigma_engine::lifecycle::FrameGain;
 use audigma_engine::pipeline_topology::PipelineTopology;
@@ -76,6 +78,7 @@ impl SerialChannel {
         let modulator = target.map(|target| {
             let mut modulator = Modulator::new(
                 target.modulator_order,
+                target.modulator_ntf,
                 target.bit_rate,
                 target.dither,
                 target.overload_policy,
@@ -359,6 +362,7 @@ fn dsd64_to_dsd512_workers_match_serial_pipeline_bit_exactly() {
                 let target = TargetDsdConfig {
                     bit_rate: rate,
                     modulator_order: order,
+                    modulator_ntf: ModulatorNtf::Reference,
                     dither: DitherType::Tpdf,
                     overload_policy: OverloadPolicy::MuteRecover,
                     seed_base: SEED,
@@ -616,6 +620,7 @@ fn output_only_errors_keep_pcm_view_and_clear_all_channel_errors() {
         Some(TargetDsdConfig {
             bit_rate: DsdBitRateHz::DSD512,
             modulator_order: 5,
+            modulator_ntf: ModulatorNtf::Reference,
             dither: DitherType::Tpdf,
             overload_policy: OverloadPolicy::Error,
             seed_base: SEED,
@@ -663,6 +668,7 @@ fn modulation_errors_still_account_for_consumed_input_residue() {
         Some(TargetDsdConfig {
             bit_rate: DsdBitRateHz::DSD512,
             modulator_order: 5,
+            modulator_ntf: ModulatorNtf::Reference,
             dither: DitherType::Tpdf,
             overload_policy: OverloadPolicy::Error,
             seed_base: SEED,
