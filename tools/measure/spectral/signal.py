@@ -33,6 +33,7 @@ from .common import (
     CHAIN_FLATNESS_DB,
     DIRECT_RATES,
     N_SAMPLES,
+    NTF_PRESET,
     ORDERS,
     TIER_EXCEPTIONS,
     TMP_DIR,
@@ -48,16 +49,21 @@ DC_DBFS = [-40.0, -80.0]
 # The DC blocker must leave at most this fraction of a DC offset (method check for O7; the blocker is settled for 30 time
 # constants, -261 dB, so anything left is the record's own low-frequency noise).
 DC_REMOVED_DB = 60.0
-# Measured tone level must match the requested one, within a tolerance plus the reading error the noise inside the tone
-# lobe allows (3 sigma, amplitude). Tones up to LEVEL_CHECK_MAX_HZ: LEVEL_TOL_DB (method check: gain staging, cascade
-# DC gain, DC blocker). Above it: the chain flatness requirement CHAIN_FLATNESS_DB of the rate's tier (the modulator's
-# signal transfer function lifts 19-20 kHz by up to +0.015 dB at DSD64).
+# Measured tone level must match the requested one, within a tolerance plus the reading error the tone bin allows: 3 sigma
+# of the noise inside the tone lobe, plus a coherent in-bin component up to TRANSPARENCY_SPUR_DBFS (one the quality gate
+# accepts; the lobe noise estimate cannot see it). Tones up to LEVEL_CHECK_MAX_HZ: LEVEL_TOL_DB (method check: gain
+# staging, cascade DC gain, DC blocker). Above it: the chain flatness requirement CHAIN_FLATNESS_DB of the rate's tier
+# (the modulator's signal transfer function lifts 19-20 kHz by up to +0.015 dB at DSD64).
 LEVEL_TOL_DB = 0.01
 LEVEL_CHECK_MAX_HZ = 10_000.0
 
 
-def _level_tolerance_db(lobe_snr_db, tol_db=LEVEL_TOL_DB):
-    return tol_db + 20 * np.log10(1 + 3 * 10 ** (-lobe_snr_db / 20))
+def _level_tolerance_db(lobe_snr_db, level_dbfs, tol_db=LEVEL_TOL_DB):
+    noise = 3 * 10 ** (-lobe_snr_db / 20)
+    coherent = 10 ** ((TRANSPARENCY_SPUR_DBFS - level_dbfs) / 20)
+    return tol_db + 20 * np.log10(1 + noise + coherent)
+
+
 # Two-tone records are longer so the SMPTE 60 Hz sidebands are resolved at every rate (bin ~2.7-2.9 Hz).
 RATE_MULT = {"dsd64": 1, "dsd128": 2, "dsd256": 4, "dsd512": 8}
 
@@ -91,10 +97,10 @@ def _tones_arg(tones):
     return ",".join(f"{f:g}:{db:.6f}" for f, db in tones) or "none"
 
 
-def _run_one(harness_bin, order, rate_str, sid, tones, margin, dither, long, dc_blocker):
+def _run_one(harness_bin, order, rate_str, sid, tones, margin, dither, long, dc_blocker, ntf=NTF_PRESET):
     base = rate_str.split("_")[0]
     n = N_SAMPLES * (RATE_MULT[base] if long else 1)
-    stem = f"sig_{rate_str}_ord{order}_{sid}_{dither}_m{margin:g}"
+    stem = f"sig_{ntf}_{rate_str}_ord{order}_{sid}_{dither}_m{margin:g}"
     meta, bin_out = run_harness(
         harness_bin,
         stem,
@@ -102,6 +108,7 @@ def _run_one(harness_bin, order, rate_str, sid, tones, margin, dither, long, dc_
          "--tones", _tones_arg(tones), "--margin-db", f"{margin:g}", "--dither", dither,
          "--dc-blocker", "on" if dc_blocker else "off"],
         with_bin=True,
+        ntf=ntf,
     )
     bits = np.unpackbits(np.fromfile(bin_out, dtype=np.uint8))[:n]
     bin_out.unlink()
@@ -110,8 +117,8 @@ def _run_one(harness_bin, order, rate_str, sid, tones, margin, dither, long, dc_
     expected = [t["level_dbfs"] for t in meta["tones"] if t["f_hz"] > 0]
     tone_hz = [t["f_hz"] for t in meta["tones"] if t["f_hz"] > 0]
     flat_tol = CHAIN_FLATNESS_DB[quality_tier(rate_str)]
-    tols = [_level_tolerance_db(x, LEVEL_TOL_DB if f <= LEVEL_CHECK_MAX_HZ else flat_tol)
-            for f, x in zip(tone_hz, m["tone_lobe_snr_db"])]
+    tols = [_level_tolerance_db(x, lv, LEVEL_TOL_DB if f <= LEVEL_CHECK_MAX_HZ else flat_tol)
+            for f, x, lv in zip(tone_hz, m["tone_lobe_snr_db"], expected)]
     devs = [a - b for a, b in zip(m["tone_levels_db"], expected)]
     return {
         "order": order, "rate": rate_str, "id": sid, "dither": dither, "margin": margin, "samples": n,
@@ -136,15 +143,11 @@ def run(harness_bin, oracle_results):
         rows = list(ex.map(lambda j: _run_one(harness_bin, *j), jobs))
     res = {(r["order"], r["rate"], r["id"], r["dither"], r["margin"]): r for r in rows}
 
-    # Analysis floor (Session 1 rule): the absolute in-band level the method resolves for each NTF, from the
-    # synthetic record at -6 dB modulator level and N = 2^20 (longer records resolve at least as far).
     floors = {}
     for order in ORDERS:
         for rate_str, f_bit, _ in DIRECT_RATES:
-            k = round(1000.0 * N_SAMPLES / f_bit)
-            snr = analysis_floor_snr_db(oracle_results[order][rate_str]["synth"], f_bit, N_SAMPLES, k, -6.0)
             gain = res[(order, rate_str, "silence", "tpdf", PRODUCTION_MARGIN_DB)]["gain_db"]
-            floors[(order, rate_str)] = 20 * np.log10(10 ** (-6.0 / 20)) - snr - gain
+            floors[(order, rate_str)] = analysis_floor_dbfs(oracle_results[order][rate_str]["synth"], f_bit, gain)
     prom_med, prom_max = spur_prominence_noise_db(N_SAMPLES)
     for order in ORDERS:
         for rate_str, _, _ in DIRECT_RATES:
@@ -175,6 +178,50 @@ def _fmt_ratio(signal_db, noise_db, floor):
 
 def _fmt_opt(x):
     return "—" if x is None else f"{x:.1f}"
+
+
+def analysis_floor_dbfs(synth, f_bit, gain_db):
+    """Analysis floor (Session 1 rule): the absolute in-band level (PCM dBFS) the method resolves for this NTF, from the
+    synthetic record at -6 dB modulator level and N = 2^20 (longer records resolve at least as far)."""
+    k = round(1000.0 * N_SAMPLES / f_bit)
+    return -6.0 - analysis_floor_snr_db(synth, f_bit, N_SAMPLES, k, -6.0) - gain_db
+
+
+# Anchors (Design.md §8.6) each quality tier must meet.
+TIER_ANCHORS = {"A": ("audibility",), "B": ("audibility", "transparency")}
+
+
+def quality_metrics(recs, dr_rec, floor):
+    """Worst levels over production records `recs` (DR (A) from `dr_rec`, the -60 dBFS tone); levels within
+    FLOOR_MARGIN_DB of the analysis floor count as that bound."""
+    def bounded(x):
+        return max(x, floor + FLOOR_MARGIN_DB)
+
+    dr = -dr_rec["thdn_a_db"]
+    return {
+        "dr": dr,
+        "dr_bounded": min(dr, -(floor + FLOOR_MARGIN_DB)),
+        "spur": max(r["spur_db"] for r in recs),
+        "noise": max(bounded(r["noise_db"]) for r in recs),
+        "dist": max(bounded(x) for r in recs for x in (r.get("harm_db"), r.get("imd_level_db")) if x is not None),
+        "hf": [abs(d) for r in recs for f, d in zip(r["tone_hz"], r["level_dev_db"]) if f > LEVEL_CHECK_MAX_HZ],
+    }
+
+
+def anchor_misses(q, anchors):
+    """The requirements of `anchors` ("audibility", "transparency") that `quality_metrics` result `q` misses."""
+    misses = []
+    if "audibility" in anchors and q["dr_bounded"] < AUDIBILITY_DR_A_DB:
+        misses.append(f"DR (A) {q['dr_bounded']:.1f} dB < {AUDIBILITY_DR_A_DB:.0f}")
+    spur_limit = TRANSPARENCY_SPUR_DBFS if "transparency" in anchors else AUDIBILITY_SPUR_DBFS
+    if anchors and q["spur"] > spur_limit:
+        misses.append(f"spur {q['spur']:.1f} dBFS > {spur_limit:.0f}")
+    if "transparency" in anchors:
+        if q["noise"] > TRANSPARENCY_NOISE_DBFS:
+            misses.append(f"noise {q['noise']:.1f} dBFS > {TRANSPARENCY_NOISE_DBFS:.0f}")
+        if q["dist"] > TRANSPARENCY_NOISE_DBFS:
+            misses.append(f"distortion {q['dist']:.1f} dBFS > {TRANSPARENCY_NOISE_DBFS:.0f}")
+    return misses
 
 
 def _family(rate_str):
@@ -220,8 +267,9 @@ median of {SPUR_LOCAL_BINS} noise bins x 9). White Gaussian noise of the same le
 
 Records: N = 2^20 bits (2^20 x 2/4/8 at DSD128/256/512 for the two-tone tests, so the bin width stays ~2.7-2.9 Hz).
 Invariant checks: no overload at any stimulus (including 0 dBFS at `M = 0`, i.e. a sine peak exactly at `L`), and every
-measured tone level (tones up to {LEVEL_CHECK_MAX_HZ / 1e3:g} kHz) within {LEVEL_TOL_DB} dB of the requested PCM level (plus 3 sigma of the
-noise inside the tone lobe at the lowest levels; worst error over the checked records:
+measured tone level (tones up to {LEVEL_CHECK_MAX_HZ / 1e3:g} kHz) within {LEVEL_TOL_DB} dB of the requested PCM level (plus the
+reading error the tone bin allows: 3 sigma of the noise inside the tone lobe, and a coherent in-bin component up to
+{TRANSPARENCY_SPUR_DBFS:.0f} dBFS, the transparency spur limit; both matter only at the lowest levels; worst error over the checked records:
 {max(abs(d) for r in rows.values() for f, d in zip(r['tone_hz'], r['level_dev_db']) if f <= LEVEL_CHECK_MAX_HZ):.4f} dB).
 Tones above {LEVEL_CHECK_MAX_HZ / 1e3:g} kHz (CCIF 19/20 kHz) are held to the chain flatness requirement instead (§8.6).
 """
@@ -229,10 +277,6 @@ Tones above {LEVEL_CHECK_MAX_HZ / 1e3:g} kHz (CCIF 19/20 kHz) are held to the ch
     def production(order, rate):
         """The production records (dither on, DC blocker on) of one rate and order."""
         return [r for r in rows.values() if r["order"] == order and r["rate"] == rate and r["dither"] == "tpdf" and r["dc_blocker"]]
-
-    def bounded(x, fl):
-        """A level as an upper bound: values within FLOOR_MARGIN_DB of the analysis floor count as the bound."""
-        return max(x, fl + FLOOR_MARGIN_DB)
 
     text += f"""
 ### Quality requirements (`Design.md` §8.6)
@@ -252,24 +296,8 @@ level sweep, silence, DC, SMPTE, CCIF); levels within {FLOOR_MARGIN_DB:g} dB of 
     for order in ORDERS:
         for rate, _, _ in DIRECT_RATES:
             tier, fl = quality_tier(rate), floors[(order, rate)]
-            recs = production(order, rate)
-            dr = -get(order, rate, "1k_-60")["thdn_a_db"]
-            dr_bounded = min(dr, -(fl + FLOOR_MARGIN_DB))
-            spur = max(r["spur_db"] for r in recs)
-            noise = max(bounded(r["noise_db"], fl) for r in recs)
-            dist = max(bounded(x, fl) for r in recs for x in (r.get("harm_db"), r.get("imd_level_db")) if x is not None)
-            hf = [abs(d) for r in recs for f, d in zip(r["tone_hz"], r["level_dev_db"]) if f > LEVEL_CHECK_MAX_HZ]
-            misses = []
-            if dr_bounded < AUDIBILITY_DR_A_DB:
-                misses.append(f"DR (A) {dr_bounded:.1f} dB < {AUDIBILITY_DR_A_DB:.0f}")
-            spur_limit = AUDIBILITY_SPUR_DBFS if tier == "A" else TRANSPARENCY_SPUR_DBFS
-            if spur > spur_limit:
-                misses.append(f"spur {spur:.1f} dBFS > {spur_limit:.0f}")
-            if tier == "B":
-                if noise > TRANSPARENCY_NOISE_DBFS:
-                    misses.append(f"noise {noise:.1f} dBFS > {TRANSPARENCY_NOISE_DBFS:.0f}")
-                if dist > TRANSPARENCY_NOISE_DBFS:
-                    misses.append(f"distortion {dist:.1f} dBFS > {TRANSPARENCY_NOISE_DBFS:.0f}")
+            q = quality_metrics(production(order, rate), get(order, rate, "1k_-60"), fl)
+            misses = anchor_misses(q, TIER_ANCHORS[tier])
             exception = TIER_EXCEPTIONS.get((order, rate))
             if not misses:
                 verdict = "**PASS**"
@@ -281,8 +309,8 @@ level sweep, silence, DC, SMPTE, CCIF); levels within {FLOOR_MARGIN_DB:g} dB of 
             if exception and not (misses and verdict.startswith("**EXCEPTION")):
                 failures.append(f"Signal: exception {(order, rate)} no longer needed or does not apply; update TIER_EXCEPTIONS")
             text += (
-                f"| {order} | `{rate.upper()}` | {tier} | {_fmt_ratio(0.0, -dr, fl)} | {spur:.1f} | {_fmt_level(noise, fl)} | "
-                f"{_fmt_level(dist, fl)} | {max(hf):.4f} | {verdict} |\n"
+                f"| {order} | `{rate.upper()}` | {tier} | {_fmt_ratio(0.0, -q['dr'], fl)} | {q['spur']:.1f} | {_fmt_level(q['noise'], fl)} | "
+                f"{_fmt_level(q['dist'], fl)} | {max(q['hf']):.4f} | {verdict} |\n"
             )
 
     text += """

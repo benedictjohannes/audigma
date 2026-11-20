@@ -387,9 +387,15 @@ def synthesize_crfb(f_bit_hz, order=5, H_inf=1.40, name="DSD", sweep_msa=False):
         res_dict["g3"] = float(g[2])
     if sweep_msa:
         res_dict["stable_msa_dbfs"] = measure_msa_dbfs(res_dict)
+    res_dict["measured_snr_db"] = oracle_snr_db(res_dict)
 
-    # In-band SNR with a coherent -6 dBFS tone and small TPDF dither (Design.md §4.3),
-    # analysed with the shared windowed method (a rectangular window is invalid here).
+    return res_dict
+
+
+def oracle_snr_db(res):
+    """In-band SNR with a coherent -6 dBFS tone and small TPDF dither (Design.md §4.3),
+    analysed with the shared windowed method (a rectangular window is invalid here)."""
+    order, f_bit_hz = res["order"], res["f_bit_hz"]
     N_fft = 262144
     N_warm = 65536 if order == 5 else 131072
     k_bin = int(np.round(1000.0 * N_fft / f_bit_hz))
@@ -397,11 +403,9 @@ def synthesize_crfb(f_bit_hz, order=5, H_inf=1.40, name="DSD", sweep_msa=False):
     tot_N = N_warm + N_fft
     u_test = amp_test * np.sin(2 * np.pi * k_bin * np.arange(tot_N) / N_fft)
     dither = np.random.default_rng(12345).triangular(-0.005, 0.0, 0.005, size=tot_N)
-    bits = simulate_crfb(res_dict, u_test.tolist(), dither.tolist())[N_warm:]
+    bits = simulate_crfb(res, u_test.tolist(), dither.tolist())[N_warm:]
     v_steady = np.where(bits == 1, 1.0, -1.0)
-    res_dict["measured_snr_db"] = analyze_record(v_steady, f_bit_hz, k_bin)["snr_db"]
-
-    return res_dict
+    return analyze_record(v_steady, f_bit_hz, k_bin)["snr_db"]
 
 
 COEFFICIENT_KEYS = ("g1", "g2", "g3", "a", "gamma", "b1")
@@ -613,6 +617,17 @@ def load_designs(path=DESIGNS_PATH):
     if data.get("schema") != DESIGNS_SCHEMA:
         raise ValueError(f"{path}: schema {data.get('schema')}, expected {DESIGNS_SCHEMA}; rerun design_crfb.py")
     return data["designs"]
+
+
+def preset_design(designs, order, rate, preset):
+    """The `synthesize_crfb`-shaped design (plus `max_stable_input_dbfs`) pinned for one preset."""
+    cell = designs[str(order)][rate]
+    pick = cell["presets"][preset]
+    return {
+        "name": rate, "order": order, "f_bit_hz": cell["f_bit_hz"], "osr": cell["osr"], "H_inf": pick["H_inf"],
+        "c": [1.0] * (order - 1), **pick["coefficients"],
+        "max_stable_input_dbfs": pick["max_stable_input_dbfs"],
+    }
 
 
 def main():

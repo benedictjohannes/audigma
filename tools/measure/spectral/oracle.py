@@ -1,8 +1,8 @@
-"""Design-side reference data: the synthesis oracle and the half-band design compliance."""
+"""Design-side reference data: the pinned CRFB designs (the oracle) and the half-band design compliance."""
 
-from design_crfb import synthesize_crfb
+from design_crfb import load_designs, oracle_snr_db, preset_design
 
-from .common import DIRECT_RATES, ORDERS
+from .common import DIRECT_RATES, NTF_PRESET, ORDERS
 
 try:
     from design_halfband import design_all
@@ -11,18 +11,24 @@ except ImportError:
 
 
 def synthesize_oracle():
-    """Live CRFB synthesis (design_crfb.py) for every order and rate/family case."""
+    """The committed designs (`crfb_designs.json`) of `NTF_PRESET` for every order and rate/family case.
+
+    These are the coefficients the Rust tables were generated from; nothing is re-synthesized, so the oracle cannot
+    drift from the tables with a different numpy/scipy.
+    """
+    designs = load_designs()
     oracle_results = {order: {} for order in ORDERS}
-    print("\n=== Evaluating Live Mathematical Synthesis Oracle (design_crfb.py) ===")
+    print(f"\n=== Loading pinned CRFB designs (crfb_designs.json, preset {NTF_PRESET}) ===")
     for order in ORDERS:
-        for rate_str, f_bit, _ in DIRECT_RATES:
-            print(f"  Synthesizing theoretical Order {order} {rate_str.upper()}...")
-            synth = synthesize_crfb(f_bit, order=order, H_inf=1.40, name=rate_str)
+        for rate_str, _, _ in DIRECT_RATES:
+            print(f"  Order {order} {rate_str.upper()}...")
+            synth = preset_design(designs, order, rate_str.upper(), NTF_PRESET)
             oracle_results[order][rate_str] = {
                 "synth": synth,
-                "theoretical_snr_db": synth["measured_snr_db"],
+                "theoretical_snr_db": oracle_snr_db(synth),
                 "osr": synth["osr"],
-                "h_inf": synth.get("H_inf", 1.40),
+                "h_inf": synth["H_inf"],
+                "limit_dbfs": synth["max_stable_input_dbfs"],
             }
     return oracle_results
 

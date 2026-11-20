@@ -18,6 +18,8 @@ Writes one report per measurement family to docs/measurements/ plus an index (RE
 - signal.md: the production DSD chain (gain L - M, DC blocker, cascade, dithered modulator) with signal-dependent stimuli:
   level sweep, dither on/off, DC blocker on/off, two-tone IMD, ultrasonic noise, 44.1k vs 48k family; the quality tiers
   (Design.md §8.6).
+- presets.md: every `[resampler] modulator_ntf` preset (the other reports use the default): bit-exact against
+  tools/design/crfb_designs.json, stability at its L, production-chain quality against the preset's target anchors.
 Usage:
     uv run tools/measure/measure_spectral.py                       # all spectral families + index
     uv run tools/measure/measure_spectral.py --only resampler      # one family; the index is not updated
@@ -39,6 +41,7 @@ from spectral import (  # noqa: E402
     compliance,
     direct,
     oracle,
+    presets,
     report,
     resampler,
     signal,
@@ -48,7 +51,7 @@ from spectral import (  # noqa: E402
 from spectral.common import TMP_DIR, ensure_harness_binary  # noqa: E402
 from spectral.environment import get_system_environment  # noqa: E402
 
-SPECTRAL_FAMILIES = ["modulator", "cascade", "resampler", "signal"]
+SPECTRAL_FAMILIES = ["modulator", "cascade", "resampler", "signal", "presets"]
 
 
 def main():
@@ -136,6 +139,17 @@ def main():
             f"Production chain: DSD64 DR (A) {dr[5]:.0f} dB (5th) / {dr[7]:.0f} dB (7th); quality tiers (§8.6) "
             f"{'met' if not any('quality requirement' in f for f in failures['signal']) else 'NOT met'}, documented exception "
             f"DSD64 5th order (DR (A)); {len(failures['signal'])} failing check(s)"
+        )
+
+    if "presets" in families or full:
+        pre = presets.run(harness_bin)
+        p_sec = presets.render(pre)
+        report.write_family("presets", [p_sec])
+        failures["presets"] = p_sec.failures
+        shortfalls = presets.shortfall_count(pre)
+        headlines["presets"] = (
+            f"{len(pre)} preset cells: bit-exact against the pinned designs, stable at L; {shortfalls} documented target "
+            f"shortfall(s) (Design.md §8.6); {len(failures['presets'])} failing check(s)"
         )
 
     # Benchmark orchestration moved to tools/benchmark/benchmark.py

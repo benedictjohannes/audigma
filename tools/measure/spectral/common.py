@@ -25,6 +25,10 @@ IMAGE_REJECTION_MIN_DB = 120.0
 # Documented exception: DSD64 (44.1k family) with the 5th-order modulator misses DR (A) >= 120 dB by ~1.6 dB.
 TIER_EXCEPTIONS = {(5, "dsd64"): "DR (A) below the audibility anchor; documented exception (Design.md §8.6)"}
 
+# `[resampler] modulator_ntf` preset every report is measured with (Design.md §4.3); the tier exceptions above are those
+# of this preset (Design.md §8.6).
+NTF_PRESET = "reference"
+
 
 def quality_tier(rate_str):
     """'A' (DSD64, both families: audibility anchor) or 'B' (DSD128 and above: audibility + 24-bit transparency)."""
@@ -79,13 +83,15 @@ def ensure_harness_binary():
     return bin_path
 
 
-def run_harness(harness_bin, stem, args, *, with_bin=False):
+def run_harness(harness_bin, stem, args, *, with_bin=False, ntf=NTF_PRESET):
     """Runs the harness; returns (parsed JSON metadata, path of the bitstream or None).
 
-    Outputs land in TMP_DIR as <stem>.json (and <stem>.bin when with_bin).
+    Outputs land in TMP_DIR as <stem>.json (and <stem>.bin when with_bin). Modulator runs (`--order`) use preset `ntf`.
     """
     json_out = TMP_DIR / f"{stem}.json"
     cmd = [str(harness_bin), *args]
+    if "--order" in args:
+        cmd += ["--ntf", ntf]
     bin_out = None
     if with_bin:
         bin_out = TMP_DIR / f"{stem}.bin"

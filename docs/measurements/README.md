@@ -22,7 +22,7 @@ This index lists the per-family reports and the invariant check. Filter and resa
 | **Baseband OSR Calculation** | `Design.md §4.1` | 44.1k: 70.56, 141.12, 282.24, 564.48 | 48k: 76.80, 153.60, 307.20, 614.40 (f_bit / 40 kHz) | Compliant |
 | **Cascade Image Rejection & Passband (implemented, all settings, all K)** | `Design.md §4.2`, `§8.6` | 145.8 dB worst over all phases, apodizations and K (requirement >= 120 dB, design goal >= 140 dB); passband deviation with `off` 2.0e-06 dB (requirement <= 0.01 dB) | Compliant |
 | **Modulator Stability Envelope** | `Design.md §4.3` | Bounded states across silence, DC (+0.5), multitone, step overload recovery | Compliant |
-| **DSD Silence Byte Invariant** | `Design.md §1.3` | 0x69 idle pattern confirmed (2,278 clamp bytes); 0 rail-lock bytes (0x00/0xFF) across 16,777,216 silence bits | Compliant |
+| **DSD Silence Byte Invariant** | `Design.md §1.3` | 0x69 idle pattern confirmed (1,690 clamp bytes); 0 rail-lock bytes (0x00/0xFF) across 16,777,216 silence bits | Compliant |
 | **Hardware FTZ/DAZ** | `Design.md §4.1` | Active (hardware-verified) | Compliant |
 
 ## Conclusion

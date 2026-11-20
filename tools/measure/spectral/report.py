@@ -7,6 +7,7 @@ FAMILIES = {
     "cascade": ("Cascade", "Half-band interpolation cascade as implemented (impulse response, tones) and cascade + modulator end to end."),
     "resampler": ("Resampler", "Polyphase rational SRC (44.1k <-> 48k families) and ASRC (clock-drift tracking)."),
     "signal": ("Signal", "Production DSD chain (gain L - M, DC blocker, cascade, dithered modulator): quality tiers, level sweep, dither, DC, IMD, ultrasonic noise, rate families."),
+    "presets": ("NTF presets", "`[resampler] modulator_ntf` presets: per preset, order and rate, bit-exact against the pinned design, stability at L, quality against the preset's target."),
 }
 
 

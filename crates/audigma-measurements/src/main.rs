@@ -201,10 +201,13 @@ fn parse_rate(rate_str: &str) -> (DsdBitRateHz, u32, usize, u32) {
 /// `Modulator::state_slice` only exposes the state at tile boundaries, so the production tile path cannot show the
 /// peak. A clone of the modulator (same state, same dither stream) runs the per-sample path `step_sample` on the same
 /// input; its states give the true peak, and its bits must equal the production tile bytes (a bit-exactness check
-/// for free, run on every stimulus).
+/// for free, run on every stimulus). After an overload the two paths legitimately differ (the tile path mutes the
+/// whole byte to the idle pattern, the per-sample path only the overloading bit), so the comparison stops there; the
+/// caller reports the overload count.
 struct PeakTracker {
     shadow: Modulator,
     peak: Vec<f64>,
+    compare: bool,
 }
 
 impl PeakTracker {
@@ -213,12 +216,15 @@ impl PeakTracker {
         Self {
             shadow: modulator.clone(),
             peak: vec![0.0; modulator.state_slice().len()],
+            compare: true,
         }
     }
 
     /// Runs `input` through the production tile path (`modulator`) and the shadow per-sample path.
     fn process(&mut self, modulator: &mut Modulator, input: &[f64], out_bytes: &mut [u8]) {
+        let overloads_before = modulator.overload_count();
         modulator.process_tile_bytes(input, out_bytes).unwrap();
+        self.compare &= modulator.overload_count() == overloads_before;
         for (chunk, bytes) in input.chunks(8).zip(out_bytes.iter()) {
             let mut byte = 0u8;
             for &u in chunk {
@@ -227,10 +233,12 @@ impl PeakTracker {
                     *p = p.max(x.abs());
                 }
             }
-            assert_eq!(
-                byte, *bytes,
-                "shadow per-sample path differs from the production tile path"
-            );
+            if self.compare {
+                assert_eq!(
+                    byte, *bytes,
+                    "shadow per-sample path differs from the production tile path"
+                );
+            }
         }
     }
 
