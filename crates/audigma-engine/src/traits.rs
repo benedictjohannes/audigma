@@ -152,7 +152,9 @@ pub trait AudioInput: Send {
         None
     }
 
-    /// Checks if a dynamic input sample rate change has been negotiated.
+    /// Returns the pipeline input rate once the negotiated input format differs from the one
+    /// last acknowledged through [`Self::set_active_rate`]. The rate may be unchanged: a new
+    /// DSD bit rate or a PCM/DSD change at the same rate also requires a rebuild.
     fn check_rate_change(&self) -> Option<audigma_dsp::PcmRateHz> {
         None
     }
@@ -175,7 +177,7 @@ pub trait AudioInput: Send {
     /// Sets the active generation tag for input buffer filtering.
     fn set_generation(&mut self, _gen: u64) {}
 
-    /// Updates the active sample rate acknowledged by the pipeline.
+    /// Acknowledges the current input format; the pipeline has been prepared for `rate`.
     fn set_active_rate(&mut self, _rate: audigma_dsp::PcmRateHz) {}
 
     /// Returns `true` if the input stream supports rewinding for two-pass processing.

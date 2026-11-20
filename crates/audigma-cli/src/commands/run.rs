@@ -975,16 +975,8 @@ fn run_session(
                                     TargetRateSpec::Pcm { rate, .. } => (DaemonOutputFormat::Pcm, rate.get()),
                                 };
 
-                                tracing::info!(
-                                    target: "audigma::clock",
-                                    event = audigma_log::RATE_SWITCH,
-                                    from_hz = current_input_rate.get(),
-                                    to_hz = new_rate.get(),
-                                    generation = generation + 1,
-                                    reopened_output = need_reopen_output,
-                                    target_format = ?output_format,
-                                    "dynamic sample rate switch detected"
-                                );
+                                let from_hz = current_input_rate.get();
+                                let from_dsd_bit_rate_hz = input.info().dsd_bit_rate.map(|r| r.get());
                                 current_input_rate = new_rate;
 
                                 if need_reopen_output {
@@ -1012,6 +1004,19 @@ fn run_session(
                                 control.inc_rate_switch();
                                 input.set_generation(generation);
                                 input.set_active_rate(new_rate);
+
+                                tracing::info!(
+                                    target: "audigma::clock",
+                                    event = audigma_log::RATE_SWITCH,
+                                    from_hz,
+                                    to_hz = new_rate.get(),
+                                    from_dsd_bit_rate_hz,
+                                    to_dsd_bit_rate_hz = input.info().dsd_bit_rate.map(|r| r.get()),
+                                    generation,
+                                    reopened_output = need_reopen_output,
+                                    target_format = ?output_format,
+                                    "dynamic input format switch detected"
+                                );
 
                                 // Update telemetry
                                 control.set_stream_config(new_rate.get(), output_format, output_rate_hz);

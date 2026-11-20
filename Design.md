@@ -114,7 +114,7 @@ Output clock switching is controlled purely by `[target] rate_family`:
    - For PCM targets, `pcm_rate_hz` matches the oversampling tier (e.g. `768000` for 48k matches to `705600` for 44.1k).
    - Avoids cross-family rational SRC, so upsampling uses pure $2^K$ half-band FIR stages (plus low-rate ASRC drift tracking when driving an independent ALSA clock).
 
-3. **Live rate switching (`[input] rate_mode = "dynamic"`):** the virtual sink accepts any rate in `[input] allowed_rates` ([PipeWire.md](docs/backends/PipeWire.md)). When an application starts playback at a different rate, the daemon mutes, drains the filter tails, rebuilds the pipeline for the new rate and resumes, without restarting the process. Audio of the old format never reaches the reconfigured output.
+3. **Live rate switching (`[input] rate_mode = "dynamic"`):** the virtual sink accepts any rate in `[input] allowed_rates` ([PipeWire.md](docs/backends/PipeWire.md)). When an application starts playback in a different input format (another PCM rate, PCM↔DSD, or another DSD bit rate, even one that decimates to the current intermediate rate), the daemon mutes, drains the filter tails, rebuilds the pipeline for the new format and resumes, without restarting the process. Audio of the old format never reaches the reconfigured output.
 
 ### 3.3 Three Supported Live Output Paths
 

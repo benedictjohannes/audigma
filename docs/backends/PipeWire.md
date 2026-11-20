@@ -9,7 +9,7 @@ PipeWire is audigma's live input (the virtual sink applications play into) and o
 - **Clock: the sink is its own driver** (`node.driver = "true"`). A graph cycle is triggered only when the sink's queue drops below the preroll cushion (`[input] buffer_ms`), so the producer is paced by audigma's consumption and follows the output device's clock. The sink is therefore a *demand-driven* input (Design.md §1.5): no ASRC is applied to it, and `drift_correction = "on"` only observes.
 - **Cycle size:** `[input] quantum_frames` (512 or 1024 frames at 44.1/48 kHz, scaled with the rate) sets the graph quantum requested by the sink (`node.latency`).
 - **Rates (`[input] rate_mode = "dynamic"`):** the sink advertises `audio.allowed-rates` from `[input] allowed_rates` (e.g. `[ 44100 48000 88200 96000 176400 192000 352800 384000 ]`) and offers every allowed rate in its format enumeration. When an application starts playback at another rate, PipeWire renegotiates the format and the daemon switches rate without restarting (Design.md §3.2).
-- **DSD input (`[input] allow_dsd = true`):** the sink also offers SPA `audio/dsd`, whose rate is in bytes per second per channel (Design.md §1.1). Native DSD streams have no volume properties.
+- **DSD input (`[input] allow_dsd = true`):** the sink also offers SPA `audio/dsd`, whose rate is in bytes per second per channel (Design.md §1.1). Native DSD streams have no volume properties. A renegotiation to another DSD bit rate, or between PCM and DSD, switches format like a rate change (Design.md §3.2).
 
 ## 2. Volume Synchronisation
 

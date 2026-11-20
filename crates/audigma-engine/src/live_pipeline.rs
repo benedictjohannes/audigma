@@ -1342,13 +1342,12 @@ impl LivePipeline {
         let mut last_hw_mute: Option<bool> = None;
 
         while control.is_active() {
-            // Check for dynamic rate changes
+            // Check for dynamic format changes. The rate may equal the current one: a new DSD
+            // bit rate or a PCM/DSD flip at the same rate still rebuilds the input decoder.
             if pending_rate_switch.is_none() {
                 if let Some(new_rate) = input.check_rate_change() {
-                    if new_rate != self.topology.input_rate {
-                        pending_rate_switch = Some(new_rate);
-                        lifecycle.request_stop();
-                    }
+                    pending_rate_switch = Some(new_rate);
+                    lifecycle.request_stop();
                 }
             }
 

@@ -619,6 +619,14 @@ fn apply_outgoing_volume(
     }
 }
 
+/// Packs a pipeline input rate and DSD bit rate (0 for PCM) into one word, so the PipeWire
+/// thread publishes a negotiated format atomically. Both halves matter: DSD bit rates that
+/// decimate to the same rate (DSD128/256/512 at 352.8 kHz by default) still need a different
+/// decimation cascade, and PCM and DSD can share a rate (PCM 176.4 kHz vs DSD64).
+fn format_word(pipeline_rate: u32, dsd_bit_rate: u32) -> u64 {
+    (u64::from(dsd_bit_rate) << 32) | u64::from(pipeline_rate)
+}
+
 /// PipeWire virtual audio sink node (`audigma_sink`).
 ///
 /// Desktop sound and audio players route into this virtual sink (`media.class = "Audio/Sink"`).
@@ -630,8 +638,10 @@ pub struct PipeWireVirtualSink {
     current_chunk: Option<TaggedChunk>,
     read_offset: usize,
     generation: Arc<AtomicU64>,
-    active_rate: Arc<AtomicU32>,
-    pending_rate: Arc<AtomicU32>,
+    /// Format (`format_word`) the pipeline was last prepared for; owned by the consumer.
+    active_format: u64,
+    /// Latest format negotiated by PipeWire (`format_word`); 0 before any negotiation.
+    negotiated_format: Arc<AtomicU64>,
     is_dsd: Arc<AtomicBool>,
     is_lsb: Arc<AtomicBool>,
     interleave: Arc<AtomicI32>,
@@ -782,8 +792,7 @@ impl PipeWireVirtualSink {
 
         let (mut producer, consumer) = RingBuffer::new(queue_chunks);
         let generation = Arc::new(AtomicU64::new(1));
-        let active_rate = Arc::new(AtomicU32::new(rate_hz));
-        let pending_rate = Arc::new(AtomicU32::new(0));
+        let negotiated_format = Arc::new(AtomicU64::new(0));
         let is_dsd = Arc::new(AtomicBool::new(false));
         let is_lsb = Arc::new(AtomicBool::new(false));
         let interleave = Arc::new(AtomicI32::new(1));
@@ -804,8 +813,7 @@ impl PipeWireVirtualSink {
         let decimation_recorder = Arc::new(audigma_log::DecimationErrorRecorder::new());
 
         let gen_clone = generation.clone();
-        let active_rate_cb = active_rate.clone();
-        let pending_rate_cb = pending_rate.clone();
+        let negotiated_format_cb = negotiated_format.clone();
         let is_dsd_cb = is_dsd.clone();
         let is_lsb_cb = is_lsb.clone();
         let interleave_cb = interleave.clone();
@@ -964,10 +972,10 @@ impl PipeWireVirtualSink {
                                     let stride = parsed.channels.max(1)
                                         * parsed.interleave.unsigned_abs().max(1);
                                     negotiated_stream_rate_and_stride = Some((parsed.rate, stride));
-                                    let cur_active = active_rate_cb.load(Ordering::Relaxed);
-                                    if cur_active != intermediate_rate {
-                                        pending_rate_cb.store(intermediate_rate, Ordering::SeqCst);
-                                    }
+                                    negotiated_format_cb.store(
+                                        format_word(intermediate_rate, bit_rate),
+                                        Ordering::SeqCst,
+                                    );
                                 } else {
                                     active_dsd_rate_cb.store(0, Ordering::SeqCst);
                                     if let Ok(mut p) = rt_producer_cb.try_lock() {
@@ -983,10 +991,8 @@ impl PipeWireVirtualSink {
                                     }
                                     let stride = parsed.channels.max(1) * 4;
                                     negotiated_stream_rate_and_stride = Some((parsed.rate, stride));
-                                    let cur_active = active_rate_cb.load(Ordering::Relaxed);
-                                    if cur_active != parsed.rate {
-                                        pending_rate_cb.store(parsed.rate, Ordering::SeqCst);
-                                    }
+                                    negotiated_format_cb
+                                        .store(format_word(parsed.rate, 0), Ordering::SeqCst);
                                 }
                             } else {
                                 let mut info = AudioInfoRaw::new();
@@ -1011,11 +1017,10 @@ impl PipeWireVirtualSink {
                                         let stride = negotiated_channels.max(1) * 4;
                                         negotiated_stream_rate_and_stride =
                                             Some((negotiated_rate, stride));
-                                        let cur_active = active_rate_cb.load(Ordering::Relaxed);
-                                        if cur_active != negotiated_rate {
-                                            pending_rate_cb
-                                                .store(negotiated_rate, Ordering::SeqCst);
-                                        }
+                                        negotiated_format_cb.store(
+                                            format_word(negotiated_rate, 0),
+                                            Ordering::SeqCst,
+                                        );
                                     }
                                 }
                             }
@@ -1475,8 +1480,8 @@ impl PipeWireVirtualSink {
             current_chunk: None,
             read_offset: 0,
             generation,
-            active_rate,
-            pending_rate,
+            active_format: format_word(rate_hz, 0),
+            negotiated_format,
             is_dsd,
             is_lsb,
             interleave,
@@ -1539,7 +1544,7 @@ impl PipeWireVirtualSink {
                 0.0
             }
         } else {
-            let rate = self.active_rate.load(Ordering::Relaxed).max(1);
+            let rate = (self.active_format as u32).max(1);
             units / rate as f64
         }
     }
@@ -1898,10 +1903,9 @@ impl AudioInput for PipeWireVirtualSink {
     }
 
     fn check_rate_change(&self) -> Option<PcmRateHz> {
-        let pending = self.pending_rate.load(Ordering::SeqCst);
-        let active = self.active_rate.load(Ordering::SeqCst);
-        if pending != 0 && pending != active {
-            PcmRateHz::new(pending)
+        let negotiated = self.negotiated_format.load(Ordering::SeqCst);
+        if negotiated != 0 && negotiated != self.active_format {
+            PcmRateHz::new(negotiated as u32)
         } else {
             None
         }
@@ -1932,8 +1936,14 @@ impl AudioInput for PipeWireVirtualSink {
     }
 
     fn set_active_rate(&mut self, rate: PcmRateHz) {
-        self.active_rate.store(rate.get(), Ordering::SeqCst);
-        self.pending_rate.store(0, Ordering::SeqCst);
+        // Acknowledge exactly what `info` is rebuilt from below. A format negotiated after
+        // the caller's `check_rate_change` then still differs and triggers another switch.
+        let dsd_bit_rate = if self.is_dsd.load(Ordering::SeqCst) {
+            self.active_dsd_bit_rate.load(Ordering::SeqCst)
+        } else {
+            0
+        };
+        self.active_format = format_word(rate.get(), dsd_bit_rate);
         while self.consumer.pop().is_ok() {}
         self.buffered_units.store(0, Ordering::Relaxed);
         self.prerolled = false;
@@ -2618,8 +2628,8 @@ mod input_clock_tests {
                 current_chunk: Some(dsd_chunk(bytes)),
                 read_offset: 0,
                 generation: Arc::new(AtomicU64::new(0)),
-                active_rate: Arc::new(AtomicU32::new(176400)),
-                pending_rate: Arc::new(AtomicU32::new(0)),
+                active_format: format_word(176400, DsdBitRateHz::DSD64.get()),
+                negotiated_format: Arc::new(AtomicU64::new(0)),
                 is_dsd: Arc::new(AtomicBool::new(true)),
                 is_lsb: Arc::new(AtomicBool::new(false)),
                 interleave: Arc::new(AtomicI32::new(1)),
@@ -2712,6 +2722,36 @@ mod input_clock_tests {
             0
         );
         assert!(sink.decimators.is_empty());
+    }
+
+    /// DSD128 and DSD256 both decimate to 352.8 kHz; the second negotiation must still
+    /// signal a switch and rebuild the decoder, or DSD256 plays at half speed.
+    #[test]
+    fn same_intermediate_dsd_renegotiation_rebuilds_decoder() {
+        let (mut sink, _producer) = dsd_sink(0);
+        let negotiate = |sink: &PipeWireVirtualSink, bit_rate: DsdBitRateHz| {
+            sink.active_dsd_bit_rate
+                .store(bit_rate.get(), Ordering::SeqCst);
+            let rate = audigma_dsp::rates::select_dsd_intermediate_rate(bit_rate, None, None);
+            sink.negotiated_format
+                .store(format_word(rate.get(), bit_rate.get()), Ordering::SeqCst);
+        };
+        assert_eq!(sink.check_rate_change(), None);
+
+        for bit_rate in [DsdBitRateHz::DSD128, DsdBitRateHz::DSD256] {
+            negotiate(&sink, bit_rate);
+            assert_eq!(sink.check_rate_change(), Some(PcmRateHz::PCM_352800));
+            AudioInput::set_active_rate(&mut sink, PcmRateHz::PCM_352800);
+            assert_eq!(sink.check_rate_change(), None);
+            assert_eq!(sink.info.dsd_bit_rate, Some(bit_rate));
+        }
+        assert_eq!(sink.dsd_decode_config().unwrap().decimation_stages, 5);
+
+        // PCM at the rate the pipeline already runs at is still a format change.
+        sink.is_dsd.store(false, Ordering::SeqCst);
+        sink.negotiated_format
+            .store(format_word(352_800, 0), Ordering::SeqCst);
+        assert_eq!(sink.check_rate_change(), Some(PcmRateHz::PCM_352800));
     }
 
     #[test]

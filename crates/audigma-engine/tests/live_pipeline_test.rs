@@ -182,7 +182,7 @@ struct RawOnlyDsdInput {
     pos: usize,
     fragment_bytes: usize,
     reads: usize,
-    switch_rate: bool,
+    switch_to: Option<PcmRateHz>,
     control: DaemonControlHandle,
 }
 
@@ -215,14 +215,14 @@ impl AudioInput for RawOnlyDsdInput {
         }
         self.pos += bytes;
         self.reads += 1;
-        if self.pos == self.bytes.len() && !self.switch_rate {
+        if self.pos == self.bytes.len() && self.switch_to.is_none() {
             self.control.stop();
         }
         Ok(bytes)
     }
 
     fn check_rate_change(&self) -> Option<PcmRateHz> {
-        (self.switch_rate && self.reads > 0).then_some(PcmRateHz::PCM_192000)
+        self.switch_to.filter(|_| self.reads > 0)
     }
 
     fn buffer_fill_secs(&self) -> Option<f64> {
@@ -264,7 +264,7 @@ fn raw_only_input(
     control: DaemonControlHandle,
     bytes: usize,
     fragment_bytes: usize,
-    switch_rate: bool,
+    switch_to: Option<PcmRateHz>,
 ) -> RawOnlyDsdInput {
     RawOnlyDsdInput {
         info: AudioStreamInfo::new_dsd(audigma_dsp::DsdBitRateHz::DSD64, 2, Some(bytes as u64 * 8)),
@@ -272,7 +272,7 @@ fn raw_only_input(
         pos: 0,
         fragment_bytes,
         reads: 0,
-        switch_rate,
+        switch_to,
         control,
     }
 }
@@ -289,7 +289,7 @@ fn live_raw_dsd512_conversion_preserves_fragmented_input_without_serial_decode()
         "linear, apodization off",
         0.0,
     );
-    let mut input = raw_only_input(control.clone(), 513, 13, false);
+    let mut input = raw_only_input(control.clone(), 513, 13, None);
     let mut output = TestOutputSink::default();
     assert_eq!(
         pipeline
@@ -316,7 +316,7 @@ fn live_raw_dsd_pcm_downsampling_keeps_decoded_input_and_output_counts() {
         "linear, apodization off",
         0.0,
     );
-    let mut input = raw_only_input(control.clone(), 2049, 31, false);
+    let mut input = raw_only_input(control.clone(), 2049, 31, None);
     let mut output = TestOutputSink::default();
     assert_eq!(
         pipeline
@@ -330,31 +330,35 @@ fn live_raw_dsd_pcm_downsampling_keeps_decoded_input_and_output_counts() {
     assert_eq!(output.bytes.len(), 256 * 2 * 8 + 1024 * 2 * 4);
 }
 
+/// The input decides when its format changed; a switch to the same rate (a new DSD bit rate
+/// decimating to the current rate) must still rebuild the pipeline.
 #[test]
 fn live_raw_dsd_rate_switch_drains_with_pcm_zeros_without_decoded_reads() {
-    let settings =
-        raw_dsd_settings("format = \"dsd\"\nrate_family = \"source\"\ndsd_rate = \"dsd512\"");
-    let pipeline = LivePipeline::prepare(settings, PcmRateHz::PCM_176400).unwrap();
-    let control = DaemonControlHandle::new(
-        176400,
-        DaemonOutputFormat::Dsd,
-        22579200,
-        "linear, apodization off",
-        0.0,
-    );
-    let mut input = raw_only_input(control.clone(), 512, 512, true);
-    let mut output = TestOutputSink::default();
-    assert_eq!(
-        pipeline
-            .run_streaming(&mut input, &mut output, control)
-            .unwrap(),
-        audigma_engine::StreamExitReason::RateChanged {
-            new_rate: PcmRateHz::PCM_192000,
-            channels: 2
-        }
-    );
-    assert_eq!(input.reads, 1);
-    assert!(!output.bytes.is_empty());
+    for new_rate in [PcmRateHz::PCM_192000, PcmRateHz::PCM_176400] {
+        let settings =
+            raw_dsd_settings("format = \"dsd\"\nrate_family = \"source\"\ndsd_rate = \"dsd512\"");
+        let pipeline = LivePipeline::prepare(settings, PcmRateHz::PCM_176400).unwrap();
+        let control = DaemonControlHandle::new(
+            176400,
+            DaemonOutputFormat::Dsd,
+            22579200,
+            "linear, apodization off",
+            0.0,
+        );
+        let mut input = raw_only_input(control.clone(), 512, 512, Some(new_rate));
+        let mut output = TestOutputSink::default();
+        assert_eq!(
+            pipeline
+                .run_streaming(&mut input, &mut output, control)
+                .unwrap(),
+            audigma_engine::StreamExitReason::RateChanged {
+                new_rate,
+                channels: 2
+            }
+        );
+        assert_eq!(input.reads, 1);
+        assert!(!output.bytes.is_empty());
+    }
 }
 
 #[test]
