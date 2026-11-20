@@ -2,7 +2,8 @@
 
 The other reports measure the default preset only. This one checks, per preset, order and rate, what depends on the
 preset: the compiled table equals the pinned design (`crfb_designs.json`, bit-exact direct sine), the production
-modulator holds at the table's `L`, and the production chain meets the preset's target anchors (`Design.md §8.6`).
+modulator holds at the table's `L` with every dither stream of LIMIT_SEEDS (and how it fares PROBE_ABOVE_L_DB above it),
+and the production chain meets the preset's target anchors (`Design.md §8.6`).
 A cell whose design equals an earlier preset's is measured once and reported for both.
 """
 
@@ -29,6 +30,11 @@ from .stability import INPUT_LIMIT_SAMPLES
 # Direct-sine level for the bit-exact check: -6 dBFS like the modulator report, or 1 dB below L where L is lower
 # (fixed_h_inf_1_5 at 7th order), so neither loop overloads.
 DIRECT_AMP_DB = -6.0
+# Dither streams of the input-limit check: the production default (the harness's 12345) and 8 more. Any overload at L
+# fails the run (`[gain] dsd_safety_margin_db = 0` is a supported setting, Design.md §4.4).
+LIMIT_SEEDS = (12345, 1, 2, 3, 4, 5, 6, 7, 8)
+# The same check one guard step above L, reported only: a margin reading (does L leave headroom in this cell?).
+PROBE_ABOVE_L_DB = 0.25
 
 
 def _cells():
@@ -57,10 +63,11 @@ def _direct(harness_bin, order, rate_str, preset, amp_db):
     return meta, bin_out
 
 
-def _limit(harness_bin, order, rate_str, preset):
+def _limit(harness_bin, order, rate_str, preset, seed, margin_db):
     meta, _ = run_harness(
-        harness_bin, f"preset_{preset}_limit_{rate_str}_ord{order}",
-        ["--mode", "input-limit", "--rate", rate_str, "--order", str(order), "--samples", str(INPUT_LIMIT_SAMPLES)],
+        harness_bin, f"preset_{preset}_limit_{rate_str}_ord{order}_seed{seed}_m{margin_db:g}",
+        ["--mode", "input-limit", "--rate", rate_str, "--order", str(order), "--samples", str(INPUT_LIMIT_SAMPLES),
+         "--seed", str(seed), "--margin-db", f"{margin_db:g}"],
         ntf=preset,
     )
     return meta
@@ -80,10 +87,16 @@ def run(harness_bin):
         }
         amps = {(o, r, p): min(DIRECT_AMP_DB, d["max_stable_input_dbfs"] - 1.0) for o, r, p, d, *_ in measured}
         direct_jobs = {key: ex.submit(_direct, harness_bin, *key, amps[key]) for key in amps}
-        limit_jobs = {key: ex.submit(_limit, harness_bin, *key) for key in amps}
+        limit_jobs = {
+            key: {m: [ex.submit(_limit, harness_bin, *key, s, m) for s in LIMIT_SEEDS] for m in (0.0, -PROBE_ABOVE_L_DB)}
+            for key in amps
+        }
         chain = {key: [f.result() for f in fs] for key, fs in chain_jobs.items()}
         direct = {key: f.result() for key, f in direct_jobs.items()}
-        limit = {key: f.result() for key, f in limit_jobs.items()}
+        limit = {
+            key: {"at_l": [f.result() for f in by_m[0.0]], "above": [f.result() for f in by_m[-PROBE_ABOVE_L_DB]]}
+            for key, by_m in limit_jobs.items()
+        }
 
     # The reference loop is pure Python (seconds per record): one process per record.
     designs = {(o, r, p): d for o, r, p, d, *_ in measured}
@@ -134,9 +147,26 @@ def _verdict(r, preset):
         if misses:
             return "**FAIL** (" + "; ".join(misses) + ")", "; ".join(misses)
         return "**PASS**", None
-    if misses:
-        return f"**SHORTFALL** ({'; '.join(misses)}; documented, H_inf 1.40 kept)", None
-    return "**FAIL** (design marks the target missed, the chain meets it)", "design target status disagrees with the chain"
+    # The design misses the target when no point meets it throughout its H_inf window; the 1.40 fallback itself may
+    # still meet it on this record set, so a shortfall cell is reported either way and never fails the run.
+    chain = "; ".join(misses) if misses else "met on this chain, not throughout the design window"
+    return f"**SHORTFALL** ({chain}; documented, H_inf 1.40 kept)", None
+
+
+def _streams(runs):
+    """Overloads per stimulus summed over the dither streams, and the seeds of the streams with any overload."""
+    per_stim = [sum(x) for x in zip(*([st["overloads"] for st in m["stimuli"]] for m in runs))]
+    seeds = [m["seed"] for m in runs if any(st["overloads"] for st in m["stimuli"])]
+    return per_stim, seeds
+
+
+def _probe_cell(runs):
+    """Probe column: streams that overload above L, and at which stimuli."""
+    per_stim, seeds = _streams(runs)
+    if not seeds:
+        return f"0/{len(runs)}"
+    names = [("DC" if st["f_hz"] == 0 else f"{st['f_hz']:g} Hz") for st, n in zip(runs[0]["stimuli"], per_stim) if n]
+    return f"**{len(seeds)}/{len(runs)}** ({', '.join(names)})"
 
 
 def render(results):
@@ -152,34 +182,39 @@ table it selects (harness `--ntf`). Per cell:
 - **Bit-exact:** a direct sine (no dither, {DIRECT_AMP_DB:g} dBFS or 1 dB below `L` where that is lower) equals, bit for bit,
   the Python reference loop with the pinned coefficients of that preset (`crfb_designs.json`).
 - **Overloads at L:** the production modulator (TPDF dither) at exactly the table's `L`, DC and 50 Hz-20 kHz sines, 2^21 bits
-  each (as in the modulator report).
+  each (as in the modulator report), with {len(LIMIT_SEEDS)} dither streams (seeds {', '.join(map(str, LIMIT_SEEDS))}; 12345 is the
+  production default); per stimulus, the overloads summed over the streams. Any overload fails the run.
+- **Above L:** the same check {PROBE_ABOVE_L_DB:g} dB above `L` (one guard step), reported only: the streams that overload
+  there and at which stimuli. Overloads here mean `L` has no measured headroom in that cell.
 - **Quality:** the production chain records of the signal report (dither on, DC blocker on: level sweep incl. 0 dBFS at
   `M = 0`, silence, DC, SMPTE, CCIF), reduced the same way. The verdict is against the preset's target anchors
   (`Design.md §8.6`): `reference` audibility and 24-bit transparency at every rate, `comfortable` audibility; the fixed
   presets have no target. A **SHORTFALL** is a cell the design marks as missing its target (`meets_target` false in
-  `crfb_designs.json`, listed in `Design.md §8.6`); it fails the run if the chain meets the target after all.
+  `crfb_designs.json`: no H_inf meets it throughout its window; listed in `Design.md §8.6`); it keeps H_inf 1.40 and is
+  reported, not failed.
 - A cell whose coefficients equal an earlier preset's is measured once; its H_inf is marked with the preset it shares.
 """
     for preset in NTF_PRESETS:
         text += f"""
 ### `{preset}`
 
-| Order | Rate | H_inf | L (dBFS) | Bit-exact | Overloads at L (DC, 50 Hz, 1k, 5k, 10k, 15k, 20k) | Chain overloads | DR (A) (dB) | Worst spur (dBFS) | Max noise (dBFS) | Max harmonic / IMD level (dBFS) | Verdict |
-|---:|---|---:|---:|:---:|---|---:|---:|---:|---:|---:|---|
+| Order | Rate | H_inf | L (dBFS) | Bit-exact | Overloads at L (DC, 50 Hz, 1k, 5k, 10k, 15k, 20k) | Streams overloading at L + {PROBE_ABOVE_L_DB:g} | Chain overloads | DR (A) (dB) | Worst spur (dBFS) | Max noise (dBFS) | Max harmonic / IMD level (dBFS) | Verdict |
+|---:|---|---:|---:|:---:|---|---|---:|---:|---:|---:|---:|---|
 """
         for order in ORDERS:
             for rate_str, _, _ in DIRECT_RATES:
                 r = results[(order, rate_str, preset)]
                 d, q, fl = r["design"], r["quality"], r["floor"]
                 tag = f"{order} {rate_str} {preset}"
-                lim = [st["overloads"] for st in r["limit"]["stimuli"]]
+                lim, lim_seeds = _streams(r["limit"]["at_l"])
                 chain_ovl = sum(x["overloads"] for x in r["records"])
                 if r["mismatches"] or r["direct_overloads"]:
                     failures.append(f"Presets: {tag} differs from its pinned design ({r['mismatches']} bits)")
-                if abs(r["limit"]["limit_dbfs"] - d["max_stable_input_dbfs"]) > 1e-9:
-                    failures.append(f"Presets: {tag} compiled L {r['limit']['limit_dbfs']} != design {d['max_stable_input_dbfs']}")
-                if sum(lim):
-                    failures.append(f"Presets: {tag} overloads at L")
+                at_l0 = r["limit"]["at_l"][0]
+                if abs(at_l0["limit_dbfs"] - d["max_stable_input_dbfs"]) > 1e-9:
+                    failures.append(f"Presets: {tag} compiled L {at_l0['limit_dbfs']} != design {d['max_stable_input_dbfs']}")
+                if lim_seeds:
+                    failures.append(f"Presets: {tag} overloads at L (dither seeds {', '.join(map(str, lim_seeds))})")
                 if chain_ovl:
                     failures.append(f"Presets: {tag} chain overloads")
                 for x in r["records"]:
@@ -193,7 +228,8 @@ table it selects (harness `--ntf`). Per cell:
                 bitexact = "yes" if r["mismatches"] == 0 else f"no ({r['mismatches']} bits)"
                 text += (
                     f"| {order} | `{rate_str.upper()}` | {h_inf} | {d['max_stable_input_dbfs']:.2f} | {bitexact} | "
-                    f"{', '.join(map(str, lim))} | {chain_ovl} | {_fmt_ratio(0.0, -q['dr'], fl)} | {q['spur']:.1f} | "
+                    f"{', '.join(map(str, lim))} | {_probe_cell(r['limit']['above'])} | {chain_ovl} | "
+                    f"{_fmt_ratio(0.0, -q['dr'], fl)} | {q['spur']:.1f} | "
                     f"{_fmt_level(q['noise'], fl)} | {_fmt_level(q['dist'], fl)} | {verdict} |\n"
                 )
     text += f"""

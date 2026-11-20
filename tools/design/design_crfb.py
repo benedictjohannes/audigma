@@ -55,7 +55,7 @@ from dsm_analysis import (
 
 B_AUDIO_HZ = 20000.0
 DESIGNS_PATH = Path(__file__).resolve().parent / "crfb_designs.json"
-DESIGNS_SCHEMA = 2
+DESIGNS_SCHEMA = 3
 
 ORDERS = (5, 7)
 RATES = (
@@ -410,19 +410,37 @@ def oracle_snr_db(res):
 
 COEFFICIENT_KEYS = ("g1", "g2", "g3", "a", "gamma", "b1")
 
-# Robust L. A single MSA climb is one trajectory per dither sequence, so neighbouring H_inf differ by +-0.25-0.5 dB and
-# the best of many points is biased upwards (one H_inf passed its climb, then overloaded at L with the gate's dither).
-# Each point therefore takes the lowest climb result within +-L_WINDOW_STEPS grid steps, then must hold at that level
-# for every MSA stimulus with each of L_CONFIRM_SEEDS and in every quality-gate record; it is lowered in MSA_STEP_DB
-# steps until it does.
-L_WINDOW_STEPS = 2
+# Robust picks. A single MSA climb is one trajectory per dither sequence, so neighbouring H_inf differ by +-0.25-0.5 dB
+# and the best of many points is biased upwards (one H_inf passed its climb, then overloaded at L with the gate's
+# dither). The anchor gate has the same problem near the floor: one dither sequence per record, and DR (A) jumps by up
+# to 25 dB between neighbouring H_inf there (a pick at 121.9 dB measured 118.9 dB on the production chain).
+# - L: each point takes the lowest climb result within +-WINDOW_STEPS swept grid steps, then must hold at that level
+#   for every MSA stimulus with each of L_CONFIRM_SEEDS and in every quality-gate record; it is lowered in MSA_STEP_DB
+#   steps until it does.
+# - Anchors: a point meets a preset's anchors only if every swept point within +-WINDOW_STEPS meets them too.
+# - One step each side: +-2 steps gave 0.25-0.5 dB lower picks in about half the cells, yet the production input-limit
+#   check (presets report: 9 dither streams at L, plus a probe one guard step above) passed at L for both windows and
+#   found as many designs without that headroom (4 each), so the wider window's extra margin was not shown to be needed.
+# - Every grid edge whose neighbours would only be on the lower-H_inf side gets +-WINDOW_STEPS points beyond it, so both
+#   windows apply there too: the baseline (1.41, never picked by a targeted preset) and each fixed preset off the
+#   targeted grid (1.49, 1.51). The climb falls as H_inf rises, so the lower side never sets the minimum: a one-sided
+#   window at the top edge is inert (1.40's window equalled its own climb in all 16 cells of run 4, and 1.50's own climb
+#   overloaded in production at 7th DSD128_48). The floor (1.10) needs nothing: its window extends upwards, the
+#   protective side.
+WINDOW_STEPS = 1
 L_CONFIRM_SEEDS = tuple(range(3, 11))
 
 
 def h_inf_grid():
-    """Swept H_inf values: the baseline down to the floor in H_INF_STEP steps, plus every fixed preset."""
+    """Swept H_inf values: the baseline down to the floor in H_INF_STEP steps, plus the +-WINDOW_STEPS neighbours of the
+    baseline and of every fixed preset."""
     steps = round((H_INF_BASELINE - H_INF_FLOOR) / H_INF_STEP)
-    grid = {round(H_INF_BASELINE - i * H_INF_STEP, 2) for i in range(steps + 1)} | set(FIXED_H_INF.values())
+    grid = {round(H_INF_BASELINE - i * H_INF_STEP, 2) for i in range(steps + 1)}
+    grid |= {
+        round(h + k * H_INF_STEP, 2)
+        for h in {H_INF_BASELINE, *FIXED_H_INF.values()}
+        for k in range(-WINDOW_STEPS, WINDOW_STEPS + 1)
+    }
     return sorted(grid, reverse=True)
 
 
@@ -435,19 +453,18 @@ def climb_point(order, name, f_bit_hz, h_inf):
         return {"H_inf": h_inf, "error": str(e)}
 
 
-def window_msa_dbfs(points, h_inf):
-    """Lowest climb result within +-L_WINDOW_STEPS of `h_inf` on the targeted grid (None if any of them is invalid).
+def window(points, h_inf):
+    """The swept points within +-WINDOW_STEPS grid steps of `h_inf` (`points`: {H_inf: point}), `h_inf` included."""
+    hs = (round(h_inf + k * H_INF_STEP, 2) for k in range(-WINDOW_STEPS, WINDOW_STEPS + 1))
+    return [points[h] for h in hs if h in points]
 
-    A fixed preset off the grid (H_inf above the baseline) uses its own climb only.
-    """
-    if h_inf > H_INF_BASELINE:
-        hs = [h_inf]
-    else:
-        hs = [round(h_inf + k * H_INF_STEP, 2) for k in range(-L_WINDOW_STEPS, L_WINDOW_STEPS + 1)]
-        hs = [h for h in hs if H_INF_FLOOR <= h <= H_INF_BASELINE]
-    if any("error" in points[h] for h in hs):
+
+def window_msa_dbfs(points, h_inf):
+    """Lowest climb result in the window of `h_inf` (None if any point in it is invalid)."""
+    win = window(points, h_inf)
+    if any("error" in p for p in win):
         return None
-    return min(points[h]["msa_dbfs"] for h in hs)
+    return min(p["msa_dbfs"] for p in win)
 
 
 def _msa_holds(res, level_dbfs):
@@ -467,7 +484,7 @@ def _msa_holds(res, level_dbfs):
 
 
 def settle_point(climb, window_dbfs):
-    """Phase 2 of a sweep point: L from the window value, confirmed (see L_WINDOW_STEPS), and the anchors at that L."""
+    """Phase 2 of a sweep point: L from the window value, confirmed (see WINDOW_STEPS), and the anchors at that L."""
     point = {"H_inf": climb["H_inf"]}
     if "error" in climb:
         return {**point, "error": climb["error"]}
@@ -494,20 +511,26 @@ def settle_point(climb, window_dbfs):
 def select_presets(sweep):
     """The design of every `modulator_ntf` preset from one cell's sweep (points as returned by `settle_point`).
 
-    Targeted presets: among points at or below the baseline H_inf that meet the preset's anchors and keep L at least
-    the baseline's, take the highest L; on that L (the MSA_STEP_DB grid makes plateaus), the highest H_inf, which keeps
-    the most in-band noise shaping for no loss of L. With no such point the baseline is kept (`meets_target` false).
+    Targeted presets: among points at or below the baseline H_inf that meet the preset's anchors throughout their window
+    (see WINDOW_STEPS) and keep L at least the baseline's, take the highest L; on that L (the MSA_STEP_DB grid makes
+    plateaus), the highest H_inf, which keeps the most in-band noise shaping for no loss of L. With no such point the
+    baseline is kept (`meets_target` false).
     """
     by_h = {p["H_inf"]: p for p in sweep}
     baseline = by_h[H_INF_BASELINE]
     if "error" in baseline:
         raise ValueError(f"baseline H_inf {H_INF_BASELINE} is not a valid design: {baseline}")
+
+    def meets(p, anchors):
+        return "error" not in p and all(p[a] for a in anchors)
+
     chosen = {}
     for preset, anchors in TARGET_ANCHORS.items():
         passing = [
             p for p in sweep
-            if p["H_inf"] <= H_INF_BASELINE and "error" not in p
-            and all(p[a] for a in anchors) and p["max_stable_input_dbfs"] >= baseline["max_stable_input_dbfs"]
+            if p["H_inf"] <= H_INF_BASELINE
+            and all(meets(q, anchors) for q in window(by_h, p["H_inf"]))
+            and p["max_stable_input_dbfs"] >= baseline["max_stable_input_dbfs"]
         ]
         if passing:
             best = max(p["max_stable_input_dbfs"] for p in passing)
@@ -539,7 +562,7 @@ def _parameters():
             "dither_peak": MSA_DITHER_PEAK,
             "dither_seeds": MSA_DITHER_SEEDS,
             "guard_db": MSA_GUARD_DB,
-            "window_steps": L_WINDOW_STEPS,
+            "window_steps": WINDOW_STEPS,
             "confirm_seeds": L_CONFIRM_SEEDS,
             "state_bound": MSA_STATE_BOUND,
         },
@@ -583,11 +606,11 @@ def design_all(jobs):
             status = climb.get("error") or f"MSA climb {climb['msa_dbfs']:6.2f}"
             print(f"[1: {done:3d}/{len(tasks)}] order {order} {name:10s} H_inf {h:.2f}: {status}", flush=True)
 
-        def window(key):
+        def window_of(key):
             order, name, f_bit, h = key
             return window_msa_dbfs({hh: climbs[(order, name, f_bit, hh)] for hh in h_inf_grid()}, h)
 
-        settle_tasks = [(key, climbs[key], window(key)) for key in tasks]
+        settle_tasks = [(key, climbs[key], window_of(key)) for key in tasks]
         for done, (key, point) in enumerate(ex.map(_settle_job, settle_tasks), 1):
             points[key] = point
             order, name, _, h = key

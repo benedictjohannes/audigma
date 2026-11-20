@@ -39,6 +39,7 @@ struct HarnessConfig {
     /// `chain` stimulus: (frequency in Hz, 0 = DC; peak level in dBFS). Empty = digital silence.
     tones: Vec<(f64, f64)>,
     /// `chain`: production safety margin `M`; the gain is then `L - M`. `None`: no gain.
+    /// `input-limit`: the stimuli run at `L - M` (default `L`; a negative `M` probes above `L`).
     margin_db: Option<f64>,
     /// Dither PRNG seed.
     seed: u64,
@@ -844,8 +845,9 @@ fn run_multitone(
 /// Stimuli of the input-limit check: DC and sines (Hz), the same set as `design_crfb.MSA_STIMULI_HZ`.
 const INPUT_LIMIT_STIMULI_HZ: [f64; 7] = [0.0, 50.0, 1000.0, 5000.0, 10000.0, 15000.0, 20000.0];
 
-/// Runs the production modulator (tile path, configured dither) at its compiled input limit `L` for DC and
-/// tones of peak amplitude `L`, `config.samples` bits each, from a reset state.
+/// Runs the production modulator (tile path, configured dither) at its compiled input limit `L` minus
+/// `config.margin_db` (default 0) for DC and tones of that peak amplitude, `config.samples` bits each, from a
+/// reset state.
 fn run_input_limit(
     config: &HarnessConfig,
     modulator: &mut Modulator,
@@ -855,7 +857,8 @@ fn run_input_limit(
     const TILE_BITS: usize = 4096;
     let limit = audigma_dsp::max_stable_input_dbfs(config.order, bit_rate, config.ntf)
         .unwrap_or_else(|e| panic!("no input limit: {e}"));
-    let amp = 10f64.powf(limit / 20.0);
+    let level = limit - config.margin_db.unwrap_or(0.0);
+    let amp = 10f64.powf(level / 20.0);
     let mut tile = [0.0f64; TILE_BITS];
     let mut bytes = [0u8; TILE_BITS / 8];
     let mut rows = Vec::new();
@@ -883,9 +886,10 @@ fn run_input_limit(
     }
     if let Some(ref path) = config.out_json {
         let json = format!(
-            r#"{{"mode":"input-limit","rate":"{}","order":{},"limit_dbfs":{limit},"samples":{},"stimuli":[{}]}}"#,
+            r#"{{"mode":"input-limit","rate":"{}","order":{},"limit_dbfs":{limit},"level_dbfs":{level},"seed":{},"samples":{},"stimuli":[{}]}}"#,
             config.rate,
             config.order,
+            config.seed,
             config.samples,
             rows.join(",")
         );
