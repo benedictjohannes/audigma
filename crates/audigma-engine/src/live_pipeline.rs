@@ -1537,10 +1537,21 @@ impl LivePipeline {
                     }
                 }
                 sync_telemetry!(false);
-                let chunk_dur = Duration::from_secs_f64(
-                    idle_tile_frames as f64 / self.topology.intermediate_rate.get() as f64,
-                );
-                std::thread::sleep((chunk_dur / 2).max(Duration::from_millis(1)));
+                // Idle fill must outpace the device: emit a tile per half tile of sleep and
+                // let the blocking write absorb the surplus. No sleep floor: at 352.8 kHz and
+                // above a tile is under 1 ms, and a 1 ms floor emits less than real time.
+                // Skip the sleep entirely while the device is low, so oversleeping cannot
+                // underrun it.
+                let device_low = output
+                    .buffered_us()
+                    .is_some_and(|b| b <= idle_fill_margin_us + output.pull_us());
+                if !device_low {
+                    std::thread::sleep(Duration::from_secs_f64(
+                        idle_tile_frames as f64
+                            / self.topology.intermediate_rate.get() as f64
+                            / 2.0,
+                    ));
+                }
                 continue;
             }
 
